@@ -55,6 +55,7 @@ public:
   bool FastDispatchableAt(u32 address);
   bool IsHostCallAddress(u32 address) const;
   bool ShouldYieldAt(u32 address);
+  bool TryRecoverZeroCallback(PowerPC::PowerPCState& ppc);
 
   void ClearCache() override;
   void Jit(u32 em_address) override {}

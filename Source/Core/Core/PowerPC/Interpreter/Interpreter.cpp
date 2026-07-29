@@ -22,6 +22,7 @@
 #include "Core/PowerPC/MMU.h"
 #include "Core/PowerPC/PPCTables.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/PowerPC/StaticRecomp/StaticRecompCore.h"
 #include "Core/System.h"
 
 namespace
@@ -286,6 +287,14 @@ void Interpreter::Run()
 void Interpreter::unknown_instruction(Interpreter& interpreter, UGeckoInstruction inst)
 {
   ASSERT(Core::IsCPUThread());
+  auto& ppc_state = interpreter.m_ppc_state;
+  if (inst.hex == 0 && g_static_recomp_core &&
+      g_static_recomp_core->TryRecoverZeroCallback(ppc_state))
+  {
+    interpreter.m_end_block = true;
+    return;
+  }
+
   auto& system = interpreter.m_system;
   Core::CPUThreadGuard guard(system);
 
@@ -296,7 +305,6 @@ void Interpreter::unknown_instruction(Interpreter& interpreter, UGeckoInstructio
   Dolphin_Debugger::PrintCallstack(guard, Common::Log::LogType::POWERPC,
                                    Common::Log::LogLevel::LNOTICE);
 
-  const auto& ppc_state = interpreter.m_ppc_state;
   NOTICE_LOG_FMT(
       POWERPC,
       "\nIntCPU: Unknown instruction {:08x} at PC = {:08x}  last_PC = {:08x}  LR = {:08x}\n",

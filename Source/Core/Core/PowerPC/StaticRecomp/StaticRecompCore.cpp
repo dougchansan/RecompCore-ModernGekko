@@ -16,6 +16,7 @@
 #include "Core/Config/MainSettings.h"
 #include "Core/Config/StaticRecompSettings.h"
 #include "Core/Config/ConfigManager.h"
+#include "Core/PowerPC/PowerPC.h"
 #include "Core/PowerPC/StaticRecomp/StaticRecompLockstep.h"
 #include "Core/System.h"
 
@@ -134,6 +135,27 @@ bool StaticRecompCore::ShouldYieldAt(u32 address)
   if (m_module_active && DispatchableAt(address))
     return true;
   return IsHostCallAddress(address);
+}
+
+bool StaticRecompCore::TryRecoverZeroCallback(PowerPC::PowerPCState& ppc)
+{
+  if (!m_module_active || ChunkIndexOf(ppc.pc) >= 0)
+    return false;
+
+  const u32 return_address = LR(ppc) & ~3u;
+  const int return_chunk = ChunkIndexOf(return_address);
+  if (return_chunk < 0)
+    return false;
+
+  ++m_recovered_zero_callbacks;
+  std::fprintf(stderr,
+               "[staticrecomp] recovered zeroed dynamic callback pc=0x%08x lr=0x%08x "
+               "return_chunk=%d ctr=0x%08x r31=0x%08x\n",
+               ppc.pc, return_address, return_chunk, ppc.spr[SPR_CTR], ppc.gpr[31]);
+  std::fflush(stderr);
+  ppc.pc = return_address;
+  ppc.npc = return_address + 4u;
+  return true;
 }
 
 StaticRecompCore::StaticRecompCore(Core::System& system, StaticRecompModuleSource module_source)

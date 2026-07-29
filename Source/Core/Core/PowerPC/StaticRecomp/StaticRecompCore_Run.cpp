@@ -219,29 +219,6 @@ void StaticRecompCore::Run()
         }
         else if (m_fallback_jit)
         {
-          // Some games retain a cleanup callback into a dynamically loaded code
-          // overlay until after its backing RAM has been cleared. Dolphin's JIT
-          // can still have the old block cached, but a fresh fallback compile
-          // sees 0x00000000 and raises an unknown-instruction panic. Recover
-          // only when the zero word was reached as a callback returning into
-          // module-covered code; arbitrary illegal instructions still trap.
-          const u32 return_address = ppc.spr[SPR_LR] & ~3u;
-          const PowerPC::TryReadInstResult fetched =
-              m_system.GetMMU().TryReadInstruction(ppc.pc);
-          const int return_chunk = ChunkIndexOf(return_address);
-          if (fetched.valid && fetched.hex == 0 && return_chunk >= 0)
-          {
-            ++m_recovered_zero_callbacks;
-            std::fprintf(stderr,
-                         "[staticrecomp] recovered zeroed dynamic callback pc=0x%08x "
-                         "physical=0x%08x lr=0x%08x return_chunk=%d ctr=0x%08x r31=0x%08x\n",
-                         ppc.pc, fetched.physical_address, return_address, return_chunk,
-                         ppc.spr[SPR_CTR], ppc.gpr[31]);
-            std::fflush(stderr);
-            ppc.pc = return_address;
-            ppc.npc = return_address + 4u;
-            continue;
-          }
           m_fallback_jit->Run();
         }
         else
