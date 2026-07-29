@@ -139,8 +139,12 @@ void StaticRecompCore::Run()
           m_charged_cycles += effective_charge;
           AdvanceGuestTimebase(effective_charge);
 
-          // Idle loop skipping for configured target loops (e.g. Wii Menu OSIdleThread)
-          if (m_guest.pc == m_idle_pc && m_idle_pc != 0)
+          // Match CachedInterpreter's idle check: skip only after the configured
+          // block branches back to itself. Merely arriving at the idle address
+          // from another block must execute it once so callback-service loops
+          // can observe newly queued work.
+          if (runtime_dispatch_address == m_idle_pc && m_guest.pc == m_idle_pc &&
+              m_idle_pc != 0)
           {
             ++m_idle_hits;
             if (dispatch_trace && (m_idle_hits & (m_idle_hits - 1)) == 0)
