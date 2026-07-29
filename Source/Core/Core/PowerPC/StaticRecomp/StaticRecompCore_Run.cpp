@@ -139,12 +139,15 @@ void StaticRecompCore::Run()
           m_charged_cycles += effective_charge;
           AdvanceGuestTimebase(effective_charge);
 
-          // Match CachedInterpreter's idle check: skip only after the configured
-          // block branches back to itself. Merely arriving at the idle address
-          // from another block must execute it once so callback-service loops
-          // can observe newly queued work.
-          if (runtime_dispatch_address == m_idle_pc && m_guest.pc == m_idle_pc &&
-              m_idle_pc != 0)
+          // Yield only after execution has resumed inside the configured loop
+          // body and branched back to its start. Initial arrival at idle_pc
+          // still runs every callback pump once, while resume points after any
+          // nested callback can skip the completed wait iteration.
+          const bool completed_idle_loop =
+              m_idle_pc != 0 && m_idle_loop_end_pc > m_idle_pc &&
+              runtime_dispatch_address > m_idle_pc &&
+              runtime_dispatch_address < m_idle_loop_end_pc && m_guest.pc == m_idle_pc;
+          if (completed_idle_loop)
           {
             ++m_idle_hits;
             if (dispatch_trace && (m_idle_hits & (m_idle_hits - 1)) == 0)

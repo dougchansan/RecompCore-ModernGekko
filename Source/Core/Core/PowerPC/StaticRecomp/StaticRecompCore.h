@@ -201,6 +201,7 @@ private:
   mutable u32 m_last_chunk_index = 0;
 
   u32 m_idle_pc = 0;
+  u32 m_idle_loop_end_pc = 0;
 };
 
 extern StaticRecompCore* g_static_recomp_core;
