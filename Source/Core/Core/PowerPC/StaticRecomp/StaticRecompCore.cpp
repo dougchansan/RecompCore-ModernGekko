@@ -181,6 +181,11 @@ void StaticRecompCore::Init()
 
   LoadModule();
   m_idle_pc = Config::Get(Config::MAIN_STATICRECOMP_IDLE_PC);
+  if (m_idle_pc != 0)
+  {
+    std::fprintf(stderr, "[staticrecomp] idle pc: 0x%08x\n", m_idle_pc);
+    std::fflush(stderr);
+  }
   m_lockstep_verifier = std::make_unique<StaticRecompLockstep::StaticRecompLockstepVerifier>(*this);
   m_lockstep_verifier->Init();
 
