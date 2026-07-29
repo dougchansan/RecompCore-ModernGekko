@@ -162,6 +162,7 @@ private:
   u64 m_fallback_steps = 0;
   u64 m_native_exceptions = 0;
   u64 m_hook_fallback_instructions = 0;
+  u64 m_recovered_zero_callbacks = 0;
   u64 m_timebase_cycle_remainder = 0;
   u64 m_idle_hits = 0;
   std::unordered_map<u32, u64> m_dispatch_samples;

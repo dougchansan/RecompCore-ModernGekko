@@ -212,6 +212,36 @@ void StaticRecompCore::Run()
         }
         else if (m_fallback_jit)
         {
+          // Some games retain a cleanup callback into a dynamically loaded code
+          // overlay until after its backing RAM has been cleared. Dolphin's JIT
+          // can still have the old block cached, but a fresh fallback compile
+          // sees 0x00000000 and raises an unknown-instruction panic. Recover
+          // only when the zero word was reached as a callback from a verified
+          // native return address; arbitrary illegal instructions still trap.
+          const u32 return_address = ppc.spr[SPR_LR] & ~3u;
+          const u64 pc_offset = static_cast<u64>(ppc.pc) - 0x80000000ull;
+          const bool pc_is_in_mem1 =
+              ppc.pc >= 0x80000000u && pc_offset + sizeof(u32) <= memory.GetRamSizeReal();
+          u32 instruction = ~0u;
+          if (pc_is_in_mem1)
+          {
+            const u8* bytes = memory.GetRAM() + pc_offset;
+            instruction = (static_cast<u32>(bytes[0]) << 24) |
+                          (static_cast<u32>(bytes[1]) << 16) |
+                          (static_cast<u32>(bytes[2]) << 8) | bytes[3];
+          }
+          if (instruction == 0 && DispatchableAt(return_address))
+          {
+            ++m_recovered_zero_callbacks;
+            std::fprintf(stderr,
+                         "[staticrecomp] recovered zeroed dynamic callback pc=0x%08x "
+                         "lr=0x%08x ctr=0x%08x r31=0x%08x\n",
+                         ppc.pc, return_address, ppc.spr[SPR_CTR], ppc.gpr[31]);
+            std::fflush(stderr);
+            ppc.pc = return_address;
+            ppc.npc = return_address + 4u;
+            continue;
+          }
           m_fallback_jit->Run();
         }
         else

@@ -207,10 +207,12 @@ void StaticRecompCore::Shutdown()
   g_static_recomp_core = nullptr;
   std::fprintf(stderr,
                "[staticrecomp] shutdown: native=%llu fallback=%llu native_exc=%llu hook_fb=%llu "
-               "smc_failed=%u verifications=%llu reverify_events=%llu bursts=%llu cycles=%llu\n",
+               "zero_cb=%llu smc_failed=%u verifications=%llu reverify_events=%llu bursts=%llu "
+               "cycles=%llu\n",
                (unsigned long long)m_native_dispatches, (unsigned long long)m_fallback_steps,
                (unsigned long long)m_native_exceptions,
-               (unsigned long long)m_hook_fallback_instructions, m_failed_chunks,
+               (unsigned long long)m_hook_fallback_instructions,
+               (unsigned long long)m_recovered_zero_callbacks, m_failed_chunks,
                (unsigned long long)m_verifications, (unsigned long long)m_reverify_events,
                (unsigned long long)m_bursts, (unsigned long long)m_charged_cycles);
   std::vector<std::pair<u32, u64>> dispatch_samples(m_dispatch_samples.begin(),
@@ -225,11 +227,11 @@ void StaticRecompCore::Shutdown()
   }
   NOTICE_LOG_FMT(POWERPC,
                  "StaticRecomp: shutdown. native_dispatches={} fallback_steps={} "
-                 "native_exceptions={} hook_fallback_instructions={} smc_failed_chunks={} "
-                 "verifications={} reverify_events={}",
+                 "native_exceptions={} hook_fallback_instructions={} recovered_zero_callbacks={} "
+                 "smc_failed_chunks={} verifications={} reverify_events={}",
                  m_native_dispatches, m_fallback_steps, m_native_exceptions,
-                 m_hook_fallback_instructions, m_failed_chunks, m_verifications,
-                 m_reverify_events);
+                 m_hook_fallback_instructions, m_recovered_zero_callbacks, m_failed_chunks,
+                 m_verifications, m_reverify_events);
   m_lockstep_verifier.reset();
   m_block_cache.Shutdown();
   m_module = nullptr;
