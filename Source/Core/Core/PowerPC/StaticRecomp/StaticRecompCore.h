@@ -141,6 +141,13 @@ private:
   static void HookInstructionFallback(CPUState* cpu, u32 raw, u32 cia);
   static bool HookHostCall(CPUState* cpu, u32 address);
 
+  // MKDD kart construction write-watch (KART_WATCH=1). Members rather than
+  // free functions because the journal needs m_guest.pc to report which PC
+  // wrote the slot.
+  void KartWatchInit();
+  static void KartWatchJournal(u32 vmem_offset, u32 size, void* user);
+  static void KartWatchJournal2(u32 vmem_offset, u32 size, void* user);
+
   // Keep Dolphin's MSR-derived state (translation mode, feature flags) in step
   // with the guest MSR before any MMU access or exception delivery.
   void PropagateGuestMSR();
@@ -161,6 +168,27 @@ private:
   u64 m_native_dispatches = 0;
   u64 m_fallback_steps = 0;
   u64 m_native_exceptions = 0;
+  // Temporary Phase 1 diagnostics: which exception actually fires, and how
+  // often the REL rescan (a full-guest-RAM linear scan) is reached.
+  u64 m_exc_hist[8] = {};
+  u64 m_exc_msr_fp_clear = 0;
+  u64 m_rel_rescans = 0;
+
+  // Interrupt-delivery profile. The generated module has no equivalent of the
+  // JITs' WriteExceptionExit, so a pending external interrupt is not taken when
+  // the guest re-enables MSR[EE] inside a burst. These counters measure how
+  // often that actually happens, and who ends up delivering instead. Emitted as
+  // one [irqprof] line so the two hosts can be diffed mechanically.
+  u64 m_irq_bursts = 0;             // native bursts entered
+  u64 m_irq_ee_edge = 0;            // bursts where MSR[EE] went 0 -> 1
+  u64 m_irq_ee_edge_pending = 0;    // ...of those, with EXTERNAL_INT pending: the miss
+  u64 m_irq_exit_deliverable = 0;   // burst exits with EXTERNAL_INT pending and EE set
+  u64 m_irq_fallback_runs = 0;      // fallback JIT entries
+  u64 m_irq_cleared_by_fallback = 0;// EXTERNAL_INT cleared across a fallback run
+  u64 m_irq_cleared_by_burst = 0;   // EXTERNAL_INT cleared across a native burst
+  u64 m_irq_pending_dispatches = 0; // dispatches spent with EXTERNAL_INT pending
+  u64 m_irq_max_pending_run = 0;    // longest such run, in dispatches
+  u64 m_irq_cur_pending_run = 0;
   u64 m_hook_fallback_instructions = 0;
   u64 m_timebase_cycle_remainder = 0;
   std::unordered_map<u32, u64> m_dispatch_samples;

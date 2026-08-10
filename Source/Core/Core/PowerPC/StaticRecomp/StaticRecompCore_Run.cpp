@@ -112,6 +112,9 @@ void StaticRecompCore::Run()
       {
         SyncIn();
         ++m_bursts;
+        ++m_irq_bursts;
+        const u32 irq_ee_in = m_guest.msr & 0x8000u;
+        const u32 irq_exc_in = ppc.Exceptions;
         do
         {
           if (dispatch_trace && (m_native_dispatches & 0xFFFFFu) == 0)
@@ -139,6 +142,16 @@ void StaticRecompCore::Run()
           if (m_has_rel_modules)
             m_guest.pc = TranslateRelAddress(m_guest.pc);
           ++m_native_dispatches;
+          if (ppc.Exceptions & EXCEPTION_EXTERNAL_INT)
+          {
+            ++m_irq_pending_dispatches;
+            if (++m_irq_cur_pending_run > m_irq_max_pending_run)
+              m_irq_max_pending_run = m_irq_cur_pending_run;
+          }
+          else
+          {
+            m_irq_cur_pending_run = 0;
+          }
 
           if (do_ls)
           {
@@ -172,6 +185,11 @@ void StaticRecompCore::Run()
           // prevent guest busy-wait loops from spinning on a stale timebase.
           if (m_guest.exception)
           {
+            for (int b = 0; b < 8; ++b)
+              if (m_guest.exception & (1u << b))
+                ++m_exc_hist[b];
+            if (!(m_guest.msr & 0x00002000u))  // MSR[FP]
+              ++m_exc_msr_fp_clear;
             // DolRecomp's runtime already redirected pc/msr/srr to the guest
             // exception vector; the flag only signals that it happened.
             m_guest.exception = 0;
@@ -186,6 +204,30 @@ void StaticRecompCore::Run()
                  !(m_guest.host_call && IsHostCallAddress(m_guest.pc)) && ppc.downcount > 0 &&
                  *state_ptr == CPU::State::Running);
         SyncOut();
+        {
+          const u32 irq_ee_out = m_guest.msr & 0x8000u;
+          const bool ext_pending = (ppc.Exceptions & EXCEPTION_EXTERNAL_INT) != 0;
+          if (!irq_ee_in && irq_ee_out)
+          {
+            ++m_irq_ee_edge;
+            if (ext_pending)
+            {
+              ++m_irq_ee_edge_pending;
+              static int edge_budget = 12;
+              if (edge_budget > 0)
+              {
+                --edge_budget;
+                std::fprintf(stderr,
+                             "[irqmiss] exit_pc=%08x msr=%08x exc=%08x lr=%08x\n",
+                             m_guest.pc, m_guest.msr, ppc.Exceptions, m_guest.lr);
+              }
+            }
+          }
+          if (ext_pending && irq_ee_out)
+            ++m_irq_exit_deliverable;
+          if ((irq_exc_in & EXCEPTION_EXTERNAL_INT) && !ext_pending)
+            ++m_irq_cleared_by_burst;
+        }
         if ((ppc.Exceptions & SYNC_EXCEPTION_MASK) != 0)
           power_pc.CheckExceptions();
         else if ((ppc.Exceptions & ASYNC_EXCEPTION_MASK) != 0)
@@ -227,7 +269,12 @@ void StaticRecompCore::Run()
         }
         else if (m_fallback_jit)
         {
+          const u32 fb_exc_in = ppc.Exceptions;
+          ++m_irq_fallback_runs;
           m_fallback_jit->Run();
+          if ((fb_exc_in & EXCEPTION_EXTERNAL_INT) &&
+              !(ppc.Exceptions & EXCEPTION_EXTERNAL_INT))
+            ++m_irq_cleared_by_fallback;
         }
         else
         {

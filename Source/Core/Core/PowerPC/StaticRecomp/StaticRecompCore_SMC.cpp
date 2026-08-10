@@ -20,6 +20,7 @@ u32 ReadGuestBE32(const u8* bytes)
 
 void StaticRecompCore::RefreshRelSections()
 {
+  ++m_rel_rescans;
   if (!m_module || m_module->num_rel_modules == 0 || !m_guest.ram || m_guest.ram_size < 0x40)
     return;
 

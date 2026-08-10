@@ -9,6 +9,9 @@
 #include "InputCommon/GCPadStatus.h"
 #include "InputCommon/InputConfig.h"
 
+#include <array>
+#include <atomic>
+
 namespace Pad
 {
 static InputConfig s_config("GCPadNew", _trans("Pad"), "GCPad", "Pad");
@@ -53,9 +56,32 @@ bool IsInitialized()
   return !s_config.ControllersNeedToBeCreated();
 }
 
+static std::array<std::atomic<u16>, 4> s_held_buttons{};
+
+void SetHeldButtons(int pad_num, u16 buttons)
+{
+  if (pad_num >= 0 && pad_num < static_cast<int>(s_held_buttons.size()))
+    s_held_buttons[pad_num].store(buttons, std::memory_order_relaxed);
+}
+
 GCPadStatus GetStatus(int pad_num)
 {
-  return static_cast<GCPad*>(s_config.GetController(pad_num))->GetInput();
+  GCPadStatus status = static_cast<GCPad*>(s_config.GetController(pad_num))->GetInput();
+  if (pad_num >= 0 && pad_num < static_cast<int>(s_held_buttons.size()))
+  {
+    const u16 held = s_held_buttons[pad_num].load(std::memory_order_relaxed);
+    if (held != 0)
+    {
+      status.button |= held;
+      // The analog triggers are what MKDD actually reads for acceleration on
+      // a real pad; setting only the digital bit leaves it stationary.
+      if (held & PAD_TRIGGER_R)
+        status.triggerRight = 255;
+      if (held & PAD_TRIGGER_L)
+        status.triggerLeft = 255;
+    }
+  }
+  return status;
 }
 
 ControllerEmu::ControlGroup* GetGroup(int pad_num, PadGroup group)

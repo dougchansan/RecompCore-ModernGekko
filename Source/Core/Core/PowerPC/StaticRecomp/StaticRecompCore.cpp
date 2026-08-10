@@ -184,12 +184,27 @@ void StaticRecompCore::Init()
   m_idle_pc = Config::Get(Config::MAIN_STATICRECOMP_IDLE_PC);
   m_lockstep_verifier = std::make_unique<StaticRecompLockstep::StaticRecompLockstepVerifier>(*this);
   m_lockstep_verifier->Init();
+  KartWatchInit();
 
+  // MODERNGEKKO_NO_FALLBACK_JIT=1 reproduces upstream RecompCore's design,
+  // which has no fallback JIT at all and falls back to the interpreter. That
+  // design needs none of the JIT dispatcher plumbing (yield hook, block-link
+  // suppression, DISPATCHER_PC spill), so it is architecture-neutral -- and it
+  // is why upstream would not have hit the arm64 breakage this fork does.
+  const char* no_fb = std::getenv("MODERNGEKKO_NO_FALLBACK_JIT");
+  const bool interpreter_fallback = no_fb && *no_fb && *no_fb != '0';
+  if (!interpreter_fallback)
+  {
 #ifdef _M_ARM_64
-  m_fallback_jit = std::make_unique<JitArm64>(m_system);
+    m_fallback_jit = std::make_unique<JitArm64>(m_system);
 #elif defined(_M_X86_64)
-  m_fallback_jit = std::make_unique<Jit64>(m_system);
+    m_fallback_jit = std::make_unique<Jit64>(m_system);
 #endif
+  }
+  else
+  {
+    std::fprintf(stderr, "[staticrecomp] fallback: interpreter (upstream design)\n");
+  }
   if (m_fallback_jit)
   {
     m_fallback_jit->SetStaticRecompFallback(true);
@@ -201,6 +216,31 @@ void StaticRecompCore::Init()
 void StaticRecompCore::Shutdown()
 {
   g_static_recomp_core = nullptr;
+  std::fprintf(stderr,
+               "[irqprof] bursts=%llu ee_edge=%llu ee_edge_pending=%llu "
+               "exit_deliverable=%llu fb_runs=%llu cleared_fb=%llu cleared_burst=%llu "
+               "pending_disp=%llu max_pending_run=%llu\n",
+               (unsigned long long)m_irq_bursts, (unsigned long long)m_irq_ee_edge,
+               (unsigned long long)m_irq_ee_edge_pending,
+               (unsigned long long)m_irq_exit_deliverable,
+               (unsigned long long)m_irq_fallback_runs,
+               (unsigned long long)m_irq_cleared_by_fallback,
+               (unsigned long long)m_irq_cleared_by_burst,
+               (unsigned long long)m_irq_pending_dispatches,
+               (unsigned long long)m_irq_max_pending_run);
+  std::fprintf(stderr,
+               "[staticrecomp] diag: rel_rescans=%llu exc_msrfp_clear=%llu "
+               "exc[prog=%llu dsi=%llu align=%llu sc=%llu mchk=%llu fpunavail=%llu]\n",
+               (unsigned long long)m_rel_rescans, (unsigned long long)m_exc_msr_fp_clear,
+               (unsigned long long)m_exc_hist[0], (unsigned long long)m_exc_hist[1],
+               (unsigned long long)m_exc_hist[2], (unsigned long long)m_exc_hist[3],
+               (unsigned long long)m_exc_hist[4], (unsigned long long)m_exc_hist[5]);
+  extern void KartSampleEaCalls();
+  KartSampleEaCalls();
+  // Dump OS thread state while the core is still live -- this is the
+  // wedged state we actually want photographed.
+  extern void KartMaybeDumpThreads(StaticRecompCore*);
+  KartMaybeDumpThreads(this);
   std::fprintf(stderr,
                "[staticrecomp] shutdown: native=%llu fallback=%llu native_exc=%llu hook_fb=%llu "
                "smc_failed=%u verifications=%llu reverify_events=%llu bursts=%llu cycles=%llu\n",
