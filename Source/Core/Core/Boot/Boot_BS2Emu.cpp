@@ -253,6 +253,12 @@ void CBoot::SetupGCMemory(Core::System& system, const Core::CPUThreadGuard& guar
 
   // Physical Memory Size (24MB on retail)
   PowerPC::MMU::HostWrite<u32>(guard, memory.GetRamSizeReal(), 0x80000028);
+  // Development GameCubes expose the simulated memory size here. SDK
+  // __OSInitMemoryProtection consumes it to select the coherent 24/48 MiB BAT
+  // layout; leaving it zero while overriding MEM1 makes allocations above
+  // retail RAM unreachable through the game's own mappings.
+  if (memory.GetRamSizeReal() != Memory::MEM1_SIZE_RETAIL)
+    PowerPC::MMU::HostWrite<u32>(guard, memory.GetRamSizeReal(), 0x800000F0);
 
   // Console type - DevKit  (retail ID == 0x00000003) see YAGCD 4.2.1.1.2
   // TODO: determine why some games fail when using a retail ID.

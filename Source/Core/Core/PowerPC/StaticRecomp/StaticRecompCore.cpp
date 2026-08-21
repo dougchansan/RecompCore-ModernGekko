@@ -10,6 +10,7 @@
 #include <sstream>
 
 #include "Common/Config/Config.h"
+#include "VideoCommon/KartDebugOverlay.h"
 #include "Common/DynamicLibrary.h"
 #include "Common/FileUtil.h"
 #include "Common/Logging/Log.h"
@@ -143,9 +144,33 @@ StaticRecompCore::StaticRecompCore(Core::System& system, StaticRecompModuleSourc
 
 StaticRecompCore::~StaticRecompCore() = default;
 
+namespace
+{
+// Copies the fields the debug overlay shows out of the live guest state. The
+// overlay lives in VideoCommon and must not know CPUState's layout, so the
+// translation happens here, where that layout is already a dependency.
+void ReadGuestRegsForOverlay(KartDebug::GuestRegs* out)
+{
+  const StaticRecompCore* const core = g_static_recomp_core;
+  if (core == nullptr || out == nullptr)
+    return;
+  const CPUState& cpu = core->GetGuestState();
+  for (int i = 0; i < 32; ++i)
+    out->gpr[i] = cpu.gpr[i];
+  out->pc = cpu.pc;
+  out->lr = cpu.lr;
+  out->ctr = cpu.ctr;
+  out->cr = cpu.cr;
+  out->xer = cpu.xer;
+  out->msr = cpu.msr;
+  out->timebase = cpu.timebase;
+}
+}  // namespace
+
 void StaticRecompCore::Init()
 {
   g_static_recomp_core = this;
+  KartDebug::SetRegReader(&ReadGuestRegsForOverlay);
   RefreshConfig();
   m_collect_dispatch_samples = std::getenv("STATICRECOMP_DISPATCH_SAMPLES") != nullptr;
   const char* fallback_override = std::getenv("STATICRECOMP_FALLBACK_RANGES");
@@ -241,6 +266,16 @@ void StaticRecompCore::Shutdown()
   // wedged state we actually want photographed.
   extern void KartMaybeDumpThreads(StaticRecompCore*);
   KartMaybeDumpThreads(this);
+  extern void KartReportBody36();
+  KartReportBody36();
+  extern void KartReportInvalid();
+  KartReportInvalid();
+  std::fprintf(stderr,
+               "[staticrecomp] guest-stop pc=%08x lr=%08x ctr=%08x cr=%08x "
+               "r1=%08x r2=%08x r3=%08x r4=%08x r29=%08x r30=%08x r31=%08x\n",
+               m_guest.pc, m_guest.lr, m_guest.ctr, m_guest.cr,
+               m_guest.gpr[1], m_guest.gpr[2], m_guest.gpr[3], m_guest.gpr[4],
+               m_guest.gpr[29], m_guest.gpr[30], m_guest.gpr[31]);
   std::fprintf(stderr,
                "[staticrecomp] shutdown: native=%llu fallback=%llu native_exc=%llu hook_fb=%llu "
                "smc_failed=%u verifications=%llu reverify_events=%llu bursts=%llu cycles=%llu\n",

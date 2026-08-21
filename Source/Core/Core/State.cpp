@@ -51,6 +51,11 @@
 #include "VideoCommon/OnScreenDisplay.h"
 #include "VideoCommon/VideoBackendBase.h"
 
+// MKDD vehicle scaling: defined in StaticRecompCore_Hooks.cpp. Declared here
+// at global scope rather than at the call site, which is inside namespace
+// State and would name State::KartExtDoState instead.
+void KartExtDoState(PointerWrap& p);
+
 namespace State
 {
 
@@ -143,6 +148,11 @@ static void DoState(Core::System& system, PointerWrap& p)
 
   system.GetPowerPC().DoState(p);
   p.DoMarker("PowerPC");
+
+  // MKDD vehicle scaling: the StaticRecomp extension window that backs karts
+  // 8..15 is process memory, not emulated RAM, so nothing above carries it.
+  ::KartExtDoState(p);
+  p.DoMarker("KartExt");
 
   if (system.IsWii())
     Wiimote::DoState(p);

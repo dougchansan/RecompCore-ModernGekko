@@ -113,6 +113,15 @@ target_include_directories(${MODULE_NAME} PRIVATE
 if(NOT WIN32)
   target_link_libraries(${MODULE_NAME} PRIVATE m)
 endif()
+# kart_ext_abi is emitted weakly from the generated extension header.  On
+# Apple ld, weak data with no native call-site can be dead-stripped from a
+# shared module even when the declaration carries ``used`` and default
+# visibility.  The host negotiates this descriptor before guest execution,
+# so retain it explicitly at link time.  The option is intentionally scoped
+# to Apple; Linux uses the module version script and Windows uses dllexport.
+if(APPLE)
+  target_link_options(${MODULE_NAME} PRIVATE "-Wl,-u,_kart_ext_abi")
+endif()
 if(UNIX AND NOT APPLE)
   target_link_options(${MODULE_NAME} PRIVATE
     "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/module.exports")

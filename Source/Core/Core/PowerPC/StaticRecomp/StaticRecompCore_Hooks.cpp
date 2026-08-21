@@ -10,10 +10,12 @@
 #include "Core/PowerPC/StaticRecomp/StaticRecompLockstep.h"
 #include "Core/HW/GPFifo.h"
 #include "Core/HW/SystemTimers.h"
+#include "Common/ChunkFile.h"
 #include "Common/Logging/Log.h"
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <utility>
 
 namespace
@@ -34,7 +36,71 @@ constexpr u32 LOCKED_CACHE_BASE = 0xE0000000u;
 // unmodified 8-kart race. Storage is big-endian to match guest semantics, so
 // a 32-bit write read back as two 16-bit halves behaves as on hardware.
 constexpr u32 KART_EXT_BASE = 0x90000000u;
-constexpr u32 KART_EXT_SIZE = 0x10000u;   // 64 KiB: ample past 256 karts
+// Stable chassis capacity. Modules negotiate a smaller live layout, so counts
+// 9 through 16 use the same ModernGekko executable.
+constexpr u32 KART_EXT_SIZE = 0x100000u;
+
+// KART_EXT_SIZE is the chassis capacity. The live range is negotiated from
+// the generated module's kart_ext_abi descriptor below, so a module built for
+// 9 through 16 karts never depend on this translation unit being rebuilt with a
+// matching KART_EXTENDED_COUNT.
+u32 g_kart_ext_base = KART_EXT_BASE;
+u32 g_kart_ext_live_size = KART_EXT_SIZE;
+u32 g_kart_ext_count = 9u;
+
+constexpr u32 KART_EXT_ABI_MAGIC = 0x4B455854u;
+constexpr u32 KART_EXT_ABI_VERSION = 2u;
+constexpr u32 KART_EXT_ORIGINAL_COUNT = 8u;
+constexpr u32 KART_EXT_MAX_COUNT = 16u;
+struct KartExtAbiHost
+{
+  u32 magic;
+  u32 abi_version;
+  u32 struct_size;
+  u32 guest_base;
+  u32 host_size;
+  u32 layout_size;
+  u32 original_count;
+  u32 extended_count;
+};
+
+void KartExtConfigure(const Common::DynamicLibrary& library)
+{
+  // Defaults preserve modules produced before the descriptor was introduced;
+  // a descriptor, when present, is authoritative and is validated before any
+  // host hook accepts an extension address.
+  g_kart_ext_base = KART_EXT_BASE;
+  g_kart_ext_live_size = KART_EXT_SIZE;
+  g_kart_ext_count = 9u;
+  if (!library.IsOpen())
+    return;
+
+  const auto* abi = reinterpret_cast<const KartExtAbiHost*>(
+      library.GetSymbolAddress("kart_ext_abi"));
+  if (!abi)
+    return;
+  const bool valid = abi->magic == KART_EXT_ABI_MAGIC &&
+                     abi->abi_version == KART_EXT_ABI_VERSION &&
+                     abi->struct_size >= sizeof(KartExtAbiHost) &&
+                     abi->guest_base != 0 &&
+                     abi->host_size <= KART_EXT_SIZE &&
+                     abi->layout_size != 0 &&
+                     abi->layout_size <= abi->host_size &&
+                     abi->original_count == KART_EXT_ORIGINAL_COUNT &&
+                     abi->extended_count >= abi->original_count &&
+                     abi->extended_count <= KART_EXT_MAX_COUNT &&
+                     abi->guest_base <= 0xffffffffu - abi->host_size;
+  if (!valid)
+  {
+    // Fail closed for a module that advertises an incompatible contract. Do
+    // not reinterpret its addresses using the legacy default layout.
+    g_kart_ext_live_size = 0;
+    return;
+  }
+  g_kart_ext_base = abi->guest_base;
+  g_kart_ext_live_size = abi->layout_size;
+  g_kart_ext_count = abi->extended_count;
+}
 
 u8 g_kart_ext[KART_EXT_SIZE]{};           // zero-initialised == NULL pointers
 
@@ -128,14 +194,18 @@ struct KartExtReporter
 };
 KartExtReporter g_kart_ext_reporter;
 
-constexpr bool KartExtContains(u32 ea, u8 size)
+bool KartExtContains(u32 ea, u8 size)
 {
-  return ea >= KART_EXT_BASE && (ea - KART_EXT_BASE) + size <= KART_EXT_SIZE;
+  if (g_kart_ext_live_size == 0 || ea < g_kart_ext_base)
+    return false;
+  const u64 offset = static_cast<u64>(ea) - g_kart_ext_base;
+  return offset <= g_kart_ext_live_size &&
+         static_cast<u64>(size) <= g_kart_ext_live_size - offset;
 }
 
 u64 KartExtRead(u32 ea, u8 size, u32 pc)
 {
-  const u32 off = ea - KART_EXT_BASE;
+  const u32 off = ea - g_kart_ext_base;
   u64 value = 0;
   for (u8 i = 0; i < size; ++i)
     value = (value << 8) | g_kart_ext[off + i];
@@ -148,7 +218,7 @@ u64 KartExtRead(u32 ea, u8 size, u32 pc)
 
 void KartExtWrite(u32 ea, u64 value, u8 size, u32 pc)
 {
-  const u32 off = ea - KART_EXT_BASE;
+  const u32 off = ea - g_kart_ext_base;
   for (u8 i = 0; i < size; ++i)
     g_kart_ext[off + i] = static_cast<u8>(value >> ((size - 1 - i) * 8));
   ++g_kart_ext_writes;
@@ -173,13 +243,27 @@ void KartExtWrite(u32 ea, u64 value, u8 size, u32 pc)
 
 // --- on-demand mKartInfo seed for karts 8+ ---------------------------------
 //
-// These mirror the module's kart_ext.h for KART_EXTENDED_COUNT 9. They are
-// duplicated rather than shared because the header is generated into the module
-// tree; if the extended count changes, these must change with it.
-constexpr u32 KART_ORIGINAL_KARTS = 8;
-constexpr u32 KARTINFO_OFF = 0x1c0u;              // KART_EXT_OFF_RACEINFO_KARTINFO
-constexpr u32 KARTINFO_STRIDE = 0x18u;            // sizeof(KartInfo)
-constexpr u32 KARTINFO_EXTRA = 1;                 // KART_EXTENDED_COUNT - 8
+// These mirror the module's kart_ext.h. The count is read from kart_ext_abi at
+// runtime; the host binary therefore works with all supported module layouts.
+constexpr u32 KART_ORIGINAL_KARTS = KART_EXT_ORIGINAL_COUNT;
+constexpr u32 KART_EXT_MAX_EXTRA_KARTS = KART_EXT_MAX_COUNT - KART_ORIGINAL_KARTS;
+constexpr u32 KartExtRegion(u32 stride, u32 extra)
+{
+  return (stride * extra + 0x1fu) & ~0x1fu;
+}
+constexpr u32 KARTINFO_STRIDE = 0x18u; // sizeof(KartInfo)
+constexpr u32 KARTINFO_PREFIX_STRIDES[] = {
+  4u, 8u, 4u, 4u, 4u, 16u, 8u, 4u, 4u, 4u, 4u, 4u, 4u, 4u,
+};
+
+u32 KartInfoOffset(u32 count)
+{
+  const u32 extra = count - KART_ORIGINAL_KARTS;
+  u32 offset = 0;
+  for (const u32 stride : KARTINFO_PREFIX_STRIDES)
+    offset += KartExtRegion(stride, extra);
+  return offset;
+}
 // Seed from the LAST original kart, not kart 0. Kart 0 is the player, and a
 // KartInfo copied from it carries real gamepads -- so the rival-pool formula
 // (mKartNum - humans - consoles, at 0x80247138) counted kart 8 as a human and
@@ -193,6 +277,7 @@ constexpr u32 RACEINFO_KARTINFO0 =
 
 bool g_kart_seed_on = std::getenv("KART_SEED") != nullptr;
 u64 g_kart_seed_fills = 0;
+bool g_kart_seeded[KART_EXT_MAX_EXTRA_KARTS]{};
 
 // Enabled with KART_SEED=1, so the black screen can be compared with and
 // without it in otherwise identical unattended runs.
@@ -200,22 +285,28 @@ u64 g_kart_seed_fills = 0;
 
 void KartExtSeedKartInfoOnDemand(CPUState* cpu, u32 ea, u8 size)
 {
-  const u32 off = ea - KART_EXT_BASE;
-  if (off + size <= KARTINFO_OFF ||
-      off >= KARTINFO_OFF + KARTINFO_STRIDE * KARTINFO_EXTRA)
+  if (g_kart_ext_count < KART_ORIGINAL_KARTS ||
+      g_kart_ext_count > KART_EXT_MAX_COUNT)
+    return;
+  const u32 extra = g_kart_ext_count - KART_ORIGINAL_KARTS;
+  const u32 kartinfo_off = KartInfoOffset(g_kart_ext_count);
+  const u32 off = ea - g_kart_ext_base;
+  if (off + size <= kartinfo_off ||
+      off >= kartinfo_off + KARTINFO_STRIDE * extra)
     return;
 
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
   auto& mmu = core->m_system.GetMMU();
 
-  for (u32 k = 0; k < KARTINFO_EXTRA; ++k)
+  for (u32 k = 0; k < extra; ++k)
   {
-    const u32 dst = KARTINFO_OFF + k * KARTINFO_STRIDE;
-    bool dst_blank = true;
-    for (u32 i = 0; i < KARTINFO_STRIDE; ++i)
-      if (g_kart_ext[dst + i] != 0)
-        dst_blank = false;
-    if (!dst_blank)
+    const u32 dst = kartinfo_off + k * KARTINFO_STRIDE;
+    // An extra slot can receive a partial placeholder through
+    // RaceInfo::setKart before its first read.  "Any nonzero byte" is not
+    // proof that all character, kart, and pad fields are initialized.  When
+    // KART_SEED is explicitly enabled, seed exactly once from a complete CPU
+    // kart regardless of partial destination contents.
+    if (g_kart_seeded[k])
       continue;
 
     // Only copy a source that actually holds something. Before character
@@ -235,12 +326,8 @@ void KartExtSeedKartInfoOnDemand(CPUState* cpu, u32 ea, u8 size)
     for (u32 i = 0; i < KARTINFO_STRIDE / 4; ++i)
       for (u32 b = 0; b < 4; ++b)
         g_kart_ext[dst + i * 4 + b] = static_cast<u8>(words[i] >> ((3 - b) * 8));
+    g_kart_seeded[k] = true;
     ++g_kart_seed_fills;
-    std::fprintf(stderr,
-                 "[kart_seed] filled mKartInfo[%u] from kart %u at pc=%08x: "
-                 "%08x %08x %08x %08x %08x %08x\n",
-                 KART_ORIGINAL_KARTS + k, KARTINFO_SEED_SRC_INDEX, cpu->pc, words[0], words[1], words[2],
-                 words[3], words[4], words[5]);
   }
 }
 }
@@ -268,6 +355,7 @@ namespace
 // upstream: KartCtrl's constructor copies from RaceMgr's arrays, so when a
 // KartCtrl slot lands NULL the question moves to who fills RaceMgr.
 //   KART_WATCH_PTR    guest address of the singleton POINTER (default KartCtrl)
+//   KART_WATCH_BASE   direct guest object address (for static objects such as gRaceInfo)
 //   KART_WATCH_OFF    member offset within that object
 //   KART_WATCH_LEN    bytes to watch
 u32 g_watch_ptr_addr = 0x803CC588u;              // KartCtrl
@@ -291,6 +379,44 @@ u64 g_kart_dump_after_writes = std::getenv("KART_DUMP_AFTER")
                                    ? std::strtoull(std::getenv("KART_DUMP_AFTER"), nullptr, 0)
                                    : 3000000000ull;
 bool g_threads_dumped = false; // one-shot OS thread dump (KART_THREADS=1)
+struct KartBody36Event { u32 kind, pc, lr, ea, value, r3, r4, r5, r29, r30, r31; };
+KartBody36Event g_body36_events[32]{};
+u32 g_body36_count = 0;
+
+// First invalid-looking effective addresses reached through the generated
+// module's external-memory seam. Keep this silent in the hot path: printing
+// every bad access changes timing drastically and can produce multi-gigabyte
+// logs before shutdown. Enable with KART_INVALID_TRACE=1.
+struct KartInvalidEvent
+{
+  u32 kind, ea, size, pc, lr, ctr, cr;
+  u32 r1, r3, r4, r5, r6, r7, r8, r28, r29, r30, r31;
+};
+constexpr u32 KART_INVALID_EVENT_COUNT = 64;
+KartInvalidEvent g_invalid_events[KART_INVALID_EVENT_COUNT]{};
+u64 g_invalid_count = 0;
+
+void KartRecordInvalid(CPUState* cpu, u32 ea, u8 size, u32 kind)
+{
+  static const bool on = std::getenv("KART_INVALID_TRACE") != nullptr;
+  if (!on || !((ea < 0x01000000u) || (ea >= 0x3F000000u && ea < 0x40000000u)))
+    return;
+  const u64 ordinal = g_invalid_count++;
+  if (ordinal >= KART_INVALID_EVENT_COUNT)
+    return;
+  g_invalid_events[ordinal] = {kind, ea, size, cpu->pc, cpu->lr, cpu->ctr, cpu->cr,
+                               cpu->gpr[1], cpu->gpr[3], cpu->gpr[4], cpu->gpr[5],
+                               cpu->gpr[6], cpu->gpr[7], cpu->gpr[8], cpu->gpr[28],
+                               cpu->gpr[29], cpu->gpr[30], cpu->gpr[31]};
+  std::fprintf(stderr,
+               "[invalid-now] #%llu %c%u ea=%08x pc=%08x lr=%08x ctr=%08x "
+               "r1=%08x r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x r8=%08x "
+               "r28=%08x r29=%08x r30=%08x r31=%08x\n",
+               ordinal, kind ? 'W' : 'R', size, ea, cpu->pc, cpu->lr, cpu->ctr,
+               cpu->gpr[1], cpu->gpr[3], cpu->gpr[4], cpu->gpr[5], cpu->gpr[6],
+               cpu->gpr[7], cpu->gpr[8], cpu->gpr[28], cpu->gpr[29], cpu->gpr[30],
+               cpu->gpr[31]);
+}
 
 // GameCube OS thread structures. SelectThread showing up hot means threads are
 // parked, and a profile cannot say what they are parked ON. These can.
@@ -350,6 +476,65 @@ const volatile unsigned long long* g_kart_ea_calls = nullptr;
 unsigned long long g_kart_ea_calls_last = 0;
 }  // namespace
 
+// The extension window is process memory, not emulated RAM, so no other
+// DoState in the chain carries it. Without this a savestate restores MEM1
+// faithfully and leaves every extended kart's sidecar at whatever the loading
+// process happens to hold -- all zeroes in a fresh one -- so karts 8..15 come
+// back with NULL KartCheckers, NULL panes and zeroed item tables while the
+// guest heap still believes they are racing. Savestate-based investigation of
+// any 9-through-16 kart defect is worthless until this exists.
+//
+// The full chassis is written rather than the negotiated live size, so the
+// stream layout does not depend on which module produced the state. It is
+// almost all zeroes and compresses accordingly.
+void KartExtDoState(PointerWrap& p)
+{
+  // The window's meaning depends on the layout that produced it. A state
+  // saved under a different kart count describes a different sidecar, and its
+  // bytes cannot be reinterpreted here.
+  u32 base = g_kart_ext_base;
+  u32 live = g_kart_ext_live_size;
+  u32 count = g_kart_ext_count;
+  p.Do(base);
+  p.Do(live);
+  p.Do(count);
+
+  const bool matches = base == g_kart_ext_base && live == g_kart_ext_live_size &&
+                       count == g_kart_ext_count;
+
+  // Consume the payload either way: the stream must stay aligned for whatever
+  // follows, whether or not the bytes are usable.
+  p.DoArray(g_kart_ext);
+
+  // Self-evidence. A restored window cannot be demonstrated by dumping bytes
+  // afterwards, because a live race repopulates it within a frame of loading;
+  // the count has to be taken here, at the moment of transfer.
+  if (p.IsReadMode() || p.IsWriteMode())
+  {
+    u32 nonzero = 0;
+    for (u32 i = 0; i < g_kart_ext_live_size && i < sizeof(g_kart_ext); ++i)
+      if (g_kart_ext[i] != 0)
+        ++nonzero;
+    std::fprintf(stderr, "[kart_ext] savestate %s: %u non-zero of %u live\n",
+                 p.IsReadMode() ? "restored" : "saved", nonzero,
+                 g_kart_ext_live_size);
+  }
+
+  if (!matches && p.IsReadMode())
+  {
+    // Loud and defined beats silently wrong. A zeroed window is exactly the
+    // state a fresh process starts in, so the failure mode is the familiar
+    // one rather than a plausible-looking mixture of two layouts.
+    std::memset(g_kart_ext, 0, sizeof(g_kart_ext));
+    std::fprintf(stderr,
+                 "[kart_ext] savestate layout mismatch: state base=%08x "
+                 "live=%u count=%u, running base=%08x live=%u count=%u; "
+                 "extension window cleared\n",
+                 base, live, count, g_kart_ext_base, g_kart_ext_live_size,
+                 g_kart_ext_count);
+  }
+}
+
 // Sampled from the core's shutdown path, where the module is still mapped. A
 // static destructor is too late: the dylib is unloaded by then and the read
 // segfaults, truncating the report just before the count is printed.
@@ -372,6 +557,15 @@ struct KartWatchHit
 };
 constexpr int KART_WATCH_MAX = 32;
 KartWatchHit g_kart_watch_hit[KART_WATCH_MAX]{};
+
+struct KartItemStateHit
+{
+  u32 pc, lr, ea, size, value;
+  u32 r0, r3, r4, r5, r6, r7, r8, r28, r29, r30, r31;
+};
+constexpr u32 KART_ITEM_STATE_MAX = 512;
+KartItemStateHit g_item_state_hit[KART_ITEM_STATE_MAX]{};
+u64 g_item_state_count = 0;
 
 struct KartWatchReporter
 {
@@ -412,6 +606,20 @@ struct KartWatchReporter
                    g_kart_watch_hit[i].pc, slot, g_kart_watch_hit[i].offset,
                    g_kart_watch_hit[i].size);
     }
+    for (u32 i = 0; i < g_item_state_count && i < KART_ITEM_STATE_MAX; ++i)
+    {
+      const auto& e = g_item_state_hit[i];
+      std::fprintf(stderr,
+                   "[item-state] n=%u pc=%08x lr=%08x ea=%08x size=%u value=%08x "
+                   "r0=%08x r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x r8=%08x "
+                   "r28=%08x r29=%08x r30=%08x r31=%08x\n",
+                   i, e.pc, e.lr, e.ea, e.size, e.value, e.r0, e.r3, e.r4,
+                   e.r5, e.r6, e.r7, e.r8, e.r28, e.r29, e.r30, e.r31);
+    }
+    if (g_item_state_count)
+      std::fprintf(stderr, "[item-state-summary] writes=%llu stored=%u\n",
+                   static_cast<unsigned long long>(g_item_state_count),
+                   static_cast<u32>(std::min<u64>(g_item_state_count, KART_ITEM_STATE_MAX)));
   }
 };
 KartWatchReporter g_kart_watch_reporter;
@@ -450,13 +658,26 @@ void KartMaybeDumpThreads(StaticRecompCore* core)
     auto ok = [](u32 p) { return p >= 0x80000000u && p < 0x81800000u; };
     auto thread_line = [&](const char* tag, u32 t) {
       if (!ok(t)) return;
+      const u32 saved_r1 = mmu.Read<u32>(t + 0x04u);
+      const u32 saved_caller_lr = ok(saved_r1) ? mmu.Read<u32>(saved_r1 + 36u) : 0;
       std::fprintf(stderr,
                    "[threads] %-10s %08x state=%-8s suspend=%d prio=%d "
-                   "queue=%08x mutex=%08x srr0=%08x\n",
+                   "base=%d queue=%08x mutex=%08x srr0=%08x lr=%08x "
+                   "r1=%08x r3=%08x r4=%08x r5=%08x r6=%08x "
+                   "r26=%08x r27=%08x r28=%08x r29=%08x r30=%08x r31=%08x "
+                   "caller_lr=%08x stack=%08x..%08x\n",
                    tag, t, OSThreadState(mmu.Read<u16>(t + OST_STATE)),
                    mmu.Read<u32>(t + OST_SUSPEND), mmu.Read<u32>(t + OST_PRIO),
-                   mmu.Read<u32>(t + OST_QUEUE), mmu.Read<u32>(t + OST_MUTEX),
-                   mmu.Read<u32>(t + OST_SRR0));
+                   mmu.Read<u32>(t + 0x2D4u), mmu.Read<u32>(t + OST_QUEUE),
+                   mmu.Read<u32>(t + OST_MUTEX), mmu.Read<u32>(t + OST_SRR0),
+                   mmu.Read<u32>(t + 0x84u), mmu.Read<u32>(t + 0x04u),
+                   mmu.Read<u32>(t + 0x0Cu), mmu.Read<u32>(t + 0x10u),
+                   mmu.Read<u32>(t + 0x14u), mmu.Read<u32>(t + 0x18u),
+                   mmu.Read<u32>(t + 0x68u), mmu.Read<u32>(t + 0x6Cu),
+                   mmu.Read<u32>(t + 0x70u), mmu.Read<u32>(t + 0x74u),
+                   mmu.Read<u32>(t + 0x78u), mmu.Read<u32>(t + 0x7Cu),
+                   saved_caller_lr,
+                   mmu.Read<u32>(t + 0x304u), mmu.Read<u32>(t + 0x308u));
     };
 
     // Sanity-check the reads themselves before believing any of them. The
@@ -510,6 +731,27 @@ void KartMaybeDumpThreads(StaticRecompCore* core)
       }
     }
     std::fprintf(stderr, "[threads] %d runnable\n", runnable);
+  }
+}
+
+void KartReportInvalid()
+{
+  if (g_invalid_count == 0)
+    return;
+  std::fprintf(stderr, "[invalid-trace] total=%llu stored=%u\n",
+               static_cast<unsigned long long>(g_invalid_count),
+               static_cast<unsigned>(std::min<u64>(g_invalid_count, KART_INVALID_EVENT_COUNT)));
+  const u32 stored = static_cast<u32>(std::min<u64>(g_invalid_count, KART_INVALID_EVENT_COUNT));
+  for (u32 i = 0; i < stored; ++i)
+  {
+    const auto& e = g_invalid_events[i];
+    std::fprintf(stderr,
+                 "[invalid-trace] #%u %c%u ea=%08x pc=%08x lr=%08x ctr=%08x cr=%08x "
+                 "r1=%08x r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x r8=%08x "
+                 "r28=%08x r29=%08x r30=%08x r31=%08x\n",
+                 i, e.kind ? 'W' : 'R', e.size, e.ea, e.pc, e.lr, e.ctr, e.cr,
+                 e.r1, e.r3, e.r4, e.r5, e.r6, e.r7, e.r8,
+                 e.r28, e.r29, e.r30, e.r31);
   }
 }
 
@@ -649,8 +891,87 @@ void StaticRecompCore::KartWatchJournal2(u32 vmem_offset, u32 size, void* user)
   ++g_kart_watch_hits;
 }
 
+void StaticRecompCore::KartBody36Journal(u32 vmem_offset, u32 size, void* user)
+{
+  auto* core = static_cast<StaticRecompCore*>(user);
+  auto& mmu = core->m_system.GetMMU();
+  const u32 ctrl = mmu.Read<u32>(0x803CC588u);
+  if (ctrl < 0x80000000u || ctrl >= 0x81800000u)
+    return;
+  const u32 body = mmu.Read<u32>(ctrl + 0xA0u);
+  if (body < 0x80000000u || body >= 0x81800000u)
+    return;
+  const u32 body_target = (body + 0x24u) & RAM_MASK;
+  const u32 mgr = mmu.Read<u32>(0x803CB7E8u);
+  const u32 loader = mgr >= 0x80000000u && mgr < 0x81800000u ?
+                         mmu.Read<u32>(mgr + 0x68u) : 0u;
+  const u32 loader_target = loader >= 0x80000000u && loader < 0x81800000u ?
+                               ((loader + 0x10u) & RAM_MASK) : 0xffffffffu;
+  const bool hit_body = vmem_offset <= body_target && vmem_offset + size > body_target;
+  const bool hit_loader = vmem_offset <= loader_target && vmem_offset + size > loader_target;
+  if (!hit_body && !hit_loader)
+    return;
+  const u32 n = g_body36_count++;
+  auto& e = g_body36_events[n & 31u];
+  e.kind = hit_body ? 1u : 2u;
+  e.pc = core->m_guest.pc; e.lr = core->m_guest.lr;
+  e.ea = hit_body ? body + 0x24u : loader + 0x10u;
+  e.value = mmu.Read<u32>(e.ea);
+  e.r3 = core->m_guest.gpr[3]; e.r4 = core->m_guest.gpr[4];
+  e.r5 = core->m_guest.gpr[5]; e.r29 = core->m_guest.gpr[29];
+  e.r30 = core->m_guest.gpr[30]; e.r31 = core->m_guest.gpr[31];
+}
+
+void StaticRecompCore::KartItemStateJournal(u32 vmem_offset, u32 size, void* user)
+{
+  auto* core = static_cast<StaticRecompCore*>(user);
+  auto& mmu = core->m_system.GetMMU();
+  const u32 mgr = mmu.Read<u32>(0x803CBF40u);
+  if (mgr < 0x80000000u || mgr >= 0x81800000u)
+    return;
+  const u32 off = vmem_offset - (mgr & RAM_MASK);
+  // mStockItem, mEquipItem, hit/equip/use flags, heart and shuffle pointers.
+  if (off < 0x24cu || off >= 0x39cu)
+    return;
+  const u64 ordinal = g_item_state_count++;
+  if (ordinal >= KART_ITEM_STATE_MAX)
+    return;
+  u32 value = 0;
+  if (size == 1) value = mmu.Read<u8>(mgr + off);
+  else if (size == 2) value = mmu.Read<u16>(mgr + off);
+  else value = mmu.Read<u32>(mgr + off);
+  const auto& c = core->m_guest;
+  g_item_state_hit[ordinal] = {c.pc, c.lr, mgr + off, size, value,
+                               c.gpr[0], c.gpr[3], c.gpr[4], c.gpr[5], c.gpr[6],
+                               c.gpr[7], c.gpr[8], c.gpr[28], c.gpr[29],
+                               c.gpr[30], c.gpr[31]};
+}
+
+void KartReportBody36()
+{
+  const u32 used = std::min<u32>(g_body36_count, 32u);
+  const u32 first = g_body36_count - used;
+  std::fprintf(stderr, "[body36-summary] writes=%u stored=%u\n", g_body36_count, used);
+  for (u32 i = 0; i < used; ++i)
+  {
+    const u32 n = first + i;
+    const auto& e = g_body36_events[n & 31u];
+    std::fprintf(stderr,
+                 "[body36] n=%u kind=%u pc=%08x lr=%08x ea=%08x value=%08x "
+                 "r3=%08x r4=%08x r5=%08x r29=%08x r30=%08x r31=%08x\n",
+                 n, e.kind, e.pc, e.lr, e.ea, e.value, e.r3, e.r4, e.r5,
+                 e.r29, e.r30, e.r31);
+  }
+}
+
 void StaticRecompCore::KartWatchInit()
 {
+  // Negotiate the sidecar contract independently of the optional write-watch
+  // diagnostics. This runs for every loaded module, including normal release
+  // runs where KART_WATCH is unset.
+  KartExtConfigure(m_library);
+  if (const char* v = std::getenv("KART_WATCH_BASE"))
+    g_kart_watch_ctrl = static_cast<u32>(std::strtoul(v, nullptr, 0));
   if (const char* v = std::getenv("KART_WATCH_PTR"))
     g_watch_ptr_addr = static_cast<u32>(std::strtoul(v, nullptr, 0));
   if (const char* v = std::getenv("KART_WATCH_OFF"))
@@ -681,6 +1002,20 @@ void StaticRecompCore::KartWatchInit()
   }
   g_kart_ea_calls = reinterpret_cast<const volatile unsigned long long*>(
       m_library.GetSymbolAddress("kart_ea_calls"));
+  if (std::getenv("KART_BODY36_TRACE"))
+  {
+    set(&StaticRecompCore::KartBody36Journal, this);
+    g_kart_watch_on = true;
+    std::fprintf(stderr, "[kart_watch] lightweight KartBody[0]+0x24 writer trace\n");
+    return;
+  }
+  if (std::getenv("KART_ITEM_STATE_TRACE"))
+  {
+    set(&StaticRecompCore::KartItemStateJournal, this);
+    g_kart_watch_on = true;
+    std::fprintf(stderr, "[kart_watch] ItemObjMgr stock/equip register trace\n");
+    return;
+  }
   // The journal fires on EVERY guest write -- billions per run -- and costs
   // roughly 3x wall clock on a cold boot. KART_WATCH_LIGHT keeps the kart_ea
   // total (a plain module counter, free) and drops the window watch, the
@@ -720,6 +1055,8 @@ u64 StaticRecompCore::HookExternalRead(CPUState* cpu, u32 ea, u8 size)
       KartExtSeedKartInfoOnDemand(cpu, ea, size);
     return KartExtRead(ea, size, cpu->pc);
   }
+
+  KartRecordInvalid(cpu, ea, size, 0u);
 
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
   ea = core->TranslateRelAddress(ea);
@@ -770,6 +1107,9 @@ void StaticRecompCore::HookExternalWrite(CPUState* cpu, u32 ea, u64 value, u8 si
     KartExtWrite(ea, value, size, cpu->pc);
     return;
   }
+
+
+  KartRecordInvalid(cpu, ea, size, 1u);
 
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
   ea = core->TranslateRelAddress(ea);

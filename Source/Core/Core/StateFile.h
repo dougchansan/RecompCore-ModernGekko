@@ -17,7 +17,10 @@ namespace State
 {
 extern Common::TransferableSharedMutex s_state_saves_in_progress;
 // Don't forget to increase this after doing changes on the savestate system
-constexpr u32 STATE_VERSION = 191;  // Last changed in PR 14668
+// 192: the MKDD vehicle-scaling extension window backing karts 8..15 is now
+// part of the state. It is host memory rather than emulated RAM, so a 191
+// state carries none of it and extended karts load with a zeroed sidecar.
+constexpr u32 STATE_VERSION = 192;  // Last changed by dolphin-kart-ext-savestate.patch
 
 // Increase this if the StateExtendedHeader definition changes
 constexpr u32 EXTENDED_HEADER_VERSION = 1;  // Last changed in PR 12217

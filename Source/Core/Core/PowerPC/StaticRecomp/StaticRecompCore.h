@@ -36,6 +36,10 @@ class StaticRecompLockstepVerifier;
 class StaticRecompCore : public JitBase
 {
 public:
+  // Read-only view of the live guest registers, for the debug overlay. The
+  // caller is on another thread and is not synchronised: see KartDebugOverlay.h
+  // for why a slightly stale read is the right trade here.
+  const CPUState& GetGuestState() const { return m_guest; }
   friend class StaticRecompLockstep::StaticRecompLockstepVerifier;
 
   explicit StaticRecompCore(Core::System& system, StaticRecompModuleSource module_source);
@@ -147,6 +151,8 @@ private:
   void KartWatchInit();
   static void KartWatchJournal(u32 vmem_offset, u32 size, void* user);
   static void KartWatchJournal2(u32 vmem_offset, u32 size, void* user);
+  static void KartBody36Journal(u32 vmem_offset, u32 size, void* user);
+  static void KartItemStateJournal(u32 vmem_offset, u32 size, void* user);
 
   // Keep Dolphin's MSR-derived state (translation mode, feature flags) in step
   // with the guest MSR before any MMU access or exception delivery.
