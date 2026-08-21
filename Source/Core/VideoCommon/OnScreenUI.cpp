@@ -3,6 +3,8 @@
 
 #include "VideoCommon/OnScreenUI.h"
 
+#include "VideoCommon/KartDebugOverlay.h"
+
 #include "Common/CommonPaths.h"
 #include "Common/EnumMap.h"
 #include "Common/FileUtil.h"
@@ -420,6 +422,7 @@ void OnScreenUI::Finalize()
   auto& perf_metrics = Core::System::GetInstance().GetPerfMetrics();
   perf_metrics.DrawImGuiStats(m_backbuffer_scale);
   DrawDebugText();
+  KartDebug::DrawOverlay(m_backbuffer_scale);
   OSD::DrawMessages();
   DrawChallengesAndLeaderboards();
   ImGui::Render();

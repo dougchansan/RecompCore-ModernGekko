@@ -16,7 +16,26 @@
 #include "VideoCommon/Present.h"
 #include "VideoCommon/VideoBackendBase.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <fstream>
+
+namespace
+{
+struct KartMetalTrace
+{
+  bool enabled = std::getenv("KART_METAL_TRACE") != nullptr;
+  unsigned long long bind_entry = 0;
+  unsigned long long drawable_return = 0;
+  unsigned long long bind_exit = 0;
+  unsigned long long present_entry = 0;
+  unsigned long long present_end_pass = 0;
+  unsigned long long present_scheduled = 0;
+  unsigned long long present_exit = 0;
+};
+
+KartMetalTrace s_kart_metal_trace;
+}
 
 Metal::Gfx::Gfx(MRCOwned<CAMetalLayer*> layer) : m_layer(std::move(layer))
 {
@@ -27,7 +46,19 @@ Metal::Gfx::Gfx(MRCOwned<CAMetalLayer*> layer) : m_layer(std::move(layer))
   g_state_tracker->FlushEncoders();
 }
 
-Metal::Gfx::~Gfx() = default;
+Metal::Gfx::~Gfx()
+{
+  if (s_kart_metal_trace.enabled)
+  {
+    std::fprintf(stderr,
+                 "[metal-frame] bind=%llu drawable=%llu bind_exit=%llu "
+                 "present=%llu endpass=%llu scheduled=%llu present_exit=%llu\n",
+                 s_kart_metal_trace.bind_entry, s_kart_metal_trace.drawable_return,
+                 s_kart_metal_trace.bind_exit, s_kart_metal_trace.present_entry,
+                 s_kart_metal_trace.present_end_pass, s_kart_metal_trace.present_scheduled,
+                 s_kart_metal_trace.present_exit);
+  }
+}
 
 bool Metal::Gfx::IsHeadless() const
 {
@@ -452,11 +483,17 @@ bool Metal::Gfx::BindBackbuffer(const ClearColor& clear_color)
 {
   @autoreleasepool
   {
+    if (s_kart_metal_trace.enabled)
+      ++s_kart_metal_trace.bind_entry;
     CheckForSurfaceChange();
     CheckForSurfaceResize();
     m_drawable = MRCRetain([m_layer nextDrawable]);
+    if (s_kart_metal_trace.enabled)
+      ++s_kart_metal_trace.drawable_return;
     m_backbuffer->UpdateBackbufferTexture([m_drawable texture]);
     SetAndClearFramebuffer(m_backbuffer.get(), clear_color);
+    if (s_kart_metal_trace.enabled)
+      ++s_kart_metal_trace.bind_exit;
     return m_drawable != nullptr;
   }
 }
@@ -465,7 +502,11 @@ void Metal::Gfx::PresentBackbuffer()
 {
   @autoreleasepool
   {
+    if (s_kart_metal_trace.enabled)
+      ++s_kart_metal_trace.present_entry;
     g_state_tracker->EndRenderPass();
+    if (s_kart_metal_trace.enabled)
+      ++s_kart_metal_trace.present_end_pass;
     if (m_drawable)
     {
       // PresentDrawable refuses to allow Dolphin to present faster than the display's refresh rate
@@ -482,7 +523,11 @@ void Metal::Gfx::PresentBackbuffer()
       m_backbuffer->UpdateBackbufferTexture(nullptr);
       m_drawable = nullptr;
     }
+    if (s_kart_metal_trace.enabled)
+      ++s_kart_metal_trace.present_scheduled;
     g_state_tracker->FlushEncoders();
+    if (s_kart_metal_trace.enabled)
+      ++s_kart_metal_trace.present_exit;
   }
 }
 

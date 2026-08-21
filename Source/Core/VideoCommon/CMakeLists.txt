@@ -123,6 +123,10 @@ add_library(videocommon
   NetPlayGolfUI.h
   OnScreenDisplay.cpp
   OnScreenDisplay.h
+  KartDebugOverlay.cpp
+  KartDebugOverlay.h
+  KartDebugSymbols.cpp
+  KartDebugSymbols.h
   OnScreenUI.cpp
   OnScreenUI.h
   OnScreenUIKeyMap.h
