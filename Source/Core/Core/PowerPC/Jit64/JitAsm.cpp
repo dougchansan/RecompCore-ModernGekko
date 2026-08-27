@@ -16,6 +16,7 @@
 #include "Core/HW/Memmap.h"
 #include "Core/PowerPC/Jit64/Jit.h"
 #include "Core/PowerPC/Jit64Common/Jit64PowerPCState.h"
+#include "Core/PowerPC/StaticRecomp/StaticRecompCore.h"
 #include "Core/System.h"
 
 using namespace Gen;
@@ -105,6 +106,20 @@ void Jit64AsmRoutineManager::Generate()
   SetJumpTarget(skipToRealDispatch);
 
   dispatcher_no_check = GetCodePtr();
+
+  // Ask StaticRecompCore whether the recompiled module wants this address
+  // before falling into the JIT's own block lookup. A non-zero answer leaves
+  // the dispatcher so the module can run it.
+  FixupBranch static_recomp_exit;
+  if (m_jit.IsStaticRecompFallback())
+  {
+    ABI_PushRegistersAndAdjustStack({}, 0);
+    MOV(32, R(ABI_PARAM1), PPCSTATE(pc));
+    ABI_CallFunction(StaticRecompShouldYieldAt);
+    ABI_PopRegistersAndAdjustStack({}, 0);
+    TEST(32, R(ABI_RETURN), R(ABI_RETURN));
+    static_recomp_exit = J_CC(CC_NZ, Jump::Near);
+  }
 
   // The following is a translation of JitBaseBlockCache::Dispatch into assembly.
   const bool assembly_dispatcher = true;
@@ -234,6 +249,8 @@ void Jit64AsmRoutineManager::Generate()
 
   // Landing pad for drec space
   dispatcher_exit = GetCodePtr();
+  if (m_jit.IsStaticRecompFallback())
+    SetJumpTarget(static_recomp_exit);
   if (enable_debugging)
     SetJumpTarget(dbg_exit);
 

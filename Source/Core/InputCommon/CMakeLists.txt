@@ -1,4 +1,8 @@
 add_library(inputcommon
+  # Automation drives the pad through these; Dolphin only builds them for
+  # Android, but the benchmark runtime needs them on desktop too.
+  ControllerInterface/Touch/InputOverrider.cpp
+  ControllerInterface/Touch/InputOverrider.h
   DynamicInputTextureManager.cpp
   DynamicInputTextureManager.h
   GCAdapter.cpp
@@ -136,8 +140,6 @@ elseif(ANDROID)
   target_sources(inputcommon PRIVATE
     ControllerInterface/Android/Android.cpp
     ControllerInterface/Android/Android.h
-    ControllerInterface/Touch/InputOverrider.cpp
-    ControllerInterface/Touch/InputOverrider.h
   )
   target_link_libraries(inputcommon PRIVATE
     androidcommon

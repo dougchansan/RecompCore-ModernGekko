@@ -582,7 +582,11 @@ BitSet32 Jit64::CallerSavedRegistersInUse(BitSet32 additional_registers) const
 void Jit64::EnableBlockLink()
 {
   jo.enableBlocklink = true;
-  if (SConfig::GetInstance().bJITNoBlockLinking)
+  // As the StaticRecomp fallback, blocks must not link to each other. Linked
+  // blocks chain without returning to the dispatcher, so control would never
+  // get back to StaticRecompCore to check whether the recompiled module covers
+  // the next address.
+  if (SConfig::GetInstance().bJITNoBlockLinking || IsStaticRecompFallback())
     jo.enableBlocklink = false;
 }
 

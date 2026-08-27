@@ -13,6 +13,10 @@ if(CMAKE_SYSTEM_NAME MATCHES "Windows")
   add_definitions(-D_CRT_SECURE_NO_DEPRECATE)
   add_definitions(-D_CRT_NONSTDC_NO_WARNINGS)
   add_definitions(-D_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING)
+  # Core/HW/RelocationAliases.cpp uses the std::atomic_*(shared_ptr*)
+  # overloads, which C++20 deprecates. Dolphin builds with /WX, so the
+  # deprecation warning is otherwise a hard error on MSVC.
+  add_definitions(-D_SILENCE_CXX20_OLD_SHARED_PTR_ATOMIC_SUPPORT_DEPRECATION_WARNING)
 endif()
 
 if (NOT MSVC)
