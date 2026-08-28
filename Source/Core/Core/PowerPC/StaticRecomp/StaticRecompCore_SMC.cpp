@@ -222,7 +222,6 @@ int StaticRecompCore::ChunkIndexOf(u32 address)
     if (direct_chunk >= 0 && m_chunk_rel_sections[direct_chunk] < 0)
       return direct_chunk;
   }
-
   u32 linked_address = address;
   if (!ResolveNativeAddress(address, &linked_address, nullptr))
     return -1;

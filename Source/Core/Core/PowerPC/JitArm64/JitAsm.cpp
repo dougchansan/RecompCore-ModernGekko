@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/PowerPC/JitArm64/Jit.h"
+#include "Core/PowerPC/StaticRecomp/StaticRecompCore.h"
+
+#include <cstdlib>
 
 #include <bit>
 #include <limits>
@@ -30,6 +33,11 @@ bool JitArm64StaticRecompEnabled();
 #include "Core/System.h"
 
 using namespace Arm64Gen;
+
+
+// Defined in JitArm64_Cache.cpp. The block-linking policy there and the
+// dispatcher hook below must make the same decision, so they share one reader.
+bool JitArm64StaticRecompEnabled();
 
 void JitArm64::GenerateAsm()
 {

@@ -152,8 +152,8 @@ void StaticRecompLockstepVerifier::LockstepCheck(u32 entry_pc, u32 end_pc, const
         std::fprintf(stderr, " %02X", ram[o + k]);
       std::fprintf(stderr, "\n");
     };
-    std::fprintf(stderr, "[ls-trace] ENTRY r3=0x%08X r4=0x%08X r5=0x%08X charge=%lld\n",
-                 entry_state.gpr[3], entry_state.gpr[4], entry_state.gpr[5],
+    std::fprintf(stderr, "[ls-trace] ENTRY r3=0x%08X r4=0x%08X r5=0x%08X r13=0x%08X charge=%lld\n",
+                 entry_state.gpr[3], entry_state.gpr[4], entry_state.gpr[5], entry_state.gpr[13],
                  (long long)native_charge);
     if ((entry_state.gpr[3] >> 28) == 8)
       dump("r3", entry_state.gpr[3]);
@@ -171,12 +171,31 @@ void StaticRecompLockstepVerifier::LockstepCheck(u32 entry_pc, u32 end_pc, const
 
     if (m_ls_trace_pc != 0 && entry_pc == m_ls_trace_pc)
     {
-      std::fprintf(stderr, "[ls-trace] step %d: pc=0x%08X r3=0x%08X r4=0x%08X r5=0x%08X msr=0x%08X xer=0x%08X cr=0x%08X lr=0x%08X ctr=0x%08X\n",
-                   steps, before, ppc.gpr[3], ppc.gpr[4], ppc.gpr[5], ppc.msr.Hex,
+      std::fprintf(stderr,
+                   "[ls-trace] step %d: pc=0x%08X r3=0x%08X r4=0x%08X r5=0x%08X r13=0x%08X "
+                   "msr=0x%08X xer=0x%08X cr=0x%08X lr=0x%08X ctr=0x%08X\n",
+                   steps, before, ppc.gpr[3], ppc.gpr[4], ppc.gpr[5], ppc.gpr[13], ppc.msr.Hex,
                    ppc.GetXER().Hex, ppc.cr.Get(), ppc.spr[SPR_LR], ppc.spr[SPR_CTR]);
     }
     if (ppc.pc == end_pc)
-      break;
+    {
+      // A native dispatch can fall through into a loop body and return at its
+      // back-edge with PC set to the loop header. In that one case the shadow
+      // must execute the inlined iteration before stopping. An arrival by any
+      // branch (including a call to an address which also happens to be a loop
+      // header) is already the native dispatch boundary.
+      // ...and on a loop header, not until the shadow has done as much work as
+      // the native block did. A generated chunk leaves an inlined loop at its
+      // header once the block's charge crosses DOLRECOMP_C_LOOP_CYCLE_BUDGET
+      // (emitter.c:324), so the iteration it stops on is timing-determined and
+      // cannot be inferred from the code. Stopping at the first branch arrival
+      // compares two different iterations of the same loop at the same PC,
+      // which is the long-standing GPR divergence on both arm64 and x86-64.
+      if (!end_is_loop_header)
+        break;
+      if (interp_cycles >= native_charge)
+        break;
+    }
     if (ppc.Exceptions != 0)
       break;
   }
@@ -194,6 +213,9 @@ void StaticRecompLockstepVerifier::LockstepCheck(u32 entry_pc, u32 end_pc, const
   StaticRecompLockstep::g_tb_override_active = false;
 
   const bool reached = (ppc.pc == end_pc && ppc.Exceptions == 0);
+  const bool cap_hit = !reached && ppc.Exceptions == 0 && steps >= m_ls_step_cap;
+  if (cap_hit)
+    ++m_ls_cap_hits;
   const bool undercharged = reached && (interp_cycles > native_charge + LS_UNDERCHARGE_GRACE) && !end_is_loop_header;
 
   std::string diff;
@@ -285,13 +307,20 @@ void StaticRecompLockstepVerifier::LockstepCheck(u32 entry_pc, u32 end_pc, const
       diff += " mmio-read-seq-divergence";
   }
 
-  if (!diff.empty() && m_ls_whitelist.find(entry_pc) == m_ls_whitelist.end())
+  if (!cap_hit && !diff.empty() && m_ls_whitelist.find(entry_pc) == m_ls_whitelist.end())
   {
-    ++m_ls_reports;
-    if (m_ls_max_report == 0 || m_ls_reports <= m_ls_max_report)
+    if (!m_ls_filter.empty() && diff.find(m_ls_filter) == std::string::npos)
     {
-      std::fprintf(stderr, "[lockstep] DIVERGE #%llu entry=0x%08X end=0x%08X:%s\n",
-                   (unsigned long long)m_ls_reports, entry_pc, end_pc, diff.c_str());
+      ++m_ls_filtered;
+    }
+    else
+    {
+      ++m_ls_reports;
+      if (m_ls_max_report == 0 || m_ls_reports <= m_ls_max_report)
+      {
+        std::fprintf(stderr, "[lockstep] DIVERGE #%llu entry=0x%08X end=0x%08X:%s\n",
+                     (unsigned long long)m_ls_reports, entry_pc, end_pc, diff.c_str());
+      }
     }
   }
   else if (undercharged)

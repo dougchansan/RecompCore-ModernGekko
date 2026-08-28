@@ -381,12 +381,21 @@ void ppc_program_exception(CPUState* cpu, u32 cause, u32 cia);
  * returns false. ppc_lazy_fp_set_enabled(false) restores the historical
  * execute-regardless behavior for hosts that eagerly restore FP state
  * themselves (StrikersRecomp standalone; see recomp-codegen.md Lazy FPU). */
-/* ppc_fp_available() is deliberately kept as a real symbol: the LLVM backend
- * emits calls to it by name, so it cannot become header-only. The C backend
- * emits the _inline form so this runtime can supply the fast path. */
+bool ppc_fp_available(CPUState* cpu, u32 cia);
+void ppc_lazy_fp_set_enabled(bool enabled);
+
+/* Same contract, inlined. The emitter puts this in front of every FPU
+ * instruction, so on a float-heavy title it is one of the hottest things in the
+ * module: a `sample` of a Mario Kart race showed the out-of-line call at ~7% of
+ * self time inside StaticRecompCore::Run, second only to the hottest guest loop.
+ * Nearly every call takes the fast path -- a running game has MSR[FP] set -- so
+ * the work was the call itself, not the test. Only the raise stays out of line.
+ *
+ * ppc_fp_available() is deliberately kept as a real symbol: the LLVM backend
+ * emits calls to it by name (llvm_runtime_lowering.cpp), so it cannot become
+ * header-only. */
 extern bool g_ppc_lazy_fp_enabled;
 bool ppc_fp_raise_unavailable(CPUState* cpu, u32 cia);
-bool ppc_fp_available(CPUState* cpu, u32 cia);
 
 static inline bool ppc_fp_available_inline(CPUState* cpu, u32 cia) {
     if (!g_ppc_lazy_fp_enabled || (cpu->msr & PPC_MSR_FP))

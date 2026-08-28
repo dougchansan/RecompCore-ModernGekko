@@ -170,6 +170,11 @@ add_library(common
 
 add_dependencies(common dolphin_scmrev)
 
+if(MINGW)
+  set_source_files_properties(FilesystemWatcher.cpp PROPERTIES
+    COMPILE_OPTIONS "-fexceptions")
+endif()
+
 if(NOT MSVC AND _M_ARM_64)
   set_source_files_properties(
     Crypto/AES.cpp
@@ -210,7 +215,10 @@ if (APPLE)
 elseif(WIN32)
   target_link_libraries(common
   PRIVATE
+    cfgmgr32.lib
     kernel32.lib
+    ntdll.lib
+    qwave.lib
     shlwapi.lib
     winmm.lib
   )
@@ -310,13 +318,15 @@ endif()
 
 if(WIN32)
   target_sources(common PRIVATE
-    CompatPatches.cpp
     GL/GLInterface/WGL.cpp
     GL/GLInterface/WGL.h
     WindowsDevice.cpp
     WindowsDevice.h
     WindowsRegistry.cpp
   )
+  if(MSVC)
+    target_sources(common PRIVATE CompatPatches.cpp)
+  endif()
 elseif(APPLE)
   target_sources(common PRIVATE
     GL/GLInterface/AGL.h
@@ -378,18 +388,20 @@ if(UNIX)
     target_link_libraries(traversal_server PRIVATE ${SYSTEMD_LIBRARIES})
   endif()
 elseif(WIN32)
-  find_package(PowerShell REQUIRED)
-  execute_process(
-    COMMAND ${POWERSHELL_EXE} -Command "[System.Diagnostics.FileVersionInfo]::GetVersionInfo('$ENV{VCToolsRedistDir}vc_redist.x64.exe').ProductVersion"
-    OUTPUT_VARIABLE VC_TOOLS_VERSION
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
+  set(VC_TOOLS_VERSION "")
+  if(MSVC)
+    find_package(PowerShell REQUIRED)
+    execute_process(
+      COMMAND ${POWERSHELL_EXE} -Command "[System.Diagnostics.FileVersionInfo]::GetVersionInfo('$ENV{VCToolsRedistDir}vc_redist.x64.exe').ProductVersion"
+      OUTPUT_VARIABLE VC_TOOLS_VERSION
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      )
+    target_link_libraries(common PRIVATE "-INCLUDE:enableCompatPatches")
+  endif()
   configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/build_info.txt.in"
     "${CMAKE_BINARY_DIR}/build_info.txt"
     )
-
-  target_link_libraries(common PRIVATE "-INCLUDE:enableCompatPatches")
 endif()
 
 if(MSVC)

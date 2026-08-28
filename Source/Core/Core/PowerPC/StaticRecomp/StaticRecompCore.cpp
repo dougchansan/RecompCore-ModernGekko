@@ -42,7 +42,8 @@ bool RangesAreSorted(const StaticRecompRange* ranges, u32 count)
     return false;
   for (u32 i = 0; i < count; ++i)
   {
-    if (ranges[i].start >= ranges[i].end || (i != 0 && ranges[i - 1].end > ranges[i].start))
+    if (ranges[i].start >= ranges[i].end ||
+        (i != 0 && ranges[i - 1].end > ranges[i].start))
       return false;
   }
   return true;
@@ -66,8 +67,7 @@ bool ChunksTileCode(const StaticRecompModuleDesc& desc)
   for (u32 code = 0; code < desc.num_code_ranges; ++code)
   {
     u32 cursor = desc.code_ranges[code].start;
-    while (chunk < desc.num_chunk_ranges &&
-           desc.chunk_ranges[chunk].start < desc.code_ranges[code].end)
+    while (chunk < desc.num_chunk_ranges && desc.chunk_ranges[chunk].start < desc.code_ranges[code].end)
     {
       if (desc.chunk_ranges[chunk].start != cursor ||
           desc.chunk_ranges[chunk].end > desc.code_ranges[code].end)
@@ -89,8 +89,9 @@ bool RelModulesValid(const StaticRecompModuleDesc& desc)
   for (u32 i = 0; i < desc.num_rel_modules; ++i)
   {
     const StaticRecompRelModule& module = desc.rel_modules[i];
-    if (module.module_id == 0 || module.section_count == 0 || module.section_info_offset < 0x40 ||
-        module.file_size < 0x40 || !module.sections || module.num_sections == 0)
+    if (module.module_id == 0 || module.section_count == 0 ||
+        module.section_info_offset < 0x40 || module.file_size < 0x40 ||
+        !module.sections || module.num_sections == 0)
       return false;
     for (u32 j = 0; j < module.num_sections; ++j)
     {
@@ -119,7 +120,8 @@ bool StaticRecompCore::IsHostCallAddress(u32 address) const
   if (m_module_source.host_call_contains(address, m_module_source.host_call_user))
     return true;
   return address < m_guest.ram_size &&
-         m_module_source.host_call_contains(address | 0x80000000u, m_module_source.host_call_user);
+         m_module_source.host_call_contains(address | 0x80000000u,
+                                            m_module_source.host_call_user);
 }
 
 bool StaticRecompCore::ShouldYieldAt(u32 address)
@@ -157,7 +159,6 @@ bool StaticRecompCore::IsBusyWaitLoop(u32 address)
   m_busy_wait_cache.emplace(address, is_busy_wait);
   return is_busy_wait;
 }
-
 StaticRecompCore::StaticRecompCore(Core::System& system, StaticRecompModuleSource module_source)
     : JitBase(system), m_module_source(std::move(module_source))
 {
@@ -171,9 +172,8 @@ void StaticRecompCore::Init()
   RefreshConfig();
   m_collect_dispatch_samples = std::getenv("STATICRECOMP_DISPATCH_SAMPLES") != nullptr;
   const char* fallback_override = std::getenv("STATICRECOMP_FALLBACK_RANGES");
-  std::istringstream fallback_ranges(fallback_override ?
-                                         fallback_override :
-                                         Config::Get(Config::MAIN_STATICRECOMP_FALLBACK_RANGES));
+  std::istringstream fallback_ranges(fallback_override ? fallback_override :
+                                                         Config::Get(Config::MAIN_STATICRECOMP_FALLBACK_RANGES));
   std::string fallback_range;
   while (std::getline(fallback_ranges, fallback_range, ','))
   {
@@ -252,7 +252,8 @@ void StaticRecompCore::Shutdown()
                  "native_exceptions={} hook_fallback_instructions={} smc_failed_chunks={} "
                  "verifications={} reverify_events={}",
                  m_native_dispatches, m_fallback_steps, m_native_exceptions,
-                 m_hook_fallback_instructions, m_failed_chunks, m_verifications, m_reverify_events);
+                 m_hook_fallback_instructions, m_failed_chunks, m_verifications,
+                 m_reverify_events);
   m_lockstep_verifier.reset();
   m_block_cache.Shutdown();
   m_module = nullptr;
@@ -305,8 +306,8 @@ void StaticRecompCore::LoadModule()
   if (desc->abi_version != STATICRECOMP_ABI_VERSION)
     return reject(fmt::format("abi_version {} != {}", desc->abi_version, STATICRECOMP_ABI_VERSION));
   if (desc->cpu_abi_version != GXRUNTIME_CPU_ABI_VERSION)
-    return reject(
-        fmt::format("cpu_abi_version {} != {}", desc->cpu_abi_version, GXRUNTIME_CPU_ABI_VERSION));
+    return reject(fmt::format("cpu_abi_version {} != {}", desc->cpu_abi_version,
+                              GXRUNTIME_CPU_ABI_VERSION));
   if (desc->cpu_state_size != sizeof(CPUState))
     return reject(fmt::format("cpu_state_size {} != sizeof(CPUState) {}", desc->cpu_state_size,
                               sizeof(CPUState)));
@@ -331,11 +332,13 @@ void StaticRecompCore::LoadModule()
 
   m_module = desc;
   m_module_active = (desc != nullptr);
+  m_has_rel_modules = desc->num_rel_modules != 0;
   m_chunk_state.assign(desc->num_chunk_ranges, CHUNK_UNVERIFIED);
   m_chunk_retry_after.assign(desc->num_chunk_ranges, 0);
   m_smc_probe_clock = 0;
   m_chunk_host_call_state.assign(desc->num_chunk_ranges, 0);
-  m_effective_chunk_hashes.assign(desc->chunk_hashes, desc->chunk_hashes + desc->num_chunk_ranges);
+  m_effective_chunk_hashes.assign(desc->chunk_hashes,
+                                  desc->chunk_hashes + desc->num_chunk_ranges);
   m_chunk_rel_sections.assign(desc->num_chunk_ranges, -1);
   for (u32 chunk_index = 0; chunk_index < desc->num_chunk_ranges; ++chunk_index)
   {
@@ -344,8 +347,7 @@ void StaticRecompCore::LoadModule()
     for (u32 module_index = 0; module_index < desc->num_rel_modules; ++module_index)
     {
       const StaticRecompRelModule& module = desc->rel_modules[module_index];
-      for (u32 section_index = 0; section_index < module.num_sections;
-           ++section_index, ++flat_section)
+      for (u32 section_index = 0; section_index < module.num_sections; ++section_index, ++flat_section)
       {
         const StaticRecompRelSection& section = module.sections[section_index];
         const u64 section_end = static_cast<u64>(section.linked_start) + section.size;

@@ -848,11 +848,16 @@ if(WIN32)
     HW/WiimoteReal/IOWin.h
   )
   target_link_libraries(core PUBLIC
-    videod3d
-    videod3d12
+    bthprops.lib
+    hid.lib
     setupapi.lib
     iphlpapi.lib
   )
+  # VideoBackends is configured after Core, so if(TARGET ...) is always false
+  # here. D3D/D3D12 are added whenever WIN32 AND MSVC, mirror that condition.
+  if(MSVC)
+    target_link_libraries(core PUBLIC videod3d12 videod3d)
+  endif()
   target_compile_definitions(core PRIVATE "-D_WINSOCK_DEPRECATED_NO_WARNINGS")
 elseif(APPLE)
   target_sources(core PRIVATE

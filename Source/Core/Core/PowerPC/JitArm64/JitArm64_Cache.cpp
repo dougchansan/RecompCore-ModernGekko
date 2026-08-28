@@ -1,9 +1,9 @@
 // Copyright 2026 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <cstdlib>
-
 #include "Core/PowerPC/JitArm64/Jit.h"
+
+#include <cstdlib>
 
 #include <cstdio>
 #include <optional>
@@ -101,7 +101,8 @@ void JitArm64::SetBlockLinkingEnabled(bool enabled)
   // blocks chain without returning to the dispatcher, so control would never
   // get back to StaticRecompCore to check whether the recompiled module covers
   // the next address -- which is exactly why the module was entered once at
-  // boot and never again on arm64.
+  // boot and never again on arm64. Jit64 has always done this; JitArm64 did
+  // not, which made the whole static recompilation inert on Apple Silicon.
   jo.enableBlocklink =
       enabled && !SConfig::GetInstance().bJITNoBlockLinking &&
       !(IsStaticRecompFallback() && JitArm64StaticRecompEnabled());

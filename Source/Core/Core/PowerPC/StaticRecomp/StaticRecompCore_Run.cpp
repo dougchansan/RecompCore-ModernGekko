@@ -1,25 +1,52 @@
 // RecompCore: StaticRecomp CPU core - Main execution loop.
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <cstdlib>
-#include "Core/Config/ConfigManager.h"
-#include "Core/Config/MainSettings.h"
+#include "Core/PowerPC/StaticRecomp/StaticRecompCore.h"
+#include "Core/System.h"
+#include "Core/PowerPC/PowerPC.h"
+#include "Core/PowerPC/Interpreter/Interpreter.h"
+#include "Core/PowerPC/StaticRecomp/StaticRecompLockstep.h"
 #include "Core/CoreTiming.h"
 #include "Core/HW/CPU.h"
+#include "Core/Config/MainSettings.h"
+#include "Core/Config/ConfigManager.h"
 #include "Core/HW/SystemTimers.h"
-#include "Core/PowerPC/Interpreter/Interpreter.h"
-#include "Core/PowerPC/PowerPC.h"
-#include "Core/PowerPC/StaticRecomp/StaticRecompCore.h"
-#include "Core/PowerPC/StaticRecomp/StaticRecompLockstep.h"
-#include "Core/System.h"
 
-#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <memory>
+#include <algorithm>
 
 namespace
 {
 constexpr u32 SYNC_EXCEPTION_MASK = ~static_cast<u32>(
     EXCEPTION_EXTERNAL_INT | EXCEPTION_DECREMENTER | EXCEPTION_PERFORMANCE_MONITOR);
+
+struct FileCloser
+{
+  void operator()(std::FILE* file) const
+  {
+    if (file)
+      std::fclose(file);
+  }
+};
+
+using FilePtr = std::unique_ptr<std::FILE, FileCloser>;
+
+FilePtr OpenDispatchTrace()
+{
+  const char* path = std::getenv("STATICRECOMP_TRACE_FILE");
+  if (!path || !*path)
+    return {};
+
+  FilePtr file(std::fopen(path, "w"));
+  if (file)
+  {
+    std::fprintf(file.get(), "dispatch,pc,lr,ctr,cr,timebase,ppc_downcount\n");
+    std::fflush(file.get());
+  }
+  return file;
+}
 }
 
 void StaticRecompCore::Run()
@@ -30,6 +57,7 @@ void StaticRecompCore::Run()
   auto& interpreter = m_system.GetInterpreter();
   auto& memory = m_system.GetMemory();
   const CPU::State* state_ptr = m_system.GetCPU().GetStatePtr();
+  FilePtr dispatch_trace = OpenDispatchTrace();
 
   m_guest.ram = memory.GetRAM();
   m_guest.ram_size = memory.GetRamSizeReal();
@@ -38,7 +66,7 @@ void StaticRecompCore::Run()
   InitLookupTable(m_guest.ram_size, m_guest.exram_size);
   const bool lockstep_enabled = m_lockstep_verifier->IsEnabled();
   const auto fast_dispatchable_at = [this](u32 address) {
-    if (m_host_calls_active || (m_module && m_module->num_rel_modules != 0) ||
+    if (m_host_calls_active || m_has_rel_modules ||
         !m_forced_fallback_ranges.empty())
       return FastDispatchableAt(address);
     if (!m_module_active || m_chunk_lookup_table.empty())
@@ -114,6 +142,14 @@ void StaticRecompCore::Run()
         ++m_bursts;
         do
         {
+          if (dispatch_trace && (m_native_dispatches & 0xFFFFFu) == 0)
+          {
+            std::fprintf(dispatch_trace.get(), "%llu,%08x,%08x,%08x,%08x,%llu,%d\n",
+                         static_cast<unsigned long long>(m_native_dispatches), m_guest.pc,
+                         m_guest.lr, m_guest.ctr, m_guest.cr,
+                         static_cast<unsigned long long>(m_guest.timebase), ppc.downcount);
+            std::fflush(dispatch_trace.get());
+          }
           const bool do_ls = lockstep_enabled && m_lockstep_verifier->ShouldCheck(m_guest.pc);
           if (do_ls)
           {
@@ -124,11 +160,11 @@ void StaticRecompCore::Run()
             ++m_dispatch_samples[m_guest.pc];
           const u32 runtime_dispatch_address = m_guest.pc;
           u32 linked_dispatch_address = runtime_dispatch_address;
-          if (m_module->num_rel_modules != 0)
+          if (m_has_rel_modules)
             ResolveNativeAddress(runtime_dispatch_address, &linked_dispatch_address, nullptr);
           m_guest.pc = linked_dispatch_address;
           m_module->dispatch(&m_guest, linked_dispatch_address);
-          if (m_module->num_rel_modules != 0)
+          if (m_has_rel_modules)
             m_guest.pc = TranslateRelAddress(m_guest.pc);
           ++m_native_dispatches;
 
@@ -236,8 +272,9 @@ void StaticRecompCore::Run()
           {
             ppc.downcount -= interpreter.SingleStepInner();
             ++m_fallback_steps;
-          } while (!(m_module_active && DispatchableAt(ppc.pc)) && !IsHostCallAddress(ppc.pc) &&
-                   ppc.downcount > 0 && *state_ptr == CPU::State::Running);
+          } while (!(m_module_active && DispatchableAt(ppc.pc)) &&
+                   !IsHostCallAddress(ppc.pc) && ppc.downcount > 0 &&
+                   *state_ptr == CPU::State::Running);
         }
       }
     } while (ppc.downcount > 0 && *state_ptr == CPU::State::Running);
