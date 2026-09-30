@@ -100,7 +100,7 @@ if(MODERNGEKKO_ENABLE_NGX)
   target_link_libraries(videovulkan PRIVATE "${_moderngekko_ngx_library}" ${CMAKE_DL_LIBS})
   target_compile_definitions(videovulkan PRIVATE
     MODERNGEKKO_ENABLE_NGX=1
-    MODERNGEKKO_NGX_PROJECT_ID="\"${MODERNGEKKO_NGX_PROJECT_ID}\""
+    MODERNGEKKO_NGX_PROJECT_ID="${MODERNGEKKO_NGX_PROJECT_ID}"
   )
 endif()
 
