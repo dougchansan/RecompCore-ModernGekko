@@ -78,10 +78,11 @@ bool Initialize(VulkanContext& context)
   if (s_initialized)
     return true;
 
-  const std::wstring data_path = GetApplicationDataPath().wstring();
+  const std::filesystem::path data_path = GetApplicationDataPath();
+  const std::wstring data_path_wide = data_path.wstring();
   const NVSDK_NGX_Result result = NVSDK_NGX_VULKAN_Init_with_ProjectID(
       MODERNGEKKO_NGX_PROJECT_ID, NVSDK_NGX_ENGINE_TYPE_CUSTOM,
-      "ModernGekko-NGX-PoC-1", data_path.c_str(), context.GetVulkanInstance(),
+      "ModernGekko-NGX-PoC-1", data_path_wide.c_str(), context.GetVulkanInstance(),
       context.GetPhysicalDevice(), context.GetDevice());
 
   if (NVSDK_NGX_FAILED(result))
