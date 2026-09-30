@@ -8,6 +8,7 @@
 
 #include "VideoBackends/Vulkan/CommandBufferManager.h"
 #include "VideoBackends/Vulkan/ObjectCache.h"
+#include "VideoBackends/Vulkan/ModernGekkoNGX.h"
 #include "VideoBackends/Vulkan/StateTracker.h"
 #include "VideoBackends/Vulkan/VKBoundingBox.h"
 #include "VideoBackends/Vulkan/VKGfx.h"
@@ -187,6 +188,11 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
 
   UpdateActiveConfig();
 
+  // ModernGekko's NGX bootstrap is intentionally non-fatal. A normal Vulkan
+  // session must continue to work if NGX is disabled, unavailable, or rejected
+  // by the driver.
+  ModernGekkoNGX::Initialize(*g_vulkan_context);
+
   // Remaining classes are also dependent on object cache.
   g_object_cache = std::make_unique<ObjectCache>();
   if (!g_object_cache->Initialize())
@@ -239,7 +245,10 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
 void VideoBackend::Shutdown()
 {
   if (g_vulkan_context)
+  {
     vkDeviceWaitIdle(g_vulkan_context->GetDevice());
+    ModernGekkoNGX::Shutdown(*g_vulkan_context);
+  }
 
   if (g_object_cache)
     g_object_cache->Shutdown();
