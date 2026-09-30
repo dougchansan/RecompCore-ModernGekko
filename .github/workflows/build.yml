@@ -20,6 +20,7 @@ jobs:
         run: ninja -C build dolphin-emu-nogui
 
   nogui-linux:
+    if: github.ref != 'refs/heads/feature/dlss-ngx-vulkan-poc'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -39,6 +40,7 @@ jobs:
 
 
   nogui-linux-ngx:
+    if: github.ref == 'refs/heads/feature/dlss-ngx-vulkan-poc'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -63,5 +65,5 @@ jobs:
             -DMODERNGEKKO_ENABLE_NGX=ON \
             -DMODERNGEKKO_NGX_SDK_ROOT="$RUNNER_TEMP/NVIDIA-DLSS" \
             -DMODERNGEKKO_NGX_PROJECT_ID=6dcb2b20-dcf8-4b79-a5ea-d7c50e3eefc8
-      - name: Build NGX-enabled no-GUI binary
-        run: ninja -C build-ngx dolphin-emu-nogui
+      - name: Build NGX-enabled Vulkan backend
+        run: ninja -C build-ngx videovulkan
