@@ -36,3 +36,32 @@ jobs:
         run: cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DENABLE_QT=OFF -DENABLE_NOGUI=ON -DUSE_MGBA=OFF
       - name: Build
         run: ninja -C build dolphin-emu-nogui
+
+
+  nogui-linux-ngx:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build build-essential pkg-config \
+            libevdev-dev libudev-dev libgtk-3-dev libsystemd-dev \
+            libbluetooth-dev libasound2-dev libpulse-dev libgl1-mesa-dev \
+            libxrandr-dev libxi-dev
+      - name: Fetch NVIDIA DLSS SDK
+        run: git clone --depth 1 https://github.com/NVIDIA/DLSS.git "$RUNNER_TEMP/NVIDIA-DLSS"
+      - name: Configure with NGX
+        run: |
+          cmake -B build-ngx -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_QT=OFF \
+            -DENABLE_NOGUI=ON \
+            -DUSE_MGBA=OFF \
+            -DMODERNGEKKO_ENABLE_NGX=ON \
+            -DMODERNGEKKO_NGX_SDK_ROOT="$RUNNER_TEMP/NVIDIA-DLSS" \
+            -DMODERNGEKKO_NGX_PROJECT_ID=6dcb2b20-dcf8-4b79-a5ea-d7c50e3eefc8
+      - name: Build NGX-enabled no-GUI binary
+        run: ninja -C build-ngx dolphin-emu-nogui
