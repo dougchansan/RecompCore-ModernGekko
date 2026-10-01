@@ -6,6 +6,8 @@
 #include <array>
 #include <cmath>
 #include <memory>
+#include <cstdlib>
+#include <string_view>
 
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
@@ -43,6 +45,11 @@
 #include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/XFMemory.h"
 #include "VideoCommon/XFStateManager.h"
+#ifdef HAS_VULKAN
+#include "VideoBackends/Vulkan/VKGfx.h"
+#include "VideoBackends/Vulkan/StateTracker.h"
+#include "VideoCommon/ModernGekkoTemporalState.h"
+#endif
 
 std::unique_ptr<VertexManagerBase> g_vertex_manager;
 
@@ -1069,6 +1076,13 @@ void VertexManagerBase::RenderDrawCall(
     pixel_shader_manager.custom_constants_dirty = true;
   }
   pixel_shader_manager.custom_constants = custom_pixel_shader_uniforms;
+#ifdef HAS_VULKAN
+  const TemporalDrawPlan temporal_plan = PrepareTemporalDraw(
+      current_pipeline, !custom_pixel_shader_contents.shaders.empty());
+  // Native rendering and all guest-visible callbacks always use the unjittered lane.
+  if (g_backend_info.api_type == APIType::Vulkan)
+    Core::System::GetInstance().GetVertexShaderManager().SetTemporalRasterJitter(false);
+#endif
   UploadUniforms();
 
   g_gfx->SetPipeline(current_pipeline);
@@ -1097,7 +1111,130 @@ void VertexManagerBase::RenderDrawCall(
 
   if (PerfQueryBase::ShouldEmulate())
     g_perf_query->DisableQuery(bpmem.zcontrol.early_ztest ? PQG_ZCOMP_ZCOMPLOC : PQG_ZCOMP);
+#ifdef HAS_VULKAN
+  ReplayTemporalDraw(temporal_plan, base_index, m_index_generator.GetIndexLen(), base_vertex);
+#endif
 }
+
+#ifdef HAS_VULKAN
+VertexManagerBase::TemporalDrawPlan
+VertexManagerBase::PrepareTemporalDraw(const AbstractPipeline* native_pipeline, bool custom_shader)
+{
+  TemporalDrawPlan plan;
+  const char* requested = std::getenv("MODERNGEKKO_DLSS_EVALUATE");
+  const char* ngx_requested = std::getenv("MODERNGEKKO_DLSS");
+  if (!requested || std::string_view(requested) != "1" || !ngx_requested ||
+      std::string_view(ngx_requested) != "1" || g_backend_info.api_type != APIType::Vulkan ||
+      !ModernGekkoTemporal::GetState().active)
+    return plan;
+
+  auto* gfx = Vulkan::VKGfx::GetInstance();
+  const auto native_state = gfx->SaveTemporalRasterState();
+  auto reject = [&](std::string_view reason) {
+    static u64 rejected_draws = 0;
+    if (++rejected_draws <= 8 || rejected_draws % 120 == 0)
+      INFO_LOG_FMT(VIDEO, "Temporal mirror: rejected draws={} reason={}", rejected_draws, reason);
+    g_framebuffer_manager->InvalidateTemporalMirrorCoverage();
+    gfx->RestoreTemporalRasterState(native_state);
+    return TemporalDrawPlan{};
+  };
+  // These paths need separate matched-draw proof before they can update the mirror.
+  const auto* ps = m_current_pipeline_config.ps_uid.GetUidData();
+  if (custom_shader || g_ActiveConfig.bGraphicMods ||
+      g_ActiveConfig.stereo_mode != StereoMode::Off ||
+      g_framebuffer_manager->GetEFBSamples() != 1 || bpmem.genMode.zfreeze ||
+      !std::isfinite(xfmem.viewport.wd) || !std::isfinite(xfmem.viewport.ht) ||
+      !std::isfinite(xfmem.viewport.zRange) || !std::isfinite(xfmem.viewport.farZ) ||
+      xfmem.viewport.wd == 0.0f || xfmem.viewport.ht == 0.0f || ps->uint_output ||
+      m_current_pipeline_config.blending_state.logic_op_enable ||
+      ps->blend_enable || ps->logic_op_enable || ps->ztest == EmulatedZ::EarlyWithFBFetch ||
+      (!bpmem.zcontrol.early_ztest && m_current_pipeline_config.depth_state.test_enable))
+    return reject("unsupported shader, sample count or depth mode");
+  if (!g_framebuffer_manager->EnsureTemporalMirror())
+    return reject("mirror framebuffer unavailable");
+
+  const bool known = !g_texture_cache->HasUnclassifiedTemporalInputs(UsedTextures()) &&
+                     xfmem.projection.type == ProjectionType::Perspective;
+  const auto native_blend = m_current_pipeline_config.blending_state;
+  if (!native_blend.color_update && m_current_pipeline_config.depth_state.update_enable && !known)
+    return reject("unclassified depth-only contribution");
+  const bool overwrite = known && native_blend.color_update && !native_blend.blend_enable &&
+                         !native_blend.logic_op_enable;
+  const auto mode = known ? TemporalPixelShaderMode::MetadataKnown :
+                            TemporalPixelShaderMode::MetadataUnknown;
+  auto pipeline_for = [&](TemporalPixelShaderMode shader_mode, bool metadata) {
+    auto specialized = m_current_pipeline_config;
+    auto uber = m_current_uber_pipeline_config;
+    SetTemporalPixelShaderMode(&specialized.ps_uid, shader_mode);
+    UberShader::SetTemporalPixelShaderMode(&uber.ps_uid, shader_mode);
+    if (metadata)
+    {
+      DepthState depth = specialized.depth_state;
+      depth.update_enable = false;
+      BlendingState blend{};
+      blend.color_update = true;
+      blend.alpha_update = true;
+      if (!overwrite)
+      {
+        // With exact 0/1 metadata, destination*source is binary MIN. Known blended
+        // draws preserve prior taint; unknown draws write zero without discarding depth.
+        blend.blend_enable = true;
+        blend.src_factor = SrcBlendFactor::Zero;
+        blend.dst_factor = DstBlendFactor::SrcClr;
+        blend.src_factor_alpha = SrcBlendFactor::Zero;
+        blend.dst_factor_alpha = DstBlendFactor::SrcAlpha;
+      }
+      specialized.depth_state = depth;
+      uber.depth_state = depth;
+      specialized.blending_state = blend;
+      uber.blending_state = blend;
+    }
+    if (native_pipeline->m_config.usage == AbstractPipelineUsage::GXUber)
+      return g_shader_cache->GetUberPipelineForUid(uber);
+    return g_shader_cache->GetPipelineForUid(specialized);
+  };
+  plan.known = known;
+  plan.overwrite = overwrite;
+  plan.color_pipeline = pipeline_for(TemporalPixelShaderMode::MirrorColor, false);
+  if (native_blend.color_update)
+    plan.metadata_pipeline = pipeline_for(mode, true);
+  plan.color_framebuffer = g_framebuffer_manager->GetTemporalMirrorFramebuffer();
+  plan.metadata_framebuffer = g_framebuffer_manager->GetTemporalCoverageFramebuffer();
+  if (!plan.color_pipeline || (native_blend.color_update && !plan.metadata_pipeline))
+    return reject("paired shader pipeline unavailable");
+  gfx->RestoreTemporalRasterState(native_state);
+  return plan;
+}
+
+void VertexManagerBase::ReplayTemporalDraw(const TemporalDrawPlan& plan, u32 base_index,
+                                         u32 num_indices, u32 base_vertex)
+{
+  if (!plan.color_pipeline)
+    return;
+  auto* gfx = Vulkan::VKGfx::GetInstance();
+  const auto native_state = gfx->SaveTemporalRasterState();
+  auto& vertex_shader_manager = Core::System::GetInstance().GetVertexShaderManager();
+  vertex_shader_manager.SetTemporalRasterJitter(true);
+  UploadUniforms();
+  if (plan.metadata_pipeline)
+  {
+    gfx->SetFramebuffer(plan.metadata_framebuffer);
+    gfx->SetPipeline(plan.metadata_pipeline);
+    gfx->DrawIndexed(base_index, num_indices, base_vertex);
+  }
+  gfx->SetFramebuffer(plan.color_framebuffer);
+  gfx->SetPipeline(plan.color_pipeline);
+  gfx->DrawIndexed(base_index, num_indices, base_vertex);
+  static u64 paired_draws = 0;
+  if (++paired_draws <= 8 || paired_draws % 120 == 0)
+    INFO_LOG_FMT(VIDEO, "Temporal mirror: paired draws={} metadata={} known={} overwrite={}",
+                 paired_draws, plan.metadata_pipeline != nullptr, plan.known, plan.overwrite);
+  // Replay bypasses DrawCurrentBatch/OnDraw, bounding-box flushes, statistics, and queries.
+  vertex_shader_manager.SetTemporalRasterJitter(false);
+  UploadUniforms();
+  gfx->RestoreTemporalRasterState(native_state);
+}
+#endif
 
 const AbstractPipeline* VertexManagerBase::GetCustomPipeline(
     const CustomPixelShaderContents& custom_pixel_shader_contents,

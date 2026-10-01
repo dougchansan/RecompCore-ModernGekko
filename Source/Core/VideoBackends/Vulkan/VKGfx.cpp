@@ -590,6 +590,25 @@ void VKGfx::SetViewport(float x, float y, float width, float height, float near_
   StateTracker::GetInstance()->SetViewport(viewport);
 }
 
+VKGfx::TemporalRasterState VKGfx::SaveTemporalRasterState() const
+{
+  const auto* tracker = StateTracker::GetInstance();
+  return {tracker->GetFramebuffer(), tracker->GetPipeline(), tracker->GetViewport(),
+          tracker->GetScissor()};
+}
+
+void VKGfx::RestoreTemporalRasterState(const TemporalRasterState& state)
+{
+  auto* tracker = StateTracker::GetInstance();
+  tracker->EndRenderPass();
+  if (state.framebuffer)
+    SetFramebuffer(state.framebuffer);
+  tracker->SetPipeline(state.pipeline);
+  tracker->SetViewport(state.viewport);
+  tracker->SetScissor(state.scissor);
+  tracker->InvalidateCachedState();
+}
+
 void VKGfx::Draw(u32 base_vertex, u32 num_vertices)
 {
   if (!StateTracker::GetInstance()->Bind())

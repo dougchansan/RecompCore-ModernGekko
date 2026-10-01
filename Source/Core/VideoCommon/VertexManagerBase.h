@@ -17,6 +17,7 @@
 
 struct CustomPixelShaderContents;
 class CustomShaderCache;
+class AbstractFramebuffer;
 class DataReader;
 class GeometryShaderManager;
 class NativeVertexFormat;
@@ -228,6 +229,21 @@ private:
                       const CustomPixelShaderContents& custom_pixel_shader_contents,
                       std::span<u8> custom_pixel_shader_uniforms, PrimitiveType primitive_type,
                       const AbstractPipeline* current_pipeline);
+#ifdef HAS_VULKAN
+  struct TemporalDrawPlan
+  {
+    const AbstractPipeline* color_pipeline = nullptr;
+    const AbstractPipeline* metadata_pipeline = nullptr;
+    AbstractFramebuffer* color_framebuffer = nullptr;
+    AbstractFramebuffer* metadata_framebuffer = nullptr;
+    bool known = false;
+    bool overwrite = false;
+  };
+  TemporalDrawPlan PrepareTemporalDraw(const AbstractPipeline* native_pipeline,
+                                       bool custom_shader);
+  void ReplayTemporalDraw(const TemporalDrawPlan& plan, u32 base_index, u32 num_indices,
+                          u32 base_vertex);
+#endif
   void UpdatePipelineConfig();
   void UpdatePipelineObject();
 

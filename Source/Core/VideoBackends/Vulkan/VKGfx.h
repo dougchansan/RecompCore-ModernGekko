@@ -28,6 +28,16 @@ public:
 
   static VKGfx* GetInstance() { return static_cast<VKGfx*>(g_gfx.get()); }
 
+  struct TemporalRasterState
+  {
+    VKFramebuffer* framebuffer = nullptr;
+    const VKPipeline* pipeline = nullptr;
+    VkViewport viewport{};
+    VkRect2D scissor{};
+  };
+  TemporalRasterState SaveTemporalRasterState() const;
+  void RestoreTemporalRasterState(const TemporalRasterState& state);
+
   bool IsHeadless() const override;
 
   std::unique_ptr<AbstractTexture> CreateTexture(const TextureConfig& config,

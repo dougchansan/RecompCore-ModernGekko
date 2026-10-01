@@ -32,6 +32,8 @@ public:
 
   VKFramebuffer* GetFramebuffer() const { return m_framebuffer; }
   const VKPipeline* GetPipeline() const { return m_pipeline; }
+  const VkViewport& GetViewport() const { return m_viewport; }
+  const VkRect2D& GetScissor() const { return m_scissor; }
   void SetVertexBuffer(VkBuffer buffer, VkDeviceSize offset, u32 size);
   void SetIndexBuffer(VkBuffer buffer, VkDeviceSize offset, VkIndexType type);
   void SetFramebuffer(VKFramebuffer* framebuffer);
