@@ -225,7 +225,8 @@ bool Initialize(VulkanContext& context)
   const NVSDK_NGX_Result result = NVSDK_NGX_VULKAN_Init_with_ProjectID(
       MODERNGEKKO_NGX_PROJECT_ID, NVSDK_NGX_ENGINE_TYPE_CUSTOM,
       "ModernGekko-NGX-PoC-1", data_path_wide.c_str(), context.GetVulkanInstance(),
-      context.GetPhysicalDevice(), context.GetDevice(), nullptr, nullptr, &feature_info);
+      context.GetPhysicalDevice(), context.GetDevice(), vkGetInstanceProcAddr,
+      vkGetDeviceProcAddr, &feature_info);
 
   if (NVSDK_NGX_FAILED(result))
   {
@@ -494,7 +495,7 @@ bool Evaluate(VkCommandBuffer commands, const Frame& frame)
   }
   s_history_invalid = false;
   ++s_evaluation_count;
-  if (s_evaluation_count == 1 || frame.reset || s_evaluation_count % 120 == 0)
+  if (s_evaluation_count <= 2 || frame.reset || s_evaluation_count % 120 == 0)
     INFO_LOG_FMT(VIDEO, "ModernGekko NGX: EvaluateFeature count={} reset={} jitter=({}, {}) result {:#x}",
                  s_evaluation_count, evaluate.InReset, frame.jitter_x, frame.jitter_y,
                  static_cast<unsigned>(result));

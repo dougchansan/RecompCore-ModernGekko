@@ -902,6 +902,43 @@ bool VulkanContext::CreateDevice(VkSurfaceKHR surface, bool enable_validation_la
 
   VkPhysicalDeviceFeatures device_features = m_device_info.features();
   device_info.pEnabledFeatures = &device_features;
+  // DLSS uses device-address allocations and unformatted storage-image writes.
+  // Extension discovery alone does not enable these Vulkan features.
+  VkPhysicalDeviceBufferDeviceAddressFeatures ngx_address = {
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES};
+  if (m_ngx_extensions_ready)
+  {
+    VkPhysicalDeviceFeatures2 supported = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    supported.pNext = &ngx_address;
+    auto get_features = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
+        vkGetInstanceProcAddr(m_instance, "vkGetPhysicalDeviceFeatures2"));
+    if (!get_features)
+      get_features = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
+          vkGetInstanceProcAddr(m_instance, "vkGetPhysicalDeviceFeatures2KHR"));
+    if (get_features)
+      get_features(m_physical_device, &supported);
+    if (!get_features || !ngx_address.bufferDeviceAddress ||
+        !supported.features.shaderStorageImageWriteWithoutFormat)
+    {
+      WARN_LOG_FMT(VIDEO, "ModernGekko NGX: device address/storage-write features unavailable; using ordinary Vulkan");
+      m_ngx_extensions_ready = false;
+      m_device_extensions = m_ordinary_device_extensions;
+      extension_name_pointers.clear();
+      for (const auto& name : m_device_extensions)
+        extension_name_pointers.push_back(name.c_str());
+      device_info.enabledExtensionCount = static_cast<uint32_t>(extension_name_pointers.size());
+      device_info.ppEnabledExtensionNames = extension_name_pointers.data();
+    }
+    else
+    {
+      ngx_address.bufferDeviceAddressCaptureReplay = VK_FALSE;
+      ngx_address.bufferDeviceAddressMultiDevice = VK_FALSE;
+      device_info.pNext = &ngx_address;
+      device_features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+      INFO_LOG_FMT(VIDEO, "ModernGekko NGX: enabling bufferDeviceAddress and shaderStorageImageWriteWithoutFormat");
+    }
+  }
+
 
   // Enable debug layer on debug builds
   if (enable_validation_layer)
@@ -915,6 +952,8 @@ bool VulkanContext::CreateDevice(VkSurfaceKHR surface, bool enable_validation_la
   {
     WARN_LOG_FMT(VIDEO, "ModernGekko NGX: device creation failed; retrying ordinary Vulkan");
     m_ngx_extensions_ready = false;
+    device_info.pNext = nullptr;
+    device_features = m_device_info.features();
     m_device_extensions = m_ordinary_device_extensions;
     extension_name_pointers.clear();
     for (const auto& name : m_device_extensions)
