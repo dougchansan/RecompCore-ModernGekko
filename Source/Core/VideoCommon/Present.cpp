@@ -4,6 +4,7 @@
 #include "VideoCommon/Present.h"
 
 #include "Common/ChunkFile.h"
+#include "Common/Logging/Log.h"
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/CoreTiming.h"
@@ -356,6 +357,9 @@ void Presenter::SetBackbuffer(SurfaceInfo info)
 void Presenter::OnBackbufferSet(bool size_changed, bool is_first_set)
 {
   UpdateDrawRectangle();
+  if (size_changed || is_first_set)
+    INFO_LOG_FMT(VIDEO, "ModernGekko runtime: presentation backbuffer {}x{}",
+                 m_backbuffer_width, m_backbuffer_height);
 
   // Automatically update the resolution scale if the window size changed,
   // or if the game XFB resolution changed.
