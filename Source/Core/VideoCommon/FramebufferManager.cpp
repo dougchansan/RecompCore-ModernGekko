@@ -419,7 +419,7 @@ bool FramebufferManager::CaptureTemporalEFB(const MathUtil::Rectangle<int>& nati
 
 bool FramebufferManager::ReinterpretPixelData(EFBReinterpretType convtype)
 {
-  ModernGekkoTemporal::MarkCoverageInvalid();
+  ModernGekkoTemporal::MarkCoverageInvalid(ModernGekkoTemporal::CoverageReason::Reinterpret);
   if (!m_format_conversion_pipelines[static_cast<u32>(convtype)])
     return false;
 
@@ -897,8 +897,8 @@ void FramebufferManager::ClearEFB(const MathUtil::Rectangle<int>& rc, bool color
                                   bool alpha_enable, bool z_enable, u32 color, u32 z,
                                   PixelFormat pixel_format)
 {
-  if (rc.left != 0 || rc.top != 0 || rc.right != EFB_WIDTH || rc.bottom != EFB_HEIGHT)
-    ModernGekkoTemporal::MarkCoverageInvalid();
+  // Validate clear boundaries against the eventual XFB crop, rather than all 528 EFB rows.
+  ModernGekkoTemporal::RecordClearRegion(rc.left, rc.top, rc.right, rc.bottom);
   FlushEFBPokes();
   FlagPeekCacheAsOutOfDate();
 
@@ -984,7 +984,7 @@ AbstractPipeline* FramebufferManager::GetClearPipeline(bool colorEnable, bool al
 
 void FramebufferManager::PokeEFBColor(u32 x, u32 y, u32 color)
 {
-  ModernGekkoTemporal::MarkCoverageInvalid();
+  ModernGekkoTemporal::MarkCoverageInvalid(ModernGekkoTemporal::CoverageReason::Poke);
   // Flush if we exceeded the number of vertices per batch.
   if ((m_color_poke_vertices.size() + 6) > MAX_POKE_VERTICES)
     FlushEFBPokes();
@@ -1003,7 +1003,7 @@ void FramebufferManager::PokeEFBColor(u32 x, u32 y, u32 color)
 
 void FramebufferManager::PokeEFBDepth(u32 x, u32 y, float depth)
 {
-  ModernGekkoTemporal::MarkCoverageInvalid();
+  ModernGekkoTemporal::MarkCoverageInvalid(ModernGekkoTemporal::CoverageReason::Poke);
   // Flush if we exceeded the number of vertices per batch.
   if ((m_depth_poke_vertices.size() + 6) > MAX_POKE_VERTICES)
     FlushEFBPokes();

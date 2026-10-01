@@ -442,10 +442,18 @@ void VertexShaderManager::SetConstants(std::span<const std::string> textures,
       m_temporal_content_id = temporal.content_id;
       m_temporal_viewport = {xfmem.viewport.xOrig, xfmem.viewport.yOrig,
                              xfmem.viewport.wd, xfmem.viewport.ht};
+      m_temporal_depth_projection = {xfmem.viewport.zRange, xfmem.viewport.farZ,
+                                     static_cast<float>(xfmem.projection.type)};
       m_temporal_viewport_seen = true;
     }
     const std::array<float, 4> viewport = {xfmem.viewport.xOrig, xfmem.viewport.yOrig,
                                          xfmem.viewport.wd, xfmem.viewport.ht};
+    const std::array<float, 3> depth_projection = {
+        xfmem.viewport.zRange, xfmem.viewport.farZ, static_cast<float>(xfmem.projection.type)};
+    if (depth_projection != m_temporal_depth_projection)
+      ModernGekkoTemporal::RecordDepthProjectionChange();
+    if (viewport != m_temporal_viewport)
+      ModernGekkoTemporal::RecordViewportChange();
     ModernGekkoTemporal::MarkGuestDrawCoverage(viewport == m_temporal_viewport);
     float width = 2.0f * xfmem.viewport.wd;
     float height = -2.0f * xfmem.viewport.ht;
@@ -455,7 +463,7 @@ void VertexShaderManager::SetConstants(std::span<const std::string> textures,
       height = std::round(height);
     }
     if (!std::isfinite(width) || !std::isfinite(height) || width == 0.0f || height == 0.0f)
-      ModernGekkoTemporal::MarkCoverageInvalid();
+      ModernGekkoTemporal::MarkCoverageInvalid(ModernGekkoTemporal::CoverageReason::InvalidViewport);
     else
       jitter = ModernGekkoTemporal::ComputeClipJitter(temporal.jitter_x, temporal.jitter_y,
                                                     width, height);

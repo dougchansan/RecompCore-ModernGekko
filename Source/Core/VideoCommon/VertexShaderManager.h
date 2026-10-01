@@ -85,6 +85,7 @@ private:
   u64 m_temporal_content_id = 0;
   bool m_temporal_viewport_seen = false;
   std::array<float, 4> m_temporal_viewport{};
+  std::array<float, 3> m_temporal_depth_projection{};
 
 
   Common::Matrix44 LoadProjectionMatrix();

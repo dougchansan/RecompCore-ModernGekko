@@ -2211,7 +2211,7 @@ void TextureCacheBase::CopyRenderTargetToTexture(
   // which stalls any further CPU processing.
   const bool is_xfb_copy = !is_depth_copy && !isIntensity && dstFormat == EFBCopyFormat::XFB;
   if (!is_xfb_copy)
-    ModernGekkoTemporal::MarkCoverageInvalid();  // Unclassified render-to-texture contribution.
+    ModernGekkoTemporal::MarkCoverageInvalid(ModernGekkoTemporal::CoverageReason::NonXFBCopy);
 
   bool copy_to_vram = g_backend_info.bSupportsCopyToVram && !g_ActiveConfig.bDisableCopyToVRAM;
   bool copy_to_ram =
@@ -2371,23 +2371,30 @@ void TextureCacheBase::CopyRenderTargetToTexture(
                                       srcRect.top >= state.scissor_top &&
                                       srcRect.right <= state.scissor_right &&
                                       srcRect.bottom <= state.scissor_bottom;
-        packet->valid = captured && state.coverage_valid && scissor_coverage;
+        const bool clear_coverage = ModernGekkoTemporal::HasClearCoverageForRect(
+            state, srcRect.left, srcRect.top, srcRect.right, srcRect.bottom);
+        packet->valid = captured && state.coverage_valid && scissor_coverage && clear_coverage;
         packet->uniform_jitter_coverage = packet->valid;
         packet->history_reset = state.content_id <= 1;
         packet->reason = !mapping ? "unclassified XFB filter, scale, gamma or modification" :
                          !captured ? "matched EFB snapshot allocation or bounds failure" :
                          !state.coverage_valid ? "unclassified EFB contribution or mixed viewport" :
                          !scissor_coverage ? "guest scissor clips the captured source" :
+                         !clear_coverage ? "clear boundary lies within captured source" :
                          "";
         static u32 diagnostic_count = 0;
         if (diagnostic_count++ < 8)
           INFO_LOG_FMT(VIDEO,
                        "Temporal copy: source={}x{} XFB={}x{} scale={} yscale={} half={} "
-                       "gamma={} filter={}/{}/{} coverage={} valid={} reason={}",
+                       "gamma={} filter={}/{}/{} coverage={} valid={} bits={} draws={} viewportchanges={} depthprojectionchanges={} "
+                       "scissor={},{},{},{} clears={} clearcoverage={} reason={}",
                        srcRect.GetWidth(), srcRect.GetHeight(), tex_w, tex_h,
                        g_framebuffer_manager->GetEFBScale(), y_scale, scaleByHalf, gamma,
                        filter[0], filter[1], filter[2], state.coverage_valid, packet->valid,
-                       packet->reason);
+                       state.reason_bits, state.recognized_draws, state.viewport_changes,
+                       state.depth_projection_changes,
+                       state.scissor_left, state.scissor_top, state.scissor_right,
+                       state.scissor_bottom, state.clear_count, clear_coverage, packet->reason);
         entry->temporal_packet = std::move(packet);
       }
 

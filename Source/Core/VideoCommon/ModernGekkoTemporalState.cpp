@@ -18,6 +18,8 @@ void SetActive(bool active)
     return;
   s_state.active = active;
   s_state.coverage_valid = false;
+  s_state.reason_bits = static_cast<u32>(CoverageReason::NoRecognizedDraw);
+  s_state.recognized_draws = s_state.viewport_changes = s_state.depth_projection_changes = s_state.clear_count = 0;
   s_state.jitter_x = s_state.jitter_y = 0.0f;
   s_has_frame = false;
   s_coverage_invalid = false;
@@ -27,7 +29,7 @@ void SetInputPixelsPerNative(float x, float y)
 {
   if (!std::isfinite(x) || !std::isfinite(y) || x <= 0.0f || y <= 0.0f)
   {
-    MarkCoverageInvalid();
+    MarkCoverageInvalid(CoverageReason::InputScaleChanged);
     return;
   }
   if (s_state.input_per_native_x == x && s_state.input_per_native_y == y)
@@ -35,7 +37,7 @@ void SetInputPixelsPerNative(float x, float y)
   s_state.input_per_native_x = x;
   s_state.input_per_native_y = y;
   // The already-rendering frame used the previous amplitude; do not relabel it.
-  MarkCoverageInvalid();
+  MarkCoverageInvalid(CoverageReason::InputScaleChanged);
 }
 void SetFrameJitter(float x, float y, u64 content_id)
 {
@@ -46,6 +48,10 @@ void SetFrameJitter(float x, float y, u64 content_id)
   {
     s_state.coverage_valid = false;  // Finite jitter alone does not establish coverage.
     s_coverage_invalid = !finite;
+    s_state.reason_bits = static_cast<u32>(CoverageReason::NoRecognizedDraw);
+    s_state.recognized_draws = s_state.viewport_changes = s_state.depth_projection_changes = s_state.clear_count = 0;
+    if (!finite)
+      s_state.reason_bits |= static_cast<u32>(CoverageReason::InvalidJitter);
     s_state.scissor_left = s_current_scissor[0];
     s_state.scissor_top = s_current_scissor[1];
     s_state.scissor_right = s_current_scissor[2];
@@ -54,6 +60,7 @@ void SetFrameJitter(float x, float y, u64 content_id)
   else if (s_state.jitter_x != x || s_state.jitter_y != y)
   {
     s_state.coverage_valid = false;
+    s_state.reason_bits |= static_cast<u32>(CoverageReason::InvalidJitter);
     s_coverage_invalid = true;  // One content frame must have one raster offset.
   }
   s_has_frame = true;
@@ -64,11 +71,13 @@ void SetFrameJitter(float x, float y, u64 content_id)
   {
     s_state.coverage_valid = false;
     s_coverage_invalid = true;
+    s_state.reason_bits |= static_cast<u32>(CoverageReason::InvalidJitter);
   }
   ++s_state.serial;
 }
-void MarkCoverageInvalid()
+void MarkCoverageInvalid(CoverageReason reason)
 {
+  s_state.reason_bits |= static_cast<u32>(reason);
   s_coverage_invalid = true;
   s_state.coverage_valid = false;
   ++s_state.serial;
@@ -77,10 +86,33 @@ void MarkGuestDrawCoverage(bool recognized_mapping)
 {
   if (!s_state.active || !s_has_frame)
     return;
+  ++s_state.recognized_draws;
+  s_state.reason_bits &= ~static_cast<u32>(CoverageReason::NoRecognizedDraw);
   if (!recognized_mapping)
-    MarkCoverageInvalid();
+    MarkCoverageInvalid(CoverageReason::MixedViewport);
   else if (!s_coverage_invalid)
     s_state.coverage_valid = true;
+}
+void RecordClearRegion(int left, int top, int right, int bottom)
+{
+  if (!s_state.active)
+    return;
+  if (s_state.clear_count == s_state.clear_regions.size())
+  {
+    MarkCoverageInvalid(CoverageReason::PartialClear);
+    return;
+  }
+  s_state.clear_regions[s_state.clear_count++] = {left, top, right, bottom};
+}
+void RecordDepthProjectionChange()
+{
+  ++s_state.depth_projection_changes;
+  // Diagnostic; mixed viewport remains a separate conservative eligibility rejection.
+  s_state.reason_bits |= static_cast<u32>(CoverageReason::DepthProjectionChanged);
+}
+void RecordViewportChange()
+{
+  ++s_state.viewport_changes;
 }
 void MarkScissorCoverage(int left, int top, int right, int bottom)
 {
@@ -93,7 +125,21 @@ void MarkScissorCoverage(int left, int top, int right, int bottom)
   s_state.scissor_right = std::min(s_state.scissor_right, right);
   s_state.scissor_bottom = std::min(s_state.scissor_bottom, bottom);
   if (left >= right || top >= bottom)
-    MarkCoverageInvalid();
+    MarkCoverageInvalid(CoverageReason::Scissor);
+}
+bool HasClearCoverageForRect(const State& state, int left, int top, int right, int bottom)
+{
+  for (u32 i = 0; i < state.clear_count; ++i)
+  {
+    const auto& clear = state.clear_regions[i];
+    const bool intersects = clear[0] < right && clear[2] > left &&
+                            clear[1] < bottom && clear[3] > top;
+    const bool encloses = clear[0] <= left && clear[1] <= top &&
+                          clear[2] >= right && clear[3] >= bottom;
+    if (intersects && !encloses)
+      return false;
+  }
+  return true;
 }
 State GetState()
 {
