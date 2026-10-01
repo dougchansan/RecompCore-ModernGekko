@@ -33,6 +33,7 @@ uint32_t s_render_width = 0, s_render_height = 0, s_output_width = 0, s_output_h
 bool s_reversed_depth = false;
 uint64_t s_evaluation_count = 0;
 bool s_history_invalid = true;
+bool s_previous_evaluation_reset = true;
 #endif
 
 bool ParseTruthy(const char* value)
@@ -333,6 +334,7 @@ void DestroyFeature()
   s_render_width = s_render_height = s_output_width = s_output_height = 0;
   s_evaluation_count = 0;
   s_history_invalid = true;
+  s_previous_evaluation_reset = true;
 #endif
 }
 
@@ -494,10 +496,13 @@ bool Evaluate(VkCommandBuffer commands, const Frame& frame)
   }
   s_history_invalid = false;
   ++s_evaluation_count;
-  if (s_evaluation_count <= 2 || frame.reset || s_evaluation_count % 120 == 0)
+  if (s_evaluation_count <= 8 ||
+      static_cast<bool>(evaluate.InReset) != s_previous_evaluation_reset ||
+      s_evaluation_count % 120 == 0)
     INFO_LOG_FMT(VIDEO, "ModernGekko NGX: EvaluateFeature count={} reset={} jitter=({}, {}) result {:#x}",
                  s_evaluation_count, evaluate.InReset, frame.jitter_x, frame.jitter_y,
                  static_cast<unsigned>(result));
+  s_previous_evaluation_reset = evaluate.InReset != 0;
   return true;
 #else
   (void)commands;
