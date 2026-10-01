@@ -133,8 +133,50 @@ bool TextureCacheBase::Initialize()
   return true;
 }
 
+void TextureCacheBase::RetireTemporalPackets(size_t keep)
+{
+  while (m_recent_temporal_entries.size() > keep)
+  {
+    if (auto entry = m_recent_temporal_entries.front().lock())
+      entry->temporal_packet.reset();
+    m_recent_temporal_entries.pop_front();
+  }
+  // Vulkan texture destructors enqueue image/view destruction in the current command
+  // buffer's cleanup list; CommandBufferManager runs it only after its fence completes.
+}
+
+void TextureCacheBase::ReportTemporalSnapshotMemory()
+{
+  size_t bytes = 0;
+  size_t count = 0;
+  for (const auto& weak : m_recent_temporal_entries)
+  {
+    const auto entry = weak.lock();
+    if (!entry || !entry->temporal_packet)
+      continue;
+    const auto& packet = entry->temporal_packet;
+    if (!packet->color || !packet->depth)
+      continue;
+    ++count;
+    for (const auto* texture : {packet->color.get(), packet->depth.get()})
+    {
+      const auto& config = texture->GetConfig();
+      bytes += config.GetStride() * config.height * config.layers;
+    }
+  }
+  if (bytes > m_temporal_snapshot_high_water_bytes)
+  {
+    m_temporal_snapshot_high_water_bytes = bytes;
+    INFO_LOG_FMT(VIDEO,
+                 "Temporal snapshot memory: live_packets={} limit={} logical_bytes={} "
+                 "high_water_bytes={} (backend fence-deferred allocations excluded)",
+                 count, MAX_TEMPORAL_PACKETS, bytes, m_temporal_snapshot_high_water_bytes);
+  }
+}
+
 void TextureCacheBase::Invalidate()
 {
+  RetireTemporalPackets(0);
   FlushEFBCopies();
   TMEM::InvalidateAll();
 
@@ -2210,6 +2252,8 @@ void TextureCacheBase::CopyRenderTargetToTexture(
   // Disadvantage of all methods: Calling this function requires the GPU to perform a pipeline flush
   // which stalls any further CPU processing.
   const bool is_xfb_copy = !is_depth_copy && !isIntensity && dstFormat == EFBCopyFormat::XFB;
+  if (!ModernGekkoTemporal::GetState().active)
+    RetireTemporalPackets(0);
   if (!is_xfb_copy)
     ModernGekkoTemporal::MarkCoverageInvalid(ModernGekkoTemporal::CoverageReason::NonXFBCopy);
 
@@ -2349,6 +2393,8 @@ void TextureCacheBase::CopyRenderTargetToTexture(
 
       if (is_xfb_copy && ModernGekkoTemporal::GetState().active)
       {
+        // Retire before allocation: at most two cache-owned pairs remain live.
+        RetireTemporalPackets(MAX_TEMPORAL_PACKETS - 1);
         auto packet = std::make_shared<ModernGekkoTemporalPacket>();
         packet->efb_rect = srcRect;
         packet->xfb_width = tex_w;
@@ -2396,6 +2442,8 @@ void TextureCacheBase::CopyRenderTargetToTexture(
                        state.scissor_left, state.scissor_top, state.scissor_right,
                        state.scissor_bottom, state.clear_count, clear_coverage, packet->reason);
         entry->temporal_packet = std::move(packet);
+        m_recent_temporal_entries.emplace_back(entry);
+        ReportTemporalSnapshotMemory();
       }
 
       CopyEFBToCacheEntry(entry, is_depth_copy, srcRect, scaleByHalf, linear_filter, dstFormat,
@@ -2854,6 +2902,7 @@ TextureCacheBase::InvalidateTexture(TexAddrCache::iterator iter, bool discard_pe
     return m_textures_by_address.end();
 
   RcTcacheEntry& entry = iter->second;
+  entry->temporal_packet.reset();
 
   if (entry->textures_by_hash_iter != m_textures_by_hash.end())
   {
@@ -2896,6 +2945,7 @@ TextureCacheBase::InvalidateTexture(TexAddrCache::iterator iter, bool discard_pe
 
 void TextureCacheBase::ReleaseToPool(TCacheEntry* entry)
 {
+  entry->temporal_packet.reset();
   if (!entry->texture)
     return;
   auto config = entry->texture->GetConfig();

@@ -5,6 +5,7 @@
 
 #include <array>
 #include <filesystem>
+#include <deque>
 #include <fmt/format.h>
 #include <map>
 #include <memory>
@@ -362,6 +363,13 @@ protected:
   size_t m_temp_size = 0;
 
 private:
+  // Weak references keep snapshot ownership on the XFB entry and never extend cache lifetime.
+  static constexpr size_t MAX_TEMPORAL_PACKETS = 2;
+  std::deque<std::weak_ptr<TCacheEntry>> m_recent_temporal_entries;
+  size_t m_temporal_snapshot_high_water_bytes = 0;
+  void RetireTemporalPackets(size_t keep);
+  void ReportTemporalSnapshotMemory();
+
   using TexAddrCache = std::multimap<u32, RcTcacheEntry>;
   using TexHashCache = std::multimap<u64, RcTcacheEntry>;
 
