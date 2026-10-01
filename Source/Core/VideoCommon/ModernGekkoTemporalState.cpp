@@ -23,6 +23,20 @@ void SetActive(bool active)
   s_coverage_invalid = false;
   ++s_state.serial;
 }
+void SetInputPixelsPerNative(float x, float y)
+{
+  if (!std::isfinite(x) || !std::isfinite(y) || x <= 0.0f || y <= 0.0f)
+  {
+    MarkCoverageInvalid();
+    return;
+  }
+  if (s_state.input_per_native_x == x && s_state.input_per_native_y == y)
+    return;
+  s_state.input_per_native_x = x;
+  s_state.input_per_native_y = y;
+  // The already-rendering frame used the previous amplitude; do not relabel it.
+  MarkCoverageInvalid();
+}
 void SetFrameJitter(float x, float y, u64 content_id)
 {
   if (!s_state.active)

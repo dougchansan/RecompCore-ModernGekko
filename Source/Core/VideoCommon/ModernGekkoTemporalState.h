@@ -12,6 +12,8 @@ struct State
   bool coverage_valid = false;
   float jitter_x = 0.0f;
   float jitter_y = 0.0f;
+  float input_per_native_x = 1.0f;
+  float input_per_native_y = 1.0f;
   int scissor_left = 0;
   int scissor_top = 0;
   int scissor_right = 640;
@@ -21,6 +23,8 @@ struct State
 };
 void SetActive(bool active);
 void SetFrameJitter(float x, float y, u64 content_id);
+// SDK optimal input pixels / native crop pixels. Halton amplitude is one input pixel.
+void SetInputPixelsPerNative(float x, float y);
 void MarkCoverageInvalid();
 void MarkGuestDrawCoverage(bool recognized_mapping);
 void MarkScissorCoverage(int left, int top, int right, int bottom);

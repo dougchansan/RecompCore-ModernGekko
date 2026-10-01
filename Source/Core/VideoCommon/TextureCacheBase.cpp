@@ -2592,7 +2592,9 @@ void TextureCacheBase::CopyRenderTargetToTexture(
       }
       return value - 0.5f;
     };
-    ModernGekkoTemporal::SetFrameJitter(halton(content_id, 2), halton(content_id, 3),
+    ModernGekkoTemporal::SetFrameJitter(
+        halton(content_id, 2) / previous.input_per_native_x,
+        halton(content_id, 3) / previous.input_per_native_y,
                                        content_id);
   }
 
