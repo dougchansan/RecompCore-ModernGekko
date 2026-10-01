@@ -138,6 +138,8 @@ DXGI_FORMAT GetDXGIFormatForAbstractFormat(AbstractTextureFormat format, bool ty
     return typeless ? DXGI_FORMAT_B8G8R8A8_TYPELESS : DXGI_FORMAT_B8G8R8A8_UNORM;
   case AbstractTextureFormat::RGB10_A2:
     return typeless ? DXGI_FORMAT_R10G10B10A2_TYPELESS : DXGI_FORMAT_R10G10B10A2_UNORM;
+  case AbstractTextureFormat::RG16F:
+    return typeless ? DXGI_FORMAT_R16G16_TYPELESS : DXGI_FORMAT_R16G16_FLOAT;
   case AbstractTextureFormat::RGBA16F:
     return typeless ? DXGI_FORMAT_R16G16B16A16_TYPELESS : DXGI_FORMAT_R16G16B16A16_FLOAT;
   case AbstractTextureFormat::R16:
@@ -175,6 +177,8 @@ DXGI_FORMAT GetSRVFormatForAbstractFormat(AbstractTextureFormat format)
     return DXGI_FORMAT_B8G8R8A8_UNORM;
   case AbstractTextureFormat::RGB10_A2:
     return DXGI_FORMAT_R10G10B10A2_UNORM;
+  case AbstractTextureFormat::RG16F:
+    return DXGI_FORMAT_R16G16_FLOAT;
   case AbstractTextureFormat::RGBA16F:
     return DXGI_FORMAT_R16G16B16A16_FLOAT;
   case AbstractTextureFormat::R16:
@@ -205,6 +209,8 @@ DXGI_FORMAT GetRTVFormatForAbstractFormat(AbstractTextureFormat format, bool int
     return DXGI_FORMAT_B8G8R8A8_UNORM;
   case AbstractTextureFormat::RGB10_A2:
     return DXGI_FORMAT_R10G10B10A2_UNORM;
+  case AbstractTextureFormat::RG16F:
+    return DXGI_FORMAT_R16G16_FLOAT;
   case AbstractTextureFormat::RGBA16F:
     return DXGI_FORMAT_R16G16B16A16_FLOAT;
   case AbstractTextureFormat::R16:
@@ -250,6 +256,10 @@ AbstractTextureFormat GetAbstractFormatForDXGIFormat(DXGI_FORMAT format)
   case DXGI_FORMAT_R10G10B10A2_UNORM:
   case DXGI_FORMAT_R10G10B10A2_TYPELESS:
     return AbstractTextureFormat::RGB10_A2;
+
+  case DXGI_FORMAT_R16G16_FLOAT:
+  case DXGI_FORMAT_R16G16_TYPELESS:
+    return AbstractTextureFormat::RG16F;
 
   case DXGI_FORMAT_R16G16B16A16_FLOAT:
   case DXGI_FORMAT_R16G16B16A16_TYPELESS:

@@ -213,6 +213,8 @@ VkFormat VKTexture::GetVkFormatForHostTextureFormat(AbstractTextureFormat format
   case AbstractTextureFormat::RGB10_A2:
     return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
 
+  case AbstractTextureFormat::RG16F:
+    return VK_FORMAT_R16G16_SFLOAT;
   case AbstractTextureFormat::RGBA16F:
     return VK_FORMAT_R16G16B16A16_SFLOAT;
 

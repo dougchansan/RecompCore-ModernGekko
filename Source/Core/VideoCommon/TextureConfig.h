@@ -26,6 +26,7 @@ enum class AbstractTextureFormat : u32
   R32F,
   D32F,
   D32F_S8,
+  RG16F,  // Two-component half-float motion vectors. Preserve existing format IDs.
   Undefined
 };
 
