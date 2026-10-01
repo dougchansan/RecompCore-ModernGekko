@@ -109,7 +109,7 @@ struct ModernGekkoDLSSPresenter::State
   u32 input_width=0,input_height=0,output_width=0,output_height=0,current=0;
   u64 content_id=std::numeric_limits<u64>::max(),evaluations=0,resource_generation=0;
   bool history=false,cut_history=false,output_valid=false,owns_feature=false,attempted=false;
-  bool unavailable=false;
+  bool unavailable=false,depth_inverted=false;
   u64 fallback_presents=0,rejected_packets=0,last_rejected_content=std::numeric_limits<u64>::max();
   u64 last_rejected_entry=std::numeric_limits<u64>::max();
   u32 consecutive_rejections=0;
@@ -145,9 +145,10 @@ struct ModernGekkoDLSSPresenter::State
     }
     return nullptr;
   }
-  bool Configure(u32 width,u32 height)
+  bool Configure(u32 width,u32 height,bool inverted_depth)
   {
-    if(output && width==output_width && height==output_height) return true;
+    if(output && width==output_width && height==output_height &&
+       depth_inverted==inverted_depth) return true;
     Release();
     u32 iw=0,ih=0;
     if(!NGX::GetQualityRenderSize(width,height,&iw,&ih) || iw<32 || ih<32) return false;
@@ -172,8 +173,9 @@ struct ModernGekkoDLSSPresenter::State
     g_gfx->WaitForGPUIdle();
     Vulkan::StateTracker::GetInstance()->EndRenderPass();
     if(!NGX::CreateFeature(Vulkan::g_command_buffer_mgr->GetCurrentCommandBuffer(),iw,ih,
-      width,height,g_backend_info.bSupportsReversedDepthRange)) {Release();return false;}
+      width,height,inverted_depth)) {Release();return false;}
     owns_feature=true;input_width=iw;input_height=ih;output_width=width;output_height=height;
+    depth_inverted=inverted_depth;
     ++resource_generation;
     Vulkan::StateTracker::GetInstance()->InvalidateCachedState();
     INFO_LOG_FMT(VIDEO,"ModernGekko DLSS: Quality input {}x{}, output {}x{}; experimental estimated motion",iw,ih,width,height);
@@ -246,10 +248,17 @@ const AbstractTexture* ModernGekkoDLSSPresenter::Render(const RcTcacheEntry& ent
      !std::isfinite(packet->jitter_x) || !std::isfinite(packet->jitter_y)) {
     return fallback("invalid matched snapshot dimensions or jitter");
   }
-  if(!s.Configure(width,height)) return fallback("SDK Quality configuration or allocation failed");
+  // Query input dimensions for raster calibration without creating a feature for
+  // an unclassified depth packet. Feature creation waits for validated inputs below.
+  u32 render_width=s.input_width,render_height=s.input_height;
+  if(width!=s.output_width || height!=s.output_height || !s.output) {
+    if(!NGX::GetQualityRenderSize(width,height,&render_width,&render_height) ||
+       render_width<32 || render_height<32)
+      return fallback("SDK Quality input dimensions unavailable");
+  }
   const std::array<float,2> input_per_native={
-    float(s.input_width)/packet->efb_rect.GetWidth(),
-    float(s.input_height)/packet->efb_rect.GetHeight()};
+    float(render_width)/packet->efb_rect.GetWidth(),
+    float(render_height)/packet->efb_rect.GetHeight()};
   ModernGekkoTemporal::SetInputPixelsPerNative(input_per_native[0],input_per_native[1]);
   if(s.input_per_native!=input_per_native) {
     s.input_per_native=input_per_native;s.ResetHistory();
@@ -257,6 +266,9 @@ const AbstractTexture* ModernGekkoDLSSPresenter::Render(const RcTcacheEntry& ent
     return fallback("awaiting newly rendered packet after raster jitter calibration");
   }
   if(!packet->valid) return fallback(packet->reason);
+  if(!packet->depth_convention_known) return fallback("captured depth convention unclassified");
+  if(!s.Configure(width,height,packet->depth_inverted))
+    return fallback("SDK Quality configuration or allocation failed");
   const bool same_crop=s.source_rect==source_rect;
   if(packet->content_id==s.content_id && same_crop && s.attempted)
     return s.output_valid ? s.output.get() : nullptr;
