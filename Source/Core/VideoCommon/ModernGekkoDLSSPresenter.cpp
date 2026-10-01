@@ -231,6 +231,30 @@ const AbstractTexture* ModernGekkoDLSSPresenter::Render(const RcTcacheEntry& ent
   if(!Requested() || !width || !height) {
     ModernGekkoTemporal::SetActive(false);s.Release();return nullptr;
   }
+  // Diagnostic mode exercises the complete paired renderer under Vulkan validation
+  // without entering the SDK's private feature creation/evaluation path.
+  if (const char* probe = std::getenv("MODERNGEKKO_DLSS_VALIDATE_MIRROR");
+      probe && std::string_view(probe) == "1")
+  {
+    ModernGekkoTemporal::SetActive(true);
+    const auto packet = TextureCacheBase::GetTemporalPacket(entry, source_rect);
+    static u32 target_width = 0, target_height = 0, iw = 0, ih = 0;
+    if (width != target_width || height != target_height)
+    {
+      if (NGX::GetQualityRenderSize(width, height, &iw, &ih))
+      { target_width = width; target_height = height; }
+    }
+    if (packet && iw && ih && packet->efb_rect.GetWidth() > 0 && packet->efb_rect.GetHeight() > 0)
+      ModernGekkoTemporal::SetInputPixelsPerNative(float(iw) / packet->efb_rect.GetWidth(),
+                                                 float(ih) / packet->efb_rect.GetHeight());
+    static u64 samples = 0;
+    if (++samples <= 8 || samples % 120 == 0)
+      INFO_LOG_FMT(VIDEO, "Temporal mirror validation: samples={} packet={} valid={} invalid_pixels={} reason={}",
+                   samples, packet != nullptr, packet && packet->valid,
+                   packet ? packet->invalid_pixels : UINT64_MAX,
+                   packet ? packet->reason : "absent");
+    return nullptr;
+  }
   if(s.unavailable) {
     ModernGekkoTemporal::SetActive(false);
     return s.Fallback("experiment unavailable for this run; raster jitter disabled",entry ? entry->id : 0,

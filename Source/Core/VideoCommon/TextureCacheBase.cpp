@@ -45,6 +45,7 @@
 #include "VideoCommon/GraphicsModSystem/Runtime/GraphicsModActionData.h"
 #include "VideoCommon/GraphicsModSystem/Runtime/GraphicsModManager.h"
 #include "VideoCommon/ModernGekkoTemporalState.h"
+#include "VideoCommon/ModernGekkoTextureProvenance.h"
 #include "VideoCommon/OpcodeDecoding.h"
 #include "VideoCommon/PixelShaderManager.h"
 #include "VideoCommon/Present.h"
@@ -1116,7 +1117,7 @@ SamplerState TextureCacheBase::GetSamplerState(u32 index, float custom_tex_scale
 
 bool TextureCacheBase::HasUnclassifiedTemporalInputs(BitSet32 used_textures) const
 {
-  u32 unknown = 0, depth = 0, intensity = 0, color = 0;
+  u32 unknown = 0, depth = 0, intensity = 0, color = 0, auxiliary_slots = 0;
   for (u32 i = 0; i < m_bound_textures.size(); ++i)
   {
     if (!used_textures[i])
@@ -1146,13 +1147,15 @@ bool TextureCacheBase::HasUnclassifiedTemporalInputs(BitSet32 used_textures) con
     }
     switch (source)
     {
-    case TemporalTextureSource::NativeDepthCopy: ++depth; break;
-    case TemporalTextureSource::NativeIntensityCopy: ++intensity; break;
+    case TemporalTextureSource::NativeDepthCopy: ++depth; auxiliary_slots |= 1u << i; break;
+    case TemporalTextureSource::NativeIntensityCopy: ++intensity; auxiliary_slots |= 1u << i; break;
     case TemporalTextureSource::NativeColorCopy: ++color; ++unknown; break;
     case TemporalTextureSource::Unknown: ++unknown; break;
     case TemporalTextureSource::NativeMemory: break;
     }
   }
+  if (auxiliary_slots && !ModernGekkoTextureProvenance::CanUseAsOpacityData(bpmem, auxiliary_slots))
+    ++unknown;
   static u32 diagnostics = 0;
   if (ModernGekkoTemporal::GetState().active && (unknown || depth || intensity) && diagnostics++ < 32)
     INFO_LOG_FMT(VIDEO, "Temporal sampled inputs: unknown={} colorRT={} depthRT={} intensityRT={}",
@@ -2360,12 +2363,18 @@ void TextureCacheBase::CopyRenderTargetToTexture(
   // Native EFB copies are unjittered; retain producer semantics without logging guest addresses.
   const auto temporal_source = is_depth_copy ? TemporalTextureSource::NativeDepthCopy :
       isIntensity ? TemporalTextureSource::NativeIntensityCopy : TemporalTextureSource::NativeColorCopy;
-  if (ModernGekkoTemporal::GetState().active && !is_xfb_copy)
+  if (ModernGekkoTemporal::GetState().active)
   {
-    std::erase_if(m_temporal_copy_regions, [dstAddr](const auto& region) {
-      return region.address == dstAddr;
+    // RAM tails retain copied image data even when a later same-address copy is shorter.
+    u32 retained_range = covered_range;
+    std::erase_if(m_temporal_copy_regions, [&](const auto& region) {
+      if (region.address != dstAddr)
+        return false;
+      retained_range = std::max(retained_range, region.size);
+      return true;
     });
-    m_temporal_copy_regions.push_back({dstAddr, covered_range, temporal_source});
+    m_temporal_copy_regions.push_back({dstAddr, retained_range,
+        is_xfb_copy ? TemporalTextureSource::NativeColorCopy : temporal_source});
     // Dropping provenance would allow a RAM-reloaded scene copy to masquerade as an asset.
     // Keep the registry bounded by conservatively marking all memory inputs unknown on overflow.
     if (m_temporal_copy_regions.size() > 512)
@@ -2530,14 +2539,18 @@ void TextureCacheBase::CopyRenderTargetToTexture(
           // Native RTT producers stay unjittered. Final mirrored pixels, not historical
           // pass-wide viewport/copy flags, now provide the stronger coverage proof.
           packet->valid = captured && certified && packet->invalid_pixels == 0 &&
-                          state.depth_convention_known;
+                          state.depth_convention_known &&
+                          (state.reason_bits & static_cast<u32>(
+                              ModernGekkoTemporal::CoverageReason::MixedDepthConvention)) == 0;
           packet->uniform_jitter_coverage = packet->valid;
           packet->history_reset = state.content_id <= 1;
           packet->reason = !mapping ? "unclassified XFB filter, scale, gamma or modification" :
                            !captured ? "matched EFB snapshot allocation or bounds failure" :
                            !certified ? "GPU pixel coverage certification unavailable" :
                            packet->invalid_pixels != 0 ? "uncertified final mirrored pixels" :
-                           !state.depth_convention_known ? "unproven captured EFB depth convention" :
+                           !state.depth_convention_known ||
+                               (state.reason_bits & static_cast<u32>(ModernGekkoTemporal::CoverageReason::MixedDepthConvention)) != 0 ?
+                               "unproven or conflicting captured EFB depth convention" :
                            "";
           if (!packet->valid)
             packet->reason += fmt::format(" [bits={} draws={} scissor={} clear={} invalid_pixels={}]",

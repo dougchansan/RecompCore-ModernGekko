@@ -1,4 +1,6 @@
 add_library(videocommon
+  ModernGekkoTextureProvenance.cpp
+  ModernGekkoTextureProvenance.h
   ModernGekkoTemporalState.cpp
   ModernGekkoTemporalState.h
   AbstractFramebuffer.cpp
