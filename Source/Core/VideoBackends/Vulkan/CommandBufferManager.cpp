@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstdint>
+#include <atomic>
 
 #include "Common/Assert.h"
 #include "Common/MsgHandler.h"
@@ -285,24 +286,19 @@ void CommandBufferManager::WaitForCommandBufferCompletion(u32 index)
   if (res != VK_SUCCESS)
     LOG_VULKAN_ERROR(res, "vkWaitForFences failed: ");
 
-  // Clean up any resources for command buffers between the last known completed buffer and this
-  // now-completed command buffer. If we use >2 buffers, this may be more than one buffer.
+  // Completion also retires the buffer being waited on. Synchronous submissions can
+  // wait on m_current_cmd_buffer; excluding it loses its cleanup callbacks when the
+  // completed counter advances, and BeginCommandBuffer will then skip that fence.
   const u64 now_completed_counter = resources.fence_counter;
-  u32 cleanup_index = (m_current_cmd_buffer + 1) % NUM_COMMAND_BUFFERS;
-  while (cleanup_index != m_current_cmd_buffer)
+  for (CmdBufferResources& cleanup_resources : m_command_buffers)
   {
-    CmdBufferResources& cleanup_resources = m_command_buffers[cleanup_index];
-    if (cleanup_resources.fence_counter > now_completed_counter)
-      break;
-
-    if (cleanup_resources.fence_counter > m_completed_fence_counter)
+    if (cleanup_resources.fence_counter > m_completed_fence_counter &&
+        cleanup_resources.fence_counter <= now_completed_counter)
     {
       for (auto& it : cleanup_resources.cleanup_resources)
         it();
       cleanup_resources.cleanup_resources.clear();
     }
-
-    cleanup_index = (cleanup_index + 1) % NUM_COMMAND_BUFFERS;
   }
 
   m_completed_fence_counter = now_completed_counter;
@@ -533,8 +529,32 @@ void CommandBufferManager::DeferFramebufferDestruction(VkFramebuffer object)
 void CommandBufferManager::DeferImageDestruction(VkImage image, VmaAllocation alloc)
 {
   CmdBufferResources& cmd_buffer_resources = GetCurrentCmdBufferResources();
-  cmd_buffer_resources.cleanup_resources.push_back(
-      [image, alloc] { vmaDestroyImage(g_vulkan_context->GetMemoryAllocator(), image, alloc); });
+  // Scalar host diagnostics distinguish retired ownership from actual fenced frees.
+  static std::atomic<u64> queued_images{0};
+  static std::atomic<u64> freed_images{0};
+  static std::atomic<u64> queued_bytes{0};
+  static std::atomic<u64> freed_bytes{0};
+  VmaAllocationInfo allocation_info{};
+  vmaGetAllocationInfo(g_vulkan_context->GetMemoryAllocator(), alloc, &allocation_info);
+  const u64 bytes = allocation_info.size;
+  ++queued_images;
+  queued_bytes += bytes;
+  cmd_buffer_resources.cleanup_resources.push_back([image, alloc, bytes] {
+    vmaDestroyImage(g_vulkan_context->GetMemoryAllocator(), image, alloc);
+    freed_bytes += bytes;
+    const u64 freed = ++freed_images;
+    if (freed % 120 == 0)
+    {
+      VmaTotalStatistics statistics{};
+      vmaCalculateStatistics(g_vulkan_context->GetMemoryAllocator(), &statistics);
+      INFO_LOG_FMT(VIDEO,
+                   "Vulkan image retirement: queued={} freed={} pending_bytes={} "
+                   "vma_allocation_bytes={} vma_block_bytes={}",
+                   queued_images.load(), freed, queued_bytes.load() - freed_bytes.load(),
+                   statistics.total.statistics.allocationBytes,
+                   statistics.total.statistics.blockBytes);
+    }
+  });
 }
 
 void CommandBufferManager::DeferImageViewDestruction(VkImageView object)
