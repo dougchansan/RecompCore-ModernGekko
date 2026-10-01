@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -1159,7 +1160,10 @@ bool TextureCacheBase::HasUnclassifiedTemporalInputs(BitSet32 used_textures) con
   if (auxiliary_slots && !ModernGekkoTextureProvenance::CanUseAsOpacityData(bpmem, auxiliary_slots))
     ++unknown;
   static u32 diagnostics = 0;
-  if (ModernGekkoTemporal::GetState().active && (unknown || depth || intensity) && diagnostics++ < 32)
+  const auto temporal = ModernGekkoTemporal::GetState();
+  const bool trace = std::getenv("MODERNGEKKO_TEMPORAL_TRACE_FRAME") &&
+                     temporal.content_id >= 90 && temporal.content_id <= 91;
+  if (temporal.active && ((unknown || depth || intensity || color) && diagnostics++ < 32 || trace))
     INFO_LOG_FMT(VIDEO, "Temporal sampled inputs: unknown={} colorRT={} depthRT={} intensityRT={}",
                  unknown, color, depth, intensity);
   return unknown != 0;
@@ -2548,8 +2552,8 @@ void TextureCacheBase::CopyRenderTargetToTexture(
           packet->history_reset = state.content_id <= 1;
           packet->reason = !mapping ? "unclassified XFB filter, scale, gamma or modification" :
                            !captured ? "matched EFB snapshot allocation or bounds failure" :
+                           packet->invalid_pixels != UINT64_MAX && packet->invalid_pixels != 0 ? "uncertified final mirrored pixels" :
                            !certified ? "GPU pixel coverage certification unavailable" :
-                           packet->invalid_pixels != 0 ? "uncertified final mirrored pixels" :
                            !state.depth_convention_known ||
                                (state.reason_bits & static_cast<u32>(ModernGekkoTemporal::CoverageReason::MixedDepthConvention)) != 0 ?
                                "unproven or conflicting captured EFB depth convention" :
@@ -2558,6 +2562,20 @@ void TextureCacheBase::CopyRenderTargetToTexture(
             packet->reason += fmt::format(" [bits={} draws={} scissor={} clear={} invalid_pixels={}]",
                                          state.reason_bits, state.recognized_draws,
                                          scissor_coverage, clear_coverage, packet->invalid_pixels);
+        }
+        if (std::getenv("MODERNGEKKO_TEMPORAL_TRACE_FRAME") && state.content_id == 100 &&
+            packet->color && packet->coverage)
+        {
+          static bool captured_debug = false;
+          if (!captured_debug)
+          {
+            captured_debug = true;
+            // Private requested-screen diagnostics; never included in text evidence or Git.
+            const std::string debug_dir = "/home/douglaswhittingham/ngx-validation/private/mirror-debug/";
+            File::CreateFullPath(debug_dir);
+            packet->color->Save(debug_dir + "mirror.png", 0);
+            packet->coverage->Save(debug_dir + "coverage.png", 0);
+          }
         }
         const bool clear_coverage = ModernGekkoTemporal::HasClearCoverageForRect(
             state, srcRect.left, srcRect.top, srcRect.right, srcRect.bottom);
