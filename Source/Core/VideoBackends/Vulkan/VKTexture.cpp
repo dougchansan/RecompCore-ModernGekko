@@ -294,12 +294,21 @@ void VKTexture::CopyRectangleFromTexture(const AbstractTexture* src,
                  static_cast<u32>(dst_rect.GetHeight()) <= m_config.height,
              "Dest rect is too large for CopyRectangleFromTexture");
 
+  const VkImageAspectFlags src_aspect = GetImageAspectForFormat(src_texture->GetFormat());
+  const VkImageAspectFlags dst_aspect = GetImageAspectForFormat(GetFormat());
+  if (src_aspect != dst_aspect ||
+      (src_aspect != VK_IMAGE_ASPECT_COLOR_BIT && src_texture->GetVkFormat() != GetVkFormat()))
+  {
+    ERROR_LOG_FMT(VIDEO, "Vulkan: rejecting copy with incompatible image aspects/depth formats");
+    return;
+  }
+
   const u32 copy_layer_count = 1;
 
   VkImageCopy image_copy = {
-      {VK_IMAGE_ASPECT_COLOR_BIT, src_level, src_layer, copy_layer_count},
+      {src_aspect, src_level, src_layer, copy_layer_count},
       {src_rect.left, src_rect.top, 0},
-      {VK_IMAGE_ASPECT_COLOR_BIT, dst_level, dst_layer, copy_layer_count},
+      {dst_aspect, dst_level, dst_layer, copy_layer_count},
       {dst_rect.left, dst_rect.top, 0},
       {static_cast<uint32_t>(src_rect.GetWidth()), static_cast<uint32_t>(src_rect.GetHeight()), 1}};
 
@@ -312,6 +321,17 @@ void VKTexture::CopyRectangleFromTexture(const AbstractTexture* src,
   TransitionToLayout(g_command_buffer_mgr->GetCurrentCommandBuffer(),
                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
+  // Vulkan copy regions select depth and stencil separately.
+  if ((src_aspect & VK_IMAGE_ASPECT_STENCIL_BIT) != 0)
+  {
+    image_copy.srcSubresource.aspectMask = image_copy.dstSubresource.aspectMask =
+        VK_IMAGE_ASPECT_DEPTH_BIT;
+    vkCmdCopyImage(g_command_buffer_mgr->GetCurrentCommandBuffer(), src_texture->m_image,
+                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_image,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &image_copy);
+    image_copy.srcSubresource.aspectMask = image_copy.dstSubresource.aspectMask =
+        VK_IMAGE_ASPECT_STENCIL_BIT;
+  }
   vkCmdCopyImage(g_command_buffer_mgr->GetCurrentCommandBuffer(), src_texture->m_image,
                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_image,
                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &image_copy);
@@ -614,7 +634,7 @@ void VKTexture::TransitionToLayout(VkCommandBuffer command_buffer,
                                    ComputeImageLayout new_layout) const
 {
   ASSERT(new_layout != ComputeImageLayout::Undefined);
-  if (m_compute_layout == new_layout)
+  if (m_compute_layout == new_layout && new_layout == ComputeImageLayout::ReadOnly)
     return;
 
   m_written_since_last_layout_change = false;
@@ -686,11 +706,31 @@ void VKTexture::TransitionToLayout(VkCommandBuffer command_buffer,
     break;
   }
 
+  // Storage-image access modes share GENERAL, but still need dependencies
+  // between previous compute reads/writes and the next dispatch.
+  switch (m_compute_layout)
+  {
+  case ComputeImageLayout::ReadOnly:
+    barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    srcStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    break;
+  case ComputeImageLayout::WriteOnly:
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    srcStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    break;
+  case ComputeImageLayout::ReadWrite:
+    barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    srcStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    break;
+  case ComputeImageLayout::Undefined:
+    break;
+  }
+
   switch (new_layout)
   {
   case ComputeImageLayout::ReadOnly:
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
     dstStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     break;
   case ComputeImageLayout::WriteOnly:
