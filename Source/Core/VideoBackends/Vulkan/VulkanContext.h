@@ -94,6 +94,9 @@ public:
   VkInstance GetVulkanInstance() const { return m_instance; }
   VkPhysicalDevice GetPhysicalDevice() const { return m_physical_device; }
   VkDevice GetDevice() const { return m_device; }
+  bool HasNGXExtensions() const { return m_ngx_extensions_ready; }
+  // Call when discarding an instance before constructing its device context.
+  static void ForgetNGXInstance(VkInstance instance);
   VkQueue GetGraphicsQueue() const { return m_graphics_queue; }
   u32 GetGraphicsQueueFamilyIndex() const { return m_graphics_queue_family_index; }
   VkQueue GetPresentQueue() const { return m_present_queue; }
@@ -156,7 +159,9 @@ private:
 
   PhysicalDeviceInfo m_device_info;
 
+  bool m_ngx_extensions_ready = false;
   std::vector<std::string> m_device_extensions;
+  std::vector<std::string> m_ordinary_device_extensions;
 };
 
 extern std::unique_ptr<VulkanContext> g_vulkan_context;

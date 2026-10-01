@@ -6,6 +6,9 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <mutex>
+#include <unordered_map>
+#include "VideoBackends/Vulkan/ModernGekkoNGX.h"
 
 #include "Common/Assert.h"
 #include "Common/Contains.h"
@@ -18,6 +21,25 @@
 namespace Vulkan
 {
 static constexpr const char* VALIDATION_LAYER_NAME = "VK_LAYER_KHRONOS_validation";
+// Tracks requirements on each actual instance, including backend-info probes.
+// Device selection consumes the entry; newly created handles overwrite old probes.
+static std::mutex s_ngx_instance_mutex;
+static std::unordered_map<VkInstance, bool> s_ngx_instance_extensions;
+
+static bool ValidateNGXExtensions(const std::vector<std::string>& required,
+                                  const std::vector<VkExtensionProperties>& available)
+{
+  for (const auto& name : required)
+  {
+    if (!Common::Contains(available, std::string_view{name}, &VkExtensionProperties::extensionName))
+    {
+      WARN_LOG_FMT(VIDEO, "ModernGekko NGX: missing extension {}; using ordinary Vulkan", name);
+      return false;
+    }
+  }
+  return true;
+}
+
 
 std::unique_ptr<VulkanContext> g_vulkan_context;
 
@@ -130,8 +152,15 @@ VulkanContext::VulkanContext(VkInstance instance, VkPhysicalDevice physical_devi
 {
 }
 
+void VulkanContext::ForgetNGXInstance(VkInstance instance)
+{
+  std::lock_guard lock(s_ngx_instance_mutex);
+  s_ngx_instance_extensions.erase(instance);
+}
+
 VulkanContext::~VulkanContext()
 {
+  ForgetNGXInstance(m_instance);
   if (m_allocator != VK_NULL_HANDLE)
     vmaDestroyAllocator(m_allocator);
   if (m_device != VK_NULL_HANDLE)
@@ -231,6 +260,30 @@ VkInstance VulkanContext::CreateVulkanInstance(WindowSystemType wstype, bool ena
                                 enable_validation_layer))
     return VK_NULL_HANDLE;
 
+  const std::vector<const char*> ordinary_extensions = enabled_extensions;
+  // Own copied SDK names through vkCreateInstance.
+  std::vector<std::string> ngx_extensions;
+  bool ngx_ready = ModernGekkoNGX::GetInstanceExtensions(&ngx_extensions);
+  if (ngx_ready)
+  {
+    uint32_t count = 0;
+    VkResult query = vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr);
+    std::vector<VkExtensionProperties> available(count);
+    if (query == VK_SUCCESS)
+      query = vkEnumerateInstanceExtensionProperties(nullptr, &count, available.data());
+    ngx_ready = query == VK_SUCCESS && ValidateNGXExtensions(ngx_extensions, available);
+    if (!ngx_ready)
+      WARN_LOG_FMT(VIDEO, "ModernGekko NGX: instance requirements unavailable; using ordinary Vulkan");
+    else
+      for (const auto& name : ngx_extensions)
+        if (std::none_of(enabled_extensions.begin(), enabled_extensions.end(),
+                         [&](const char* existing) { return name == existing; }))
+        {
+          INFO_LOG_FMT(VIDEO, "ModernGekko NGX: enabling instance extension {}", name);
+          enabled_extensions.push_back(name.c_str());
+        }
+  }
+
   VkApplicationInfo app_info = {};
   app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
   app_info.pNext = nullptr;
@@ -261,12 +314,24 @@ VkInstance VulkanContext::CreateVulkanInstance(WindowSystemType wstype, bool ena
 
   VkInstance instance;
   VkResult res = vkCreateInstance(&instance_create_info, nullptr, &instance);
+  if (res != VK_SUCCESS && ngx_ready)
+  {
+    WARN_LOG_FMT(VIDEO, "ModernGekko NGX: instance creation failed; retrying ordinary Vulkan");
+    ngx_ready = false;
+    instance_create_info.enabledExtensionCount = static_cast<uint32_t>(ordinary_extensions.size());
+    instance_create_info.ppEnabledExtensionNames = ordinary_extensions.data();
+    res = vkCreateInstance(&instance_create_info, nullptr, &instance);
+  }
   if (res != VK_SUCCESS)
   {
     LOG_VULKAN_ERROR(res, "vkCreateInstance failed: ");
     return nullptr;
   }
 
+  {
+    std::lock_guard lock(s_ngx_instance_mutex);
+    s_ngx_instance_extensions[instance] = ngx_ready;
+  }
   return instance;
 }
 
@@ -638,6 +703,23 @@ bool VulkanContext::SelectDeviceExtensions(bool enable_surface)
                                              available_extension_list.data());
   ASSERT(res == VK_SUCCESS);
 
+  {
+    std::lock_guard lock(s_ngx_instance_mutex);
+    const auto found = s_ngx_instance_extensions.find(m_instance);
+    m_ngx_extensions_ready = found != s_ngx_instance_extensions.end() && found->second;
+    if (found != s_ngx_instance_extensions.end())
+      s_ngx_instance_extensions.erase(found);
+  }
+  std::vector<std::string> ngx_extensions;
+  if (m_ngx_extensions_ready)
+  {
+    m_ngx_extensions_ready = res == VK_SUCCESS &&
+        ModernGekkoNGX::GetDeviceExtensions(m_instance, m_physical_device, &ngx_extensions) &&
+        ValidateNGXExtensions(ngx_extensions, available_extension_list);
+    if (!m_ngx_extensions_ready)
+      WARN_LOG_FMT(VIDEO, "ModernGekko NGX: device requirements unavailable; using ordinary Vulkan");
+  }
+
   for (const auto& extension_properties : available_extension_list)
     INFO_LOG_FMT(VIDEO, "Available extension: {}", extension_properties.extensionName);
 
@@ -646,7 +728,9 @@ bool VulkanContext::SelectDeviceExtensions(bool enable_surface)
                          &VkExtensionProperties::extensionName))
     {
       INFO_LOG_FMT(VIDEO, "Enabling extension: {}", name);
-      m_device_extensions.push_back(name);
+      if (std::find(m_device_extensions.begin(), m_device_extensions.end(), name) ==
+          m_device_extensions.end())
+        m_device_extensions.push_back(name);
       return true;
     }
 
@@ -678,6 +762,15 @@ bool VulkanContext::SelectDeviceExtensions(bool enable_surface)
         AddExtension(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME, false);
   }
 
+  m_ordinary_device_extensions = m_device_extensions;
+  if (m_ngx_extensions_ready)
+    for (const auto& name : ngx_extensions)
+      if (std::find(m_device_extensions.begin(), m_device_extensions.end(), name) ==
+          m_device_extensions.end())
+      {
+        INFO_LOG_FMT(VIDEO, "ModernGekko NGX: enabling device extension {}", name);
+        m_device_extensions.push_back(name);
+      }
   return true;
 }
 
@@ -818,6 +911,18 @@ bool VulkanContext::CreateDevice(VkSurfaceKHR surface, bool enable_validation_la
   }
 
   VkResult res = vkCreateDevice(m_physical_device, &device_info, nullptr, &m_device);
+  if (res != VK_SUCCESS && m_ngx_extensions_ready)
+  {
+    WARN_LOG_FMT(VIDEO, "ModernGekko NGX: device creation failed; retrying ordinary Vulkan");
+    m_ngx_extensions_ready = false;
+    m_device_extensions = m_ordinary_device_extensions;
+    extension_name_pointers.clear();
+    for (const auto& name : m_device_extensions)
+      extension_name_pointers.push_back(name.c_str());
+    device_info.enabledExtensionCount = static_cast<uint32_t>(extension_name_pointers.size());
+    device_info.ppEnabledExtensionNames = extension_name_pointers.data();
+    res = vkCreateDevice(m_physical_device, &device_info, nullptr, &m_device);
+  }
   if (res != VK_SUCCESS)
   {
     LOG_VULKAN_ERROR(res, "vkCreateDevice failed: ");

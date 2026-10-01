@@ -6,6 +6,7 @@
 #include "Common/Logging/Log.h"
 #include "VideoBackends/Vulkan/VulkanContext.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
@@ -70,6 +71,104 @@ bool IsRequested()
   return ParseTruthy(std::getenv("MODERNGEKKO_DLSS"));
 }
 
+namespace
+{
+#ifdef MODERNGEKKO_ENABLE_NGX
+// All pointers passed to discovery refer to storage owned for the entire query.
+struct Discovery
+{
+  std::wstring data_path = GetApplicationDataPath().wstring();
+  std::wstring feature_path;
+  const wchar_t* path_pointer = nullptr;
+  NVSDK_NGX_FeatureCommonInfo common = {};
+  NVSDK_NGX_FeatureDiscoveryInfo info = {};
+  Discovery()
+  {
+    common.LoggingInfo.LoggingCallback = LogSDKMessage;
+    common.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
+    if (const char* path = std::getenv("MODERNGEKKO_NGX_FEATURE_PATH"); path && *path)
+    {
+      feature_path = std::filesystem::path{path}.wstring();
+      path_pointer = feature_path.c_str();
+      common.PathListInfo.Path = &path_pointer;
+      common.PathListInfo.Length = 1;
+    }
+    info.SDKVersion = NVSDK_NGX_Version_API;
+    info.FeatureID = NVSDK_NGX_Feature_SuperSampling;
+    info.Identifier.IdentifierType = NVSDK_NGX_Application_Identifier_Type_Project_Id;
+    info.Identifier.v.ProjectDesc = {MODERNGEKKO_NGX_PROJECT_ID,
+                                     NVSDK_NGX_ENGINE_TYPE_CUSTOM, "ModernGekko-NGX-PoC-1"};
+    info.ApplicationDataPath = data_path.c_str();
+    info.FeatureInfo = &common;
+  }
+};
+
+bool CopyRequirements(NVSDK_NGX_Result result, uint32_t count,
+                      const VkExtensionProperties* properties, std::vector<std::string>* names)
+{
+  names->clear();
+  if (NVSDK_NGX_FAILED(result) || (count && !properties))
+  {
+    WARN_LOG_FMT(VIDEO, "ModernGekko NGX: extension query failed ({:#x}); using ordinary Vulkan",
+                 static_cast<unsigned>(result));
+    return false;
+  }
+  for (uint32_t i = 0; i < count; ++i)
+  {
+    const auto& name = properties[i].extensionName;
+    const auto end = std::find(std::begin(name), std::end(name), '\0');
+    if (end == std::begin(name) || end == std::end(name))
+    {
+      names->clear();
+      WARN_LOG_FMT(VIDEO, "ModernGekko NGX: invalid extension name; using ordinary Vulkan");
+      return false;
+    }
+    std::string owned(std::begin(name), end);
+    if (std::find(names->begin(), names->end(), owned) == names->end())
+      names->push_back(std::move(owned));
+  }
+  return true;
+}
+#endif
+}  // namespace
+
+bool GetInstanceExtensions(std::vector<std::string>* names)
+{
+  names->clear();
+#ifdef MODERNGEKKO_ENABLE_NGX
+  if (!IsRequested())
+    return false;
+  Discovery discovery;
+  uint32_t count = 0;
+  VkExtensionProperties* properties = nullptr;
+  const auto result = NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements(
+      &discovery.info, &count, &properties);
+  return CopyRequirements(result, count, properties, names);
+#else
+  return false;
+#endif
+}
+
+bool GetDeviceExtensions(VkInstance instance, VkPhysicalDevice device,
+                         std::vector<std::string>* names)
+{
+  names->clear();
+#ifdef MODERNGEKKO_ENABLE_NGX
+  if (!IsRequested())
+    return false;
+  Discovery discovery;
+  uint32_t count = 0;
+  VkExtensionProperties* properties = nullptr;
+  const auto result = NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements(
+      instance, device, &discovery.info, &count, &properties);
+  return CopyRequirements(result, count, properties, names);
+#else
+  (void)instance;
+  (void)device;
+  return false;
+#endif
+}
+
 bool Initialize(VulkanContext& context)
 {
   INFO_LOG_FMT(VIDEO, "ModernGekko runtime: selected Vulkan GPU {} (vendor {:#x}, device {:#x})",
@@ -84,6 +183,11 @@ bool Initialize(VulkanContext& context)
                "compiled without MODERNGEKKO_ENABLE_NGX");
   return false;
 #else
+  if (!context.HasNGXExtensions())
+  {
+    WARN_LOG_FMT(VIDEO, "ModernGekko NGX: required extensions unavailable; using ordinary Vulkan");
+    return false;
+  }
   if (s_initialized)
     return true;
 
