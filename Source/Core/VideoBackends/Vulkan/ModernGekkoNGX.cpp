@@ -103,6 +103,40 @@ bool Initialize(VulkanContext& context)
                "Phase 1 only validates the SDK/driver handshake; DLSS "
                "Super Resolution evaluation is not enabled yet.",
                context.GetDeviceInfo().deviceName, static_cast<unsigned>(result));
+
+  NVSDK_NGX_Parameter* parameters = nullptr;
+  const NVSDK_NGX_Result capability_result =
+      NVSDK_NGX_VULKAN_GetCapabilityParameters(&parameters);
+  INFO_LOG_FMT(VIDEO, "ModernGekko NGX: GetCapabilityParameters result {:#x}",
+               static_cast<unsigned>(capability_result));
+  if (!NVSDK_NGX_FAILED(capability_result) && parameters)
+  {
+    const auto log_capability = [parameters](const char* name, const char* key, auto value) {
+      const NVSDK_NGX_Result get_result = parameters->Get(key, &value);
+      if (NVSDK_NGX_FAILED(get_result))
+        WARN_LOG_FMT(VIDEO, "ModernGekko NGX: {}=unknown (Get result {:#x})", name,
+                     static_cast<unsigned>(get_result));
+      else
+        INFO_LOG_FMT(VIDEO, "ModernGekko NGX: {}={} (Get result {:#x})", name, value,
+                     static_cast<unsigned>(get_result));
+    };
+    log_capability("SuperSampling_Available", NVSDK_NGX_Parameter_SuperSampling_Available, 0);
+    log_capability("NeedsUpdatedDriver", NVSDK_NGX_Parameter_SuperSampling_NeedsUpdatedDriver, 0);
+    log_capability("MinDriverVersionMajor", NVSDK_NGX_Parameter_SuperSampling_MinDriverVersionMajor,
+                   0u);
+    log_capability("MinDriverVersionMinor", NVSDK_NGX_Parameter_SuperSampling_MinDriverVersionMinor,
+                   0u);
+  }
+  else
+  {
+    WARN_LOG_FMT(VIDEO, "ModernGekko NGX: capability values are unknown; no usable parameter map");
+  }
+  if (parameters)
+  {
+    const NVSDK_NGX_Result destroy_result = NVSDK_NGX_VULKAN_DestroyParameters(parameters);
+    INFO_LOG_FMT(VIDEO, "ModernGekko NGX: DestroyParameters result {:#x}",
+                 static_cast<unsigned>(destroy_result));
+  }
   return true;
 #endif
 }
