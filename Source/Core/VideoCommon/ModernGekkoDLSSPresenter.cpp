@@ -101,6 +101,10 @@ struct ModernGekkoDLSSPresenter::State
   u32 input_width=0,input_height=0,output_width=0,output_height=0,current=0;
   u64 content_id=std::numeric_limits<u64>::max(),evaluations=0;
   bool history=false,cut_history=false,output_valid=false,owns_feature=false,attempted=false;
+  bool unavailable=false;
+  u64 fallback_presents=0,rejected_packets=0,last_rejected_content=std::numeric_limits<u64>::max();
+  u64 last_rejected_entry=std::numeric_limits<u64>::max();
+  u32 consecutive_rejections=0;
   std::chrono::steady_clock::time_point last_frame{};
   void ResetHistory() { history=false;cut_history=false;output_valid=false;attempted=false; }
   void Release()
@@ -111,6 +115,27 @@ struct ModernGekkoDLSSPresenter::State
     flow.reset();color={};depth={};output.reset();cut_texture.reset();cut_readback.reset();
     input_width=input_height=output_width=output_height=0;
     ResetHistory();
+  }
+  const AbstractTexture* Fallback(std::string_view reason,u64 entry_id,u64 packet_id)
+  {
+    ++fallback_presents;
+    if(entry_id!=last_rejected_entry || packet_id!=last_rejected_content) {
+      last_rejected_entry=entry_id;last_rejected_content=packet_id;
+      ++rejected_packets;++consecutive_rejections;
+    }
+    if(fallback_presents<=8 || fallback_presents%120==0)
+      INFO_LOG_FMT(VIDEO,"ModernGekko DLSS: native fallback reason={}, rejected packets={}, consecutive={}, fallback presents={}, evaluations={}",
+        reason,rejected_packets,consecutive_rejections,fallback_presents,evaluations);
+    const bool attempted_this_packet=attempted && content_id==packet_id;
+    ResetHistory();attempted=attempted_this_packet;
+    if(!unavailable && consecutive_rejections>=16) {
+      unavailable=true;
+      ModernGekkoTemporal::SetActive(false);
+      Release();
+      WARN_LOG_FMT(VIDEO,"ModernGekko DLSS: unavailable for this run after {} rejected packets; raster jitter disabled; reason={}",
+        consecutive_rejections,reason);
+    }
+    return nullptr;
   }
   bool Configure(u32 width,u32 height)
   {
@@ -189,19 +214,27 @@ const AbstractTexture* ModernGekkoDLSSPresenter::Render(const RcTcacheEntry& ent
   if(!Requested() || !width || !height) {
     ModernGekkoTemporal::SetActive(false);s.Release();return nullptr;
   }
+  if(s.unavailable) {
+    ModernGekkoTemporal::SetActive(false);
+    return s.Fallback("experiment unavailable for this run; raster jitter disabled",entry ? entry->id : 0,
+      ModernGekkoTemporal::GetState().content_id);
+  }
   ModernGekkoTemporal::SetActive(true);
   const auto packet=TextureCacheBase::GetTemporalPacket(entry,source_rect);
+  const u64 entry_id=entry ? entry->id : 0;
+  const u64 packet_id=packet ? packet->content_id : ModernGekkoTemporal::GetState().content_id;
+  auto fallback=[&](std::string_view reason) {return s.Fallback(reason,entry_id,packet_id);};
   if(!packet || !packet->color || !packet->depth) {
-    s.ResetHistory();return nullptr;
+    return fallback(packet ? std::string_view(packet->reason) : "matched temporal packet absent");
   }
   if(packet->color->GetWidth()!=packet->depth->GetWidth() ||
      packet->color->GetHeight()!=packet->depth->GetHeight() ||
      !packet->color->GetWidth() || !packet->color->GetHeight() ||
      packet->efb_rect.GetWidth()<=0 || packet->efb_rect.GetHeight()<=0 ||
      !std::isfinite(packet->jitter_x) || !std::isfinite(packet->jitter_y)) {
-    s.ResetHistory();return nullptr;
+    return fallback("invalid matched snapshot dimensions or jitter");
   }
-  if(!s.Configure(width,height)) {s.ResetHistory();return nullptr;}
+  if(!s.Configure(width,height)) return fallback("SDK Quality configuration or allocation failed");
   const std::array<float,2> input_per_native={
     float(s.input_width)/packet->efb_rect.GetWidth(),
     float(s.input_height)/packet->efb_rect.GetHeight()};
@@ -209,9 +242,9 @@ const AbstractTexture* ModernGekkoDLSSPresenter::Render(const RcTcacheEntry& ent
   if(s.input_per_native!=input_per_native) {
     s.input_per_native=input_per_native;s.ResetHistory();
     // The captured packet predates this raster jitter scale; await a newly rendered packet.
-    return nullptr;
+    return fallback("awaiting newly rendered packet after raster jitter calibration");
   }
-  if(!packet->valid) {s.ResetHistory();return nullptr;}
+  if(!packet->valid) return fallback(packet->reason);
   const bool same_crop=s.source_rect==source_rect;
   if(packet->content_id==s.content_id && same_crop && s.attempted)
     return s.output_valid ? s.output.get() : nullptr;
@@ -235,7 +268,7 @@ const AbstractTexture* ModernGekkoDLSSPresenter::Render(const RcTcacheEntry& ent
   inputs.current_jitter=jitter;inputs.previous_jitter=s.previous_jitter;
   inputs.history_valid=!reset;inputs.uniform_jitter_coverage=packet->uniform_jitter_coverage;
   const auto motion=s.flow->Run(inputs);
-  if(!motion.motion || !motion.bias) {s.ResetHistory();return nullptr;}
+  if(!motion.motion || !motion.bias) return fallback("estimated motion pipeline failed");
   for(const AbstractTexture* texture:std::array<const AbstractTexture*,4>{color,depth,motion.motion,motion.bias})
     Barrier(texture,VK_IMAGE_LAYOUT_GENERAL,VK_ACCESS_SHADER_READ_BIT);
   Barrier(s.output.get(),VK_IMAGE_LAYOUT_GENERAL,VK_ACCESS_SHADER_WRITE_BIT);
@@ -250,6 +283,8 @@ const AbstractTexture* ModernGekkoDLSSPresenter::Render(const RcTcacheEntry& ent
   Vulkan::StateTracker::GetInstance()->InvalidateCachedState();
   s.content_id=packet->content_id;s.previous_jitter=jitter;s.last_frame=now;
   s.history=s.output_valid;s.current=1-s.current;++s.evaluations;
-  return s.output_valid ? s.output.get() : nullptr;
+  if(!s.output_valid) return fallback("SDK evaluation failed");
+  s.consecutive_rejections=0;
+  return s.output.get();
 }
 }
