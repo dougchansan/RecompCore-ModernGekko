@@ -6,6 +6,8 @@
 #include <array>
 #include <cmath>
 #include <memory>
+#include <limits>
+#include <string>
 #include <cstdlib>
 #include <string_view>
 
@@ -23,6 +25,7 @@
 
 #include "VideoCommon/AbstractGfx.h"
 #include "VideoCommon/BPMemory.h"
+#include "VideoCommon/BPFunctions.h"
 #include "VideoCommon/BoundingBox.h"
 #include "VideoCommon/DataReader.h"
 #include "VideoCommon/FramebufferManager.h"
@@ -1130,7 +1133,45 @@ VertexManagerBase::PrepareTemporalDraw(const AbstractPipeline* native_pipeline, 
 
   auto* gfx = Vulkan::VKGfx::GetInstance();
   const auto native_state = gfx->SaveTemporalRasterState();
+  auto trace = [&](bool known, bool overwrite, bool alpha_gate, std::string_view reason) {
+    const char* enabled = std::getenv("MODERNGEKKO_TEMPORAL_TRACE_FRAME");
+    const auto state = ModernGekkoTemporal::GetState();
+    if (!enabled || std::string_view(enabled) != "1" || state.content_id < 90 || state.content_id > 91)
+      return;
+    static u64 traced_content = std::numeric_limits<u64>::max();
+    static u32 order = 0;
+    if (traced_content != state.content_id) { traced_content = state.content_id; order = 0; }
+    if (++order > 512)
+      return;
+    const auto scissor = BPFunctions::ComputeScissorRects(
+        bpmem.scissorTL, bpmem.scissorBR, bpmem.scissorOffset, xfmem.viewport);
+    std::string rectangles;
+    for (const auto& rc : scissor.rectangles)
+      rectangles += fmt::format("({},{},{},{})@{},{};", rc.rect.left, rc.rect.top,
+                                rc.rect.right, rc.rect.bottom, rc.x_off, rc.y_off);
+    const auto blend = m_current_pipeline_config.blending_state;
+    const auto depth = m_current_pipeline_config.depth_state;
+    const auto* ps = m_current_pipeline_config.ps_uid.GetUidData();
+    INFO_LOG_FMT(VIDEO,
+      "Temporal draw trace: content={} order={} indices={} known={} overwrite={} alpha_gate={} "
+      "RGB={} A={} ztest={} zwrite={} zfunc={} blend={} src={} dst={} projection={} "
+      "viewport=({},{},{},{}) scissor_count={} scissors={} "
+      "gpuVP=({},{},{},{},{},{}) gpuScissor=({},{},{},{}) "
+      "uid_ztest={} uid_fragdepth={} uid_ztex={} uid_alpha_pretest={} uid_bbox={} reason={}",
+      state.content_id, order, m_index_generator.GetIndexLen(), known, overwrite, alpha_gate,
+      bool(blend.color_update), bool(blend.alpha_update), bool(depth.test_enable),
+      bool(depth.update_enable), static_cast<u32>(depth.func.Value()), bool(blend.blend_enable),
+      static_cast<u32>(blend.src_factor.Value()), static_cast<u32>(blend.dst_factor.Value()),
+      static_cast<u32>(xfmem.projection.type), xfmem.viewport.xOrig, xfmem.viewport.yOrig,
+      2.0f*xfmem.viewport.wd, -2.0f*xfmem.viewport.ht, scissor.rectangles.size(), rectangles,
+      native_state.viewport.x, native_state.viewport.y, native_state.viewport.width,
+      native_state.viewport.height, native_state.viewport.minDepth, native_state.viewport.maxDepth,
+      native_state.scissor.offset.x, native_state.scissor.offset.y, native_state.scissor.extent.width,
+      native_state.scissor.extent.height, static_cast<u32>(ps->ztest), static_cast<u32>(ps->per_pixel_depth),
+      static_cast<u32>(ps->ztex_op), static_cast<u32>(ps->Pretest), static_cast<u32>(ps->bounding_box), reason);
+  };
   auto reject = [&](std::string_view reason) {
+    trace(false, false, false, reason);
     static u64 rejected_draws = 0;
     if (++rejected_draws <= 8 || rejected_draws % 120 == 0)
       INFO_LOG_FMT(VIDEO, "Temporal mirror: rejected draws={} reason={}", rejected_draws, reason);
@@ -1222,6 +1263,7 @@ VertexManagerBase::PrepareTemporalDraw(const AbstractPipeline* native_pipeline, 
   if (!plan.color_pipeline || (metadata_needed && !plan.metadata_pipeline) ||
       (alpha_dependency && !plan.alpha_gate_pipeline))
     return reject("paired shader pipeline unavailable");
+  trace(known, overwrite, alpha_dependency, "paired");
   gfx->RestoreTemporalRasterState(native_state);
   return plan;
 }
