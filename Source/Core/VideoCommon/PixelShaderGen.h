@@ -20,6 +20,15 @@ enum class RasColorChan : u32;
 enum class SrcBlendFactor : u32;
 enum class ZTexOp : u32;
 
+// Static shader variants; no guest constant-buffer fields are added.
+enum class TemporalPixelShaderMode : u32
+{
+  Native = 0,
+  MirrorColor = 1,
+  MetadataKnown = 2,
+  MetadataUnknown = 3
+};
+
 #pragma pack(1)
 struct pixel_shader_uid_data
 {
@@ -27,7 +36,8 @@ struct pixel_shader_uid_data
 
   u32 num_values;  // TODO: Shouldn't be a u32
   u32 NumValues() const { return num_values; }
-  u32 pad0 : 4;
+  u32 temporal_mode : 2;
+  u32 pad0 : 2;
   u32 useDstAlpha : 1;
   u32 no_dual_src : 1;
   AlphaTestResult Pretest : 2;
@@ -157,6 +167,11 @@ struct pixel_shader_uid_data
 #pragma pack()
 
 using PixelShaderUid = ShaderUid<pixel_shader_uid_data>;
+inline void SetTemporalPixelShaderMode(PixelShaderUid* uid, TemporalPixelShaderMode mode)
+{
+  uid->GetUidData()->temporal_mode = static_cast<u32>(mode);
+}
+
 
 struct CustomPixelContents
 {

@@ -61,11 +61,21 @@ ShaderCode GenPixelShader(APIType api_type, const ShaderHostConfig& host_config,
   const bool msaa = host_config.msaa;
   const bool ssaa = host_config.ssaa;
   const bool stereo = host_config.stereo;
-  const bool use_framebuffer_fetch = host_config.backend_shader_framebuffer_fetch;
-  const bool use_dual_source = host_config.backend_dual_source_blend && !uid_data->no_dual_src;
+  const bool metadata = uid_data->temporal_mode >=
+                        static_cast<u32>(TemporalPixelShaderMode::MetadataKnown);
+  pixel_ubershader_uid_data variant = *uid_data;
+  if (metadata)
+  {
+    variant.no_dual_src = 1;
+    variant.uint_output = 0;
+  }
+  uid_data = &variant;
+  const bool use_framebuffer_fetch = !metadata && host_config.backend_shader_framebuffer_fetch;
+  const bool use_dual_source = !metadata && host_config.backend_dual_source_blend &&
+                               !uid_data->no_dual_src;
   const bool early_depth = uid_data->early_depth != 0;
   const bool per_pixel_depth = uid_data->per_pixel_depth != 0;
-  const bool bounding_box = host_config.bounding_box;
+  const bool bounding_box = uid_data->temporal_mode == 0 && host_config.bounding_box;
   const u32 numTexgen = uid_data->num_texgens;
   ShaderCode out;
 
@@ -1006,7 +1016,7 @@ ShaderCode GenPixelShader(APIType api_type, const ShaderHostConfig& host_config,
   out.Write("  // Alpha Test\n");
 
   if (early_depth && DriverDetails::HasBug(DriverDetails::BUG_BROKEN_DISCARD_WITH_EARLY_Z) &&
-      host_config.backend_shader_framebuffer_fetch)
+      use_framebuffer_fetch)
   {
     // Instead of using discard, fetch the framebuffer's color value and use it as the output
     // for this fragment.
@@ -1296,6 +1306,11 @@ ShaderCode GenPixelShader(APIType api_type, const ShaderHostConfig& host_config,
               "    real_ocol0 = ocol0;\n"
               "  }}\n");
   }
+
+  if (metadata)
+    out.Write("  ocol0 = float4({0}, {0}, {0}, {0});\n",
+              uid_data->temporal_mode == static_cast<u32>(TemporalPixelShaderMode::MetadataKnown) ?
+                  "1.0" : "0.0");
 
   out.Write("}}\n"
             "\n"

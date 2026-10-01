@@ -749,6 +749,20 @@ ShaderCode GeneratePixelShaderCode(APIType api_type, const ShaderHostConfig& hos
                                    const pixel_shader_uid_data* uid_data,
                                    CustomPixelContents custom_contents)
 {
+  pixel_shader_uid_data variant = *uid_data;
+  const bool metadata = variant.temporal_mode >=
+                        static_cast<u32>(TemporalPixelShaderMode::MetadataKnown);
+  if (variant.temporal_mode != 0)
+    variant.bounding_box = 0;
+  if (metadata)
+  {
+    variant.no_dual_src = 1;
+    variant.uint_output = 0;
+    variant.blend_enable = 0;
+    variant.logic_op_enable = 0;
+    variant.emulate_logic_op_with_blend = 0;
+  }
+  uid_data = &variant;
   ShaderCode out;
 
   const bool per_pixel_lighting = g_ActiveConfig.bEnablePixelLighting;
@@ -808,8 +822,9 @@ ShaderCode GeneratePixelShaderCode(APIType api_type, const ShaderHostConfig& hos
     out.Write("FORCE_EARLY_Z; \n");
   }
 
-  const bool use_framebuffer_fetch = uid_data->blend_enable || uid_data->logic_op_enable ||
-                                     uid_data->ztest == EmulatedZ::EarlyWithFBFetch;
+  const bool use_framebuffer_fetch = !metadata &&
+      (uid_data->blend_enable || uid_data->logic_op_enable ||
+       uid_data->ztest == EmulatedZ::EarlyWithFBFetch);
 
 #ifdef __APPLE__
   // Framebuffer fetch is only supported by Metal, so ensure that we're running Vulkan (MoltenVK)
@@ -927,6 +942,10 @@ ShaderCode GeneratePixelShaderCode(APIType api_type, const ShaderHostConfig& hos
   }
 
   out.Write("void main()\n{{\n");
+  if (metadata)
+    out.Write("\tbool temporal_alpha_pass = {};\n",
+              uid_data->Pretest == AlphaTestResult::Fail ? "false" : "true");
+
   out.Write("\tfloat4 rawpos = gl_FragCoord;\n");
 
   if (use_framebuffer_fetch)
@@ -1115,6 +1134,11 @@ ShaderCode GeneratePixelShaderCode(APIType api_type, const ShaderHostConfig& hos
     WriteBlend(out, uid_data);
   else if (use_framebuffer_fetch)
     out.Write("\treal_ocol0 = ocol0;\n");
+
+  if (metadata)
+    out.Write("\tocol0 = float4({0}, {0}, {0}, {0});\n",
+              variant.temporal_mode == static_cast<u32>(TemporalPixelShaderMode::MetadataKnown) ?
+                  "(temporal_alpha_pass ? 1.0 : 0.0)" : "0.0");
 
   if (uid_data->bounding_box)
     out.Write("\tUpdateBoundingBox(rawpos.xy);\n");
@@ -1627,6 +1651,9 @@ static void WriteAlphaTest(ShaderCode& out, const pixel_shader_uid_data* uid_dat
   else
     out.Write(")) {{\n");
 
+  if (uid_data->temporal_mode >= static_cast<u32>(TemporalPixelShaderMode::MetadataKnown))
+    out.Write("\t\ttemporal_alpha_pass = false;\n");
+
   if (uid_data->uint_output)
     out.Write("\t\tocol0 = uint4(0, 0, 0, 0);\n");
   else
@@ -1647,7 +1674,8 @@ static void WriteAlphaTest(ShaderCode& out, const pixel_shader_uid_data* uid_dat
   if (uid_data->ztest != EmulatedZ::EarlyWithZComplocHack)
   {
 #ifdef __APPLE__
-    if (uid_data->ztest == EmulatedZ::EarlyWithFBFetch)
+    if (uid_data->ztest == EmulatedZ::EarlyWithFBFetch &&
+        uid_data->temporal_mode < static_cast<u32>(TemporalPixelShaderMode::MetadataKnown))
     {
       // Instead of using discard, fetch the framebuffer's color value and use it as the output
       // for this fragment.
