@@ -35,6 +35,10 @@ add_library(videovulkan
   VulkanContext.h
   VulkanLoader.cpp
   VulkanLoader.h
+  ../../VideoCommon/ModernGekkoOpticalFlow.cpp
+  ../../VideoCommon/ModernGekkoOpticalFlow.h
+  ../../VideoCommon/ModernGekkoDLSSPresenter.cpp
+  ../../VideoCommon/ModernGekkoDLSSPresenter.h
   ModernGekkoNGX.cpp
   ModernGekkoNGX.h
 )

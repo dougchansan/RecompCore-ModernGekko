@@ -264,6 +264,9 @@ using RcTcacheEntry = std::shared_ptr<TCacheEntry>;
 class TextureCacheBase
 {
 public:
+  static std::shared_ptr<const ModernGekkoTemporalPacket>
+  GetTemporalPacket(const RcTcacheEntry& entry, const MathUtil::Rectangle<int>& display_rect);
+
   // Minimal version of TCacheEntry just for TexPool
   struct TexPoolEntry
   {
@@ -310,9 +313,6 @@ public:
                                  bool scaleByHalf, float y_scale, float gamma, bool clamp_top,
                                  bool clamp_bottom,
                                  const CopyFilterCoefficients::Values& filter_coefficients);
-
-  static std::shared_ptr<const ModernGekkoTemporalPacket>
-  GetTemporalPacket(const RcTcacheEntry& entry, const MathUtil::Rectangle<int>& display_rect);
 
   void ScaleTextureCacheEntryTo(RcTcacheEntry& entry, u32 new_width, u32 new_height);
 

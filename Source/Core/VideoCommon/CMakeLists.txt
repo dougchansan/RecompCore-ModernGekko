@@ -1,4 +1,6 @@
 add_library(videocommon
+  ModernGekkoTemporalState.cpp
+  ModernGekkoTemporalState.h
   AbstractFramebuffer.cpp
   AbstractFramebuffer.h
   AbstractGfx.cpp

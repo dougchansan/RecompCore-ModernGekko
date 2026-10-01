@@ -17,6 +17,7 @@
 #include "VideoCommon/BPMemory.h"
 #include "VideoCommon/EFBInterface.h"
 #include "VideoCommon/FramebufferManager.h"
+#include "VideoCommon/ModernGekkoTemporalState.h"
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/VertexShaderManager.h"
 #include "VideoCommon/VideoCommon.h"
@@ -184,6 +185,13 @@ void SetScissorAndViewport(FramebufferManager* frame_buffer_manager, ScissorPos 
   const auto result = BPFunctions::ComputeScissorRects(scissor_top_left, scissor_bottom_right,
                                                        scissor_offset, viewport);
   auto native_rc = result.Best();
+  if (ModernGekkoTemporal::GetState().active)
+  {
+    if (result.rectangles.size() != 1)
+      ModernGekkoTemporal::MarkCoverageInvalid();
+  }
+  ModernGekkoTemporal::MarkScissorCoverage(native_rc.rect.left, native_rc.rect.top,
+                                         native_rc.rect.right, native_rc.rect.bottom);
 
   auto target_rc = frame_buffer_manager->ConvertEFBRectangle(native_rc.rect);
   auto converted_rc = g_gfx->ConvertFramebufferRectangle(target_rc, g_gfx->GetCurrentFramebuffer());
