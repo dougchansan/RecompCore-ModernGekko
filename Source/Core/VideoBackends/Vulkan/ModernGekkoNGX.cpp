@@ -66,6 +66,9 @@ bool IsRequested()
 
 bool Initialize(VulkanContext& context)
 {
+  INFO_LOG_FMT(VIDEO, "ModernGekko runtime: selected Vulkan GPU {} (vendor {:#x}, device {:#x})",
+               context.GetDeviceInfo().deviceName, context.GetDeviceInfo().vendorID,
+               context.GetDeviceInfo().deviceID);
   if (!IsRequested())
     return false;
 
@@ -96,10 +99,10 @@ bool Initialize(VulkanContext& context)
 
   s_initialized = true;
   INFO_LOG_FMT(VIDEO,
-               "ModernGekko NGX: Vulkan SDK initialized on {}. "
+               "ModernGekko NGX: Vulkan SDK initialized on {} (result {:#x}). "
                "Phase 1 only validates the SDK/driver handshake; DLSS "
                "Super Resolution evaluation is not enabled yet.",
-               context.GetDeviceInfo().deviceName);
+               context.GetDeviceInfo().deviceName, static_cast<unsigned>(result));
   return true;
 #endif
 }

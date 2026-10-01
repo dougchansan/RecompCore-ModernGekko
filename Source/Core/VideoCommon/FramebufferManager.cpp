@@ -296,6 +296,8 @@ bool FramebufferManager::CreateEFBFramebuffer(int efb_scale)
   // Pixel Shader uses EFB scale as a constant, dirty that in case it changed
   Core::System::GetInstance().GetPixelShaderManager().Dirty();
 
+  INFO_LOG_FMT(VIDEO, "ModernGekko runtime: EFB {}x{} scale {}", GetEFBWidth(), GetEFBHeight(),
+               GetEFBScale());
   return true;
 }
 
