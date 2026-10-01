@@ -33,6 +33,12 @@ bool ParseTruthy(const char* value)
 }
 
 #ifdef MODERNGEKKO_ENABLE_NGX
+void NVSDK_CONV LogSDKMessage(const char* message, NVSDK_NGX_Logging_Level, NVSDK_NGX_Feature)
+{
+  if (message)
+    INFO_LOG_FMT(VIDEO, "ModernGekko NGX: SDK {}", message);
+}
+
 std::filesystem::path GetApplicationDataPath()
 {
   std::filesystem::path base;
@@ -83,10 +89,23 @@ bool Initialize(VulkanContext& context)
 
   const std::filesystem::path data_path = GetApplicationDataPath();
   const std::wstring data_path_wide = data_path.wstring();
+  NVSDK_NGX_FeatureCommonInfo feature_info = {};
+  feature_info.LoggingInfo.LoggingCallback = LogSDKMessage;
+  feature_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
+  std::wstring feature_path_wide;
+  const wchar_t* feature_path = nullptr;
+  if (const char* path = std::getenv("MODERNGEKKO_NGX_FEATURE_PATH"); path && *path)
+  {
+    feature_path_wide = std::filesystem::path{path}.wstring();
+    feature_path = feature_path_wide.c_str();
+    feature_info.PathListInfo.Path = &feature_path;
+    feature_info.PathListInfo.Length = 1;
+    INFO_LOG_FMT(VIDEO, "ModernGekko NGX: feature search path {}", path);
+  }
   const NVSDK_NGX_Result result = NVSDK_NGX_VULKAN_Init_with_ProjectID(
       MODERNGEKKO_NGX_PROJECT_ID, NVSDK_NGX_ENGINE_TYPE_CUSTOM,
       "ModernGekko-NGX-PoC-1", data_path_wide.c_str(), context.GetVulkanInstance(),
-      context.GetPhysicalDevice(), context.GetDevice());
+      context.GetPhysicalDevice(), context.GetDevice(), nullptr, nullptr, &feature_info);
 
   if (NVSDK_NGX_FAILED(result))
   {
