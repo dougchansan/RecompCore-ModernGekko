@@ -149,13 +149,14 @@ void TextureCacheBase::ReportTemporalSnapshotMemory()
 {
   size_t bytes = 0;
   size_t count = 0;
+  std::unordered_set<const ModernGekkoTemporalPacket*> seen;
   for (const auto& weak : m_recent_temporal_entries)
   {
     const auto entry = weak.lock();
     if (!entry || !entry->temporal_packet)
       continue;
     const auto& packet = entry->temporal_packet;
-    if (!packet->color || !packet->depth)
+    if (!packet->color || !packet->depth || !seen.insert(packet.get()).second)
       continue;
     ++count;
     for (const auto* texture : {packet->color.get(), packet->depth.get()})
@@ -2366,6 +2367,7 @@ void TextureCacheBase::CopyRenderTargetToTexture(
       !is_depth_copy &&
       (scaleByHalf || g_framebuffer_manager->GetEFBScale() != 1 || y_scale > 1.0f);
 
+  bool duplicate_temporal_content = false;
   RcTcacheEntry entry;
   if (copy_to_vram)
   {
@@ -2393,8 +2395,6 @@ void TextureCacheBase::CopyRenderTargetToTexture(
 
       if (is_xfb_copy && ModernGekkoTemporal::GetState().active)
       {
-        // Retire before allocation: at most two cache-owned pairs remain live.
-        RetireTemporalPackets(MAX_TEMPORAL_PACKETS - 1);
         auto packet = std::make_shared<ModernGekkoTemporalPacket>();
         packet->efb_rect = srcRect;
         packet->xfb_width = tex_w;
@@ -2407,44 +2407,92 @@ void TextureCacheBase::CopyRenderTargetToTexture(
                              srcRect.GetWidth() == static_cast<int>(width) &&
                              srcRect.GetHeight() == static_cast<int>(height) &&
                              !g_ActiveConfig.bGraphicMods;
-        const bool captured = mapping && g_framebuffer_manager->CaptureTemporalEFB(
-                                             srcRect, &packet->color, &packet->depth);
+        const auto before_capture = ModernGekkoTemporal::GetState();
+        // A copy alone only reads the EFB. Reuse the previous immutable input when
+        // no recognized draw, clear, poke, multipass copy or unknown write occurred.
+        if (mapping && before_capture.recognized_draws == 0 && before_capture.clear_count == 0 &&
+            before_capture.reason_bits ==
+                static_cast<u32>(ModernGekkoTemporal::CoverageReason::NoRecognizedDraw))
+        {
+          for (auto it = m_recent_temporal_entries.rbegin();
+               it != m_recent_temporal_entries.rend(); ++it)
+          {
+            const auto previous_entry = it->lock();
+            if (!previous_entry || !previous_entry->temporal_packet)
+              continue;
+            const auto& previous = previous_entry->temporal_packet;
+            if (previous->valid && previous->efb_rect == srcRect &&
+                previous->xfb_width == tex_w && previous->xfb_height == tex_h &&
+                previous->color && previous->depth &&
+                previous->color->GetWidth() == scaled_tex_w &&
+                previous->color->GetHeight() == scaled_tex_h)
+            {
+              packet = previous;
+              duplicate_temporal_content = true;
+            }
+            break;  // Only the most recent EFB content can be reused.
+          }
+        }
+        // Retire before allocation; the local shared owner protects a reused packet.
+        RetireTemporalPackets(MAX_TEMPORAL_PACKETS - 1);
+        const bool captured = duplicate_temporal_content ||
+                              (mapping && g_framebuffer_manager->CaptureTemporalEFB(
+                                              srcRect, &packet->color, &packet->depth));
         const auto state = ModernGekkoTemporal::GetState();
-        packet->content_id = state.content_id;
-        packet->jitter_x = state.jitter_x;
-        packet->jitter_y = state.jitter_y;
-        const bool scissor_coverage = srcRect.left >= state.scissor_left &&
-                                      srcRect.top >= state.scissor_top &&
-                                      srcRect.right <= state.scissor_right &&
-                                      srcRect.bottom <= state.scissor_bottom;
+        if (!duplicate_temporal_content)
+        {
+          packet->content_id = state.content_id;
+          packet->jitter_x = state.jitter_x;
+          packet->jitter_y = state.jitter_y;
+          const bool scissor_coverage = srcRect.left >= state.scissor_left &&
+                                        srcRect.top >= state.scissor_top &&
+                                        srcRect.right <= state.scissor_right &&
+                                        srcRect.bottom <= state.scissor_bottom;
+          const bool clear_coverage = ModernGekkoTemporal::HasClearCoverageForRect(
+              state, srcRect.left, srcRect.top, srcRect.right, srcRect.bottom);
+          packet->depth_convention_known = state.depth_convention_known;
+          packet->depth_inverted = state.depth_inverted;
+          packet->valid = captured && state.coverage_valid && state.depth_convention_known &&
+                          scissor_coverage && clear_coverage;
+          packet->uniform_jitter_coverage = packet->valid;
+          packet->history_reset = state.content_id <= 1;
+          packet->reason = !mapping ? "unclassified XFB filter, scale, gamma or modification" :
+                           !captured ? "matched EFB snapshot allocation or bounds failure" :
+                           !state.coverage_valid ? "unclassified EFB contribution or mixed viewport" :
+                           !state.depth_convention_known ? "unproven captured EFB depth convention" :
+                           !scissor_coverage ? "guest scissor clips the captured source" :
+                           !clear_coverage ? "clear boundary lies within captured source" :
+                           "";
+          if (!packet->valid)
+            packet->reason += fmt::format(" [bits={} draws={} scissor={} clear={}]",
+                                         state.reason_bits, state.recognized_draws,
+                                         scissor_coverage, clear_coverage);
+        }
         const bool clear_coverage = ModernGekkoTemporal::HasClearCoverageForRect(
             state, srcRect.left, srcRect.top, srcRect.right, srcRect.bottom);
-        packet->depth_convention_known = state.depth_convention_known;
-        packet->depth_inverted = state.depth_inverted;
-        packet->valid = captured && state.coverage_valid && state.depth_convention_known &&
-                        scissor_coverage && clear_coverage;
-        packet->uniform_jitter_coverage = packet->valid;
-        packet->history_reset = state.content_id <= 1;
-        packet->reason = !mapping ? "unclassified XFB filter, scale, gamma or modification" :
-                         !captured ? "matched EFB snapshot allocation or bounds failure" :
-                         !state.coverage_valid ? "unclassified EFB contribution or mixed viewport" :
-                         !state.depth_convention_known ? "unproven captured EFB depth convention" :
-                         !scissor_coverage ? "guest scissor clips the captured source" :
-                         !clear_coverage ? "clear boundary lies within captured source" :
-                         "";
         static u32 diagnostic_count = 0;
-        if (diagnostic_count++ < 8)
+        static u32 transition_count = 0;
+        static std::tuple<u32, bool, bool> last_status{};
+        // Duplicate copies alternate with rendered frames; do not spend the bounded
+        // diagnostic budget on successful-copy cadence before a late rejection.
+        const auto status = std::make_tuple(packet->valid ? 0u : state.reason_bits,
+                                            packet->valid, clear_coverage);
+        const bool changed = status != last_status;
+        const bool report = diagnostic_count++ < 8 || (changed && transition_count++ < 64);
+        last_status = status;
+        if (report)
           INFO_LOG_FMT(VIDEO,
                        "Temporal copy: source={}x{} XFB={}x{} scale={} yscale={} half={} "
                        "gamma={} filter={}/{}/{} coverage={} valid={} bits={} draws={} viewportchanges={} depthprojectionchanges={} "
-                       "scissor={},{},{},{} clears={} clearcoverage={} reason={}",
+                       "scissor={},{},{},{} clears={} clearcoverage={} duplicate={} content={} reason={}",
                        srcRect.GetWidth(), srcRect.GetHeight(), tex_w, tex_h,
                        g_framebuffer_manager->GetEFBScale(), y_scale, scaleByHalf, gamma,
                        filter[0], filter[1], filter[2], state.coverage_valid, packet->valid,
                        state.reason_bits, state.recognized_draws, state.viewport_changes,
                        state.depth_projection_changes,
                        state.scissor_left, state.scissor_top, state.scissor_right,
-                       state.scissor_bottom, state.clear_count, clear_coverage, packet->reason);
+                       state.scissor_bottom, state.clear_count, clear_coverage, duplicate_temporal_content,
+                       packet->content_id, packet->reason);
         entry->temporal_packet = std::move(packet);
         m_recent_temporal_entries.emplace_back(entry);
         ReportTemporalSnapshotMemory();
@@ -2636,7 +2684,7 @@ void TextureCacheBase::CopyRenderTargetToTexture(
     entry->SetHashes(hash, hash);
     m_textures_by_address.emplace(dstAddr, std::move(entry));
   }
-  if (is_xfb_copy && ModernGekkoTemporal::GetState().active)
+  if (is_xfb_copy && ModernGekkoTemporal::GetState().active && !duplicate_temporal_content)
   {
     const auto previous = ModernGekkoTemporal::GetState();
     const u64 content_id = previous.content_id + 1;
