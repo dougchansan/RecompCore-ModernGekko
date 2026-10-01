@@ -2419,12 +2419,16 @@ void TextureCacheBase::CopyRenderTargetToTexture(
                                       srcRect.bottom <= state.scissor_bottom;
         const bool clear_coverage = ModernGekkoTemporal::HasClearCoverageForRect(
             state, srcRect.left, srcRect.top, srcRect.right, srcRect.bottom);
-        packet->valid = captured && state.coverage_valid && scissor_coverage && clear_coverage;
+        packet->depth_convention_known = state.depth_convention_known;
+        packet->depth_inverted = state.depth_inverted;
+        packet->valid = captured && state.coverage_valid && state.depth_convention_known &&
+                        scissor_coverage && clear_coverage;
         packet->uniform_jitter_coverage = packet->valid;
         packet->history_reset = state.content_id <= 1;
         packet->reason = !mapping ? "unclassified XFB filter, scale, gamma or modification" :
                          !captured ? "matched EFB snapshot allocation or bounds failure" :
                          !state.coverage_valid ? "unclassified EFB contribution or mixed viewport" :
+                         !state.depth_convention_known ? "unproven captured EFB depth convention" :
                          !scissor_coverage ? "guest scissor clips the captured source" :
                          !clear_coverage ? "clear boundary lies within captured source" :
                          "";

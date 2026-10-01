@@ -18,6 +18,8 @@ void SetActive(bool active)
     return;
   s_state.active = active;
   s_state.coverage_valid = false;
+  s_state.depth_convention_known = false;
+  s_state.depth_inverted = false;
   s_state.reason_bits = static_cast<u32>(CoverageReason::NoRecognizedDraw);
   s_state.recognized_draws = s_state.viewport_changes = s_state.depth_projection_changes = s_state.clear_count = 0;
   s_state.jitter_x = s_state.jitter_y = 0.0f;
@@ -47,6 +49,8 @@ void SetFrameJitter(float x, float y, u64 content_id)
   if (!s_has_frame || s_state.content_id != content_id)
   {
     s_state.coverage_valid = false;  // Finite jitter alone does not establish coverage.
+    s_state.depth_convention_known = false;
+    s_state.depth_inverted = false;
     s_coverage_invalid = !finite;
     s_state.reason_bits = static_cast<u32>(CoverageReason::NoRecognizedDraw);
     s_state.recognized_draws = s_state.viewport_changes = s_state.depth_projection_changes = s_state.clear_count = 0;
@@ -103,6 +107,20 @@ void RecordClearRegion(int left, int top, int right, int bottom)
     return;
   }
   s_state.clear_regions[s_state.clear_count++] = {left, top, right, bottom};
+}
+void RecordDepthConvention(bool inverted)
+{
+  if (!s_state.active || !s_has_frame)
+    return;
+  if (!s_state.depth_convention_known)
+  {
+    s_state.depth_convention_known = true;
+    s_state.depth_inverted = inverted;
+  }
+  else if (s_state.depth_inverted != inverted)
+  {
+    MarkCoverageInvalid(CoverageReason::MixedDepthConvention);
+  }
 }
 void RecordDepthProjectionChange()
 {

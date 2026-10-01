@@ -132,6 +132,8 @@ struct ModernGekkoTemporalPacket
   u32 xfb_height = 0;
   bool valid = false;
   bool uniform_jitter_coverage = false;
+  bool depth_convention_known = false;
+  bool depth_inverted = false;
   bool history_reset = true;
   std::string reason = "no matched EFB snapshot";
 };

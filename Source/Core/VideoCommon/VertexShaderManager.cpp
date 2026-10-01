@@ -454,6 +454,16 @@ void VertexShaderManager::SetConstants(std::span<const std::string> textures,
       ModernGekkoTemporal::RecordDepthProjectionChange();
     if (viewport != m_temporal_viewport)
       ModernGekkoTemporal::RecordViewportChange();
+    // CaptureTemporalEFB preserves raw host depth. Reversed viewport support is
+    // a capability, not the depth convention: positive guest ranges are forward
+    // when supported, and the fallback backend stores their inverse.
+    if (!std::isfinite(xfmem.viewport.zRange) || !std::isfinite(xfmem.viewport.farZ) ||
+        xfmem.viewport.zRange == 0.0f)
+      ModernGekkoTemporal::MarkCoverageInvalid(
+          ModernGekkoTemporal::CoverageReason::MixedDepthConvention);
+    else
+      ModernGekkoTemporal::RecordDepthConvention(
+          (!g_backend_info.bSupportsReversedDepthRange) != (xfmem.viewport.zRange < 0.0f));
     ModernGekkoTemporal::MarkGuestDrawCoverage(viewport == m_temporal_viewport);
     float width = 2.0f * xfmem.viewport.wd;
     float height = -2.0f * xfmem.viewport.ht;

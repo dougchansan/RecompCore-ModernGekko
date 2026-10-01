@@ -19,12 +19,15 @@ enum class CoverageReason : u32
   Scissor = 1u << 8,
   InputScaleChanged = 1u << 9,
   InvalidJitter = 1u << 10,
-  DepthProjectionChanged = 1u << 11
+  DepthProjectionChanged = 1u << 11,
+  MixedDepthConvention = 1u << 12
 };
 struct State
 {
   bool active = false;
   bool coverage_valid = false;
+  bool depth_convention_known = false;
+  bool depth_inverted = false;
   u32 reason_bits = static_cast<u32>(CoverageReason::NoRecognizedDraw);
   u32 recognized_draws = 0;
   u32 viewport_changes = 0;
@@ -49,6 +52,8 @@ void SetInputPixelsPerNative(float x, float y);
 void MarkCoverageInvalid(CoverageReason reason = CoverageReason::Unclassified);
 void RecordViewportChange();
 void RecordDepthProjectionChange();
+// Raw captured EFB near/far convention; reject mixed conventions in one content frame.
+void RecordDepthConvention(bool inverted);
 void RecordClearRegion(int left, int top, int right, int bottom);
 void MarkGuestDrawCoverage(bool recognized_mapping);
 void MarkScissorCoverage(int left, int top, int right, int bottom);
