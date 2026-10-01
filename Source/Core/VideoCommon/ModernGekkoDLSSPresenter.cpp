@@ -79,8 +79,11 @@ void Barrier(const AbstractTexture* texture, VkImageLayout layout, VkAccessFlags
   barrier.image=vk_texture->GetImage();
   barrier.subresourceRange={Vulkan::VKTexture::GetImageAspectForFormat(texture->GetFormat()),
     0,texture->GetLevels(),0,texture->GetLayers()};
-  vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&barrier);
+  if (vk_texture->GetLayout() != VK_IMAGE_LAYOUT_UNDEFINED)
+  {
+    vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&barrier);
+  }
   vk_texture->TransitionToLayout(command,layout);
   barrier.srcAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
   barrier.dstAccessMask=access;
