@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "VideoCommon/TextureCacheBase.h"
+#include "VideoCommon/ModernGekkoTemporalState.h"
 
 #include <algorithm>
 #include <chrono>
@@ -1816,6 +1817,24 @@ static void GetDisplayRectForXFBEntry(TCacheEntry* entry, u32 width, u32 height,
   display_rect->bottom = static_cast<int>(height * entry->GetHeight() / entry->native_height);
 }
 
+std::shared_ptr<const ModernGekkoTemporalPacket>
+TextureCacheBase::GetTemporalPacket(const RcTcacheEntry& entry,
+                                    const MathUtil::Rectangle<int>& display_rect)
+{
+  if (!entry || !entry->temporal_packet)
+    return {};
+  auto packet = entry->temporal_packet;
+  if (entry->is_xfb_container || entry->reference_changed ||
+      entry->may_have_overlapping_textures || display_rect != entry->texture->GetRect())
+  {
+    auto rejected = std::make_shared<ModernGekkoTemporalPacket>();
+    rejected->content_id = packet->content_id;
+    rejected->reason = "stitched, overlapping, modified or partial presentation XFB";
+    return rejected;
+  }
+  return packet;
+}
+
 RcTcacheEntry TextureCacheBase::GetXFBTexture(u32 address, u32 width, u32 height, u32 stride,
                                               MathUtil::Rectangle<int>* display_rect)
 {
@@ -2191,6 +2210,9 @@ void TextureCacheBase::CopyRenderTargetToTexture(
   // Disadvantage of all methods: Calling this function requires the GPU to perform a pipeline flush
   // which stalls any further CPU processing.
   const bool is_xfb_copy = !is_depth_copy && !isIntensity && dstFormat == EFBCopyFormat::XFB;
+  if (!is_xfb_copy)
+    ModernGekkoTemporal::MarkCoverageInvalid();  // Unclassified render-to-texture contribution.
+
   bool copy_to_vram = g_backend_info.bSupportsCopyToVram && !g_ActiveConfig.bDisableCopyToVRAM;
   bool copy_to_ram =
       !(is_xfb_copy ? g_ActiveConfig.bSkipXFBCopyToRam : g_ActiveConfig.bSkipEFBCopyToRam) ||
@@ -2324,6 +2346,45 @@ void TextureCacheBase::CopyRenderTargetToTexture(
       }
       entry->may_have_overlapping_textures = false;
       entry->is_custom_tex = false;
+
+      if (is_xfb_copy && ModernGekkoTemporal::GetState().active)
+      {
+        auto packet = std::make_shared<ModernGekkoTemporalPacket>();
+        packet->efb_rect = srcRect;
+        packet->xfb_width = tex_w;
+        packet->xfb_height = tex_h;
+        const auto filter = GetVRAMCopyFilterCoefficients(filter_coefficients);
+        // Capture raw aligned EFB inputs. Internal EFB scale is allowed: both snapshots
+        // use the exact same scaled rectangle. Nontrivial copy processing is not guessed.
+        const bool mapping = !scaleByHalf && y_scale == 1.0f && gamma == 1.0f &&
+                             filter[0] == 0 && filter[1] == 64 && filter[2] == 0 &&
+                             srcRect.GetWidth() == static_cast<int>(width) &&
+                             srcRect.GetHeight() == static_cast<int>(height) &&
+                             !g_ActiveConfig.bGraphicMods;
+        const bool captured = mapping && g_framebuffer_manager->CaptureTemporalEFB(
+                                             srcRect, &packet->color, &packet->depth);
+        const auto state = ModernGekkoTemporal::GetState();
+        packet->content_id = state.content_id;
+        packet->jitter_x = state.jitter_x;
+        packet->jitter_y = state.jitter_y;
+        packet->valid = captured && state.coverage_valid;
+        packet->uniform_jitter_coverage = packet->valid;
+        packet->history_reset = state.content_id <= 1;
+        packet->reason = !mapping ? "unclassified XFB filter, scale, gamma or modification" :
+                         !captured ? "matched EFB snapshot allocation or bounds failure" :
+                         !state.coverage_valid ? "unclassified EFB contribution or mixed viewport" :
+                         "";
+        static u32 diagnostic_count = 0;
+        if (diagnostic_count++ < 8)
+          INFO_LOG_FMT(VIDEO,
+                       "Temporal copy: source={}x{} XFB={}x{} scale={} yscale={} half={} "
+                       "gamma={} filter={}/{}/{} coverage={} valid={} reason={}",
+                       srcRect.GetWidth(), srcRect.GetHeight(), tex_w, tex_h,
+                       g_framebuffer_manager->GetEFBScale(), y_scale, scaleByHalf, gamma,
+                       filter[0], filter[1], filter[2], state.coverage_valid, packet->valid,
+                       packet->reason);
+        entry->temporal_packet = std::move(packet);
+      }
 
       CopyEFBToCacheEntry(entry, is_depth_copy, srcRect, scaleByHalf, linear_filter, dstFormat,
                           isIntensity, gamma, clamp_top, clamp_bottom,
@@ -2511,6 +2572,25 @@ void TextureCacheBase::CopyRenderTargetToTexture(
     entry->SetHashes(hash, hash);
     m_textures_by_address.emplace(dstAddr, std::move(entry));
   }
+  if (is_xfb_copy && ModernGekkoTemporal::GetState().active)
+  {
+    const auto previous = ModernGekkoTemporal::GetState();
+    const u64 content_id = previous.content_id + 1;
+    const auto halton = [](u64 index, u64 base) {
+      float value = 0.0f;
+      float factor = 1.0f;
+      while (index != 0)
+      {
+        factor /= static_cast<float>(base);
+        value += factor * static_cast<float>(index % base);
+        index /= base;
+      }
+      return value - 0.5f;
+    };
+    ModernGekkoTemporal::SetFrameJitter(halton(content_id, 2), halton(content_id, 3),
+                                       content_id);
+  }
+
 }
 
 void TextureCacheBase::FlushEFBCopies()

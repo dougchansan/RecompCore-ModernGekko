@@ -118,8 +118,27 @@ struct fmt::formatter<EFBCopyParams>
   }
 };
 
+// Immutable per-copy snapshot; presentation retains this shared owner through GPU completion.
+struct ModernGekkoTemporalPacket
+{
+  std::unique_ptr<AbstractTexture> color;
+  std::unique_ptr<AbstractTexture> depth;
+  MathUtil::Rectangle<int> efb_rect;
+  u64 content_id = 0;
+  float jitter_x = 0.0f;
+  float jitter_y = 0.0f;
+  u32 xfb_width = 0;
+  u32 xfb_height = 0;
+  bool valid = false;
+  bool uniform_jitter_coverage = false;
+  bool history_reset = true;
+  std::string reason = "no matched EFB snapshot";
+};
+
 struct TCacheEntry
 {
+  std::shared_ptr<ModernGekkoTemporalPacket> temporal_packet;
+
   // common members
   std::unique_ptr<AbstractTexture> texture;
   std::unique_ptr<AbstractFramebuffer> framebuffer;
@@ -291,6 +310,9 @@ public:
                                  bool scaleByHalf, float y_scale, float gamma, bool clamp_top,
                                  bool clamp_bottom,
                                  const CopyFilterCoefficients::Values& filter_coefficients);
+
+  static std::shared_ptr<const ModernGekkoTemporalPacket>
+  GetTemporalPacket(const RcTcacheEntry& entry, const MathUtil::Rectangle<int>& display_rect);
 
   void ScaleTextureCacheEntryTo(RcTcacheEntry& entry, u32 new_width, u32 new_height);
 

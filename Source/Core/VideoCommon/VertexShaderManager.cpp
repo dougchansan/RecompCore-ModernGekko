@@ -31,6 +31,7 @@ void VertexShaderManager::Init()
 {
   // Initialize state tracking variables
   m_projection_graphics_mod_change = false;
+  m_temporal_viewport_seen = false;
 
   constants = {};
 
@@ -436,6 +437,16 @@ void VertexShaderManager::SetConstants(std::span<const std::string> textures,
   std::array<float, 2> jitter{};
   if (temporal.active)
   {
+    if (!m_temporal_viewport_seen || m_temporal_content_id != temporal.content_id)
+    {
+      m_temporal_content_id = temporal.content_id;
+      m_temporal_viewport = {xfmem.viewport.xOrig, xfmem.viewport.yOrig,
+                             xfmem.viewport.wd, xfmem.viewport.ht};
+      m_temporal_viewport_seen = true;
+    }
+    const std::array<float, 4> viewport = {xfmem.viewport.xOrig, xfmem.viewport.yOrig,
+                                         xfmem.viewport.wd, xfmem.viewport.ht};
+    ModernGekkoTemporal::MarkGuestDrawCoverage(viewport == m_temporal_viewport);
     float width = 2.0f * xfmem.viewport.wd;
     float height = -2.0f * xfmem.viewport.ht;
     if (g_ActiveConfig.UseVertexRounding())
@@ -449,6 +460,8 @@ void VertexShaderManager::SetConstants(std::span<const std::string> textures,
       jitter = ModernGekkoTemporal::ComputeClipJitter(temporal.jitter_x, temporal.jitter_y,
                                                     width, height);
   }
+  if (!temporal.active)
+    m_temporal_viewport_seen = false;
   // Existing .zw padding after viewport.xy keeps constant offsets and size unchanged.
   if (constants.pad2 != jitter)
   {

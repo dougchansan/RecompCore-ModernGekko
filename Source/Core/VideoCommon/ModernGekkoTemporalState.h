@@ -18,6 +18,7 @@ struct State
 void SetActive(bool active);
 void SetFrameJitter(float x, float y, u64 content_id);
 void MarkCoverageInvalid();
+void MarkGuestDrawCoverage(bool recognized_mapping);
 State GetState();
 // Signed viewport dimensions; shader mirroring precedes jitter. Before backend Y flip.
 std::array<float, 2> ComputeClipJitter(float x, float y, float width, float height);

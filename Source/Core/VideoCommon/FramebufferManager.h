@@ -104,6 +104,10 @@ public:
   // Reinterpret pixel format of EFB color texture.
   // Assumes no render pass is currently in progress.
   // Swaps EFB framebuffers, so re-bind afterwards.
+  bool CaptureTemporalEFB(const MathUtil::Rectangle<int>& native_rect,
+                          std::unique_ptr<AbstractTexture>* color,
+                          std::unique_ptr<AbstractTexture>* depth);
+
   bool ReinterpretPixelData(EFBReinterpretType convtype);
   PixelFormat GetPrevPixelFormat() const { return m_prev_efb_format; }
   void StorePixelFormat(PixelFormat new_format) { m_prev_efb_format = new_format; }

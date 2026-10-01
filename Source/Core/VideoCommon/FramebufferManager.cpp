@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "VideoCommon/FramebufferManager.h"
+#include "VideoCommon/ModernGekkoTemporalState.h"
 
 #include <fmt/format.h>
 #include <memory>
@@ -382,8 +383,43 @@ AbstractTexture* FramebufferManager::ResolveEFBDepthTexture(const MathUtil::Rect
   return m_efb_depth_resolve_texture.get();
 }
 
+bool FramebufferManager::CaptureTemporalEFB(const MathUtil::Rectangle<int>& native_rect,
+                                              std::unique_ptr<AbstractTexture>* color,
+                                              std::unique_ptr<AbstractTexture>* depth)
+{
+  FlushEFBPokes();
+  if (GetEFBLayers() != 1 || native_rect.left < 0 || native_rect.top < 0 ||
+      native_rect.right > static_cast<int>(EFB_WIDTH) ||
+      native_rect.bottom > static_cast<int>(EFB_HEIGHT) ||
+      native_rect.GetWidth() <= 0 || native_rect.GetHeight() <= 0)
+    return false;
+  const auto rect = g_gfx->ConvertFramebufferRectangle(ConvertEFBRectangle(native_rect),
+                                                       GetEFBFramebuffer());
+  auto* source_color = ResolveEFBColorTexture(rect);
+  auto* source_depth = ResolveEFBDepthTexture(rect, true);
+  if (!source_color || !source_depth)
+    return false;
+  const auto create = [&](AbstractTexture* source, const char* name) {
+    return g_gfx->CreateTexture(
+        TextureConfig(rect.GetWidth(), rect.GetHeight(), 1, 1, 1, source->GetFormat(),
+                      0, AbstractTextureType::Texture_2DArray), name);
+  };
+  *color = create(source_color, "Temporal EFB color snapshot");
+  *depth = create(source_depth, "Temporal EFB depth snapshot");
+  if (!*color || !*depth)
+    return false;
+  source_color->FinishedRendering();
+  source_depth->FinishedRendering();
+  (*color)->CopyRectangleFromTexture(source_color, rect, 0, 0, (*color)->GetRect(), 0, 0);
+  (*depth)->CopyRectangleFromTexture(source_depth, rect, 0, 0, (*depth)->GetRect(), 0, 0);
+  (*color)->FinishedRendering();
+  (*depth)->FinishedRendering();
+  return true;
+}
+
 bool FramebufferManager::ReinterpretPixelData(EFBReinterpretType convtype)
 {
+  ModernGekkoTemporal::MarkCoverageInvalid();
   if (!m_format_conversion_pipelines[static_cast<u32>(convtype)])
     return false;
 
@@ -861,6 +897,8 @@ void FramebufferManager::ClearEFB(const MathUtil::Rectangle<int>& rc, bool color
                                   bool alpha_enable, bool z_enable, u32 color, u32 z,
                                   PixelFormat pixel_format)
 {
+  if (rc.left != 0 || rc.top != 0 || rc.right != EFB_WIDTH || rc.bottom != EFB_HEIGHT)
+    ModernGekkoTemporal::MarkCoverageInvalid();
   FlushEFBPokes();
   FlagPeekCacheAsOutOfDate();
 
@@ -946,6 +984,7 @@ AbstractPipeline* FramebufferManager::GetClearPipeline(bool colorEnable, bool al
 
 void FramebufferManager::PokeEFBColor(u32 x, u32 y, u32 color)
 {
+  ModernGekkoTemporal::MarkCoverageInvalid();
   // Flush if we exceeded the number of vertices per batch.
   if ((m_color_poke_vertices.size() + 6) > MAX_POKE_VERTICES)
     FlushEFBPokes();
@@ -964,6 +1003,7 @@ void FramebufferManager::PokeEFBColor(u32 x, u32 y, u32 color)
 
 void FramebufferManager::PokeEFBDepth(u32 x, u32 y, float depth)
 {
+  ModernGekkoTemporal::MarkCoverageInvalid();
   // Flush if we exceeded the number of vertices per batch.
   if ((m_depth_poke_vertices.size() + 6) > MAX_POKE_VERTICES)
     FlushEFBPokes();

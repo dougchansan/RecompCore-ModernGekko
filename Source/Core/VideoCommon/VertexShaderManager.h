@@ -82,6 +82,10 @@ private:
 
   // track changes
   bool m_projection_graphics_mod_change = false;
+  u64 m_temporal_content_id = 0;
+  bool m_temporal_viewport_seen = false;
+  std::array<float, 4> m_temporal_viewport{};
+
 
   Common::Matrix44 LoadProjectionMatrix();
 };
