@@ -1138,7 +1138,8 @@ VertexManagerBase::PrepareTemporalDraw(const AbstractPipeline* native_pipeline, 
     gfx->RestoreTemporalRasterState(native_state);
     return TemporalDrawPlan{};
   };
-  // These paths need separate matched-draw proof before they can update the mirror.
+  // Late depth, alpha rejection and fragment-depth metadata ordering have matched
+  // generated-shader GPU raster proof. These remaining paths still need separate proof.
   const auto* ps = m_current_pipeline_config.ps_uid.GetUidData();
   if (custom_shader || g_ActiveConfig.bGraphicMods ||
       g_ActiveConfig.stereo_mode != StereoMode::Off ||
@@ -1147,8 +1148,7 @@ VertexManagerBase::PrepareTemporalDraw(const AbstractPipeline* native_pipeline, 
       !std::isfinite(xfmem.viewport.zRange) || !std::isfinite(xfmem.viewport.farZ) ||
       xfmem.viewport.wd == 0.0f || xfmem.viewport.ht == 0.0f || ps->uint_output ||
       m_current_pipeline_config.blending_state.logic_op_enable ||
-      ps->blend_enable || ps->logic_op_enable || ps->ztest == EmulatedZ::EarlyWithFBFetch ||
-      (!bpmem.zcontrol.early_ztest && m_current_pipeline_config.depth_state.test_enable))
+      ps->blend_enable || ps->logic_op_enable || ps->ztest == EmulatedZ::EarlyWithFBFetch)
     return reject("unsupported shader, sample count or depth mode");
   if (!g_framebuffer_manager->EnsureTemporalMirror())
     return reject("mirror framebuffer unavailable");
