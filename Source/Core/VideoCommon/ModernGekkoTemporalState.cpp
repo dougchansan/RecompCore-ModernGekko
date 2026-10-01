@@ -17,6 +17,7 @@ void SetActive(bool active)
   if (s_state.active == active)
     return;
   s_state.active = active;
+  s_state.mirror_raster = false;
   s_state.coverage_valid = false;
   s_state.depth_convention_known = false;
   s_state.depth_inverted = false;
@@ -26,6 +27,27 @@ void SetActive(bool active)
   s_has_frame = false;
   s_coverage_invalid = false;
   ++s_state.serial;
+}
+void SetMirrorRaster(bool mirror)
+{
+  s_state.mirror_raster = mirror && s_state.active;
+}
+bool IsMirrorRaster()
+{
+  return s_state.mirror_raster;
+}
+std::array<float, 2> GetFrameJitter()
+{
+  if (!s_state.active)
+    return {};
+  return {s_state.jitter_x, s_state.jitter_y};
+}
+std::array<float, 2> ComputeRasterJitter(float width, float height)
+{
+  if (!s_state.active || !s_state.mirror_raster)
+    return {};
+  const auto jitter = GetFrameJitter();
+  return ComputeClipJitter(jitter[0], jitter[1], width, height);
 }
 void SetInputPixelsPerNative(float x, float y)
 {

@@ -434,7 +434,6 @@ void VertexShaderManager::SetConstants(std::span<const std::string> textures,
   // Read each draw: frame jitter changes independently of guest registers.
   // Match BPFunctions' native viewport rounding before EFB scaling.
   const auto temporal = ModernGekkoTemporal::GetState();
-  std::array<float, 2> jitter{};
   if (temporal.active)
   {
     if (!m_temporal_viewport_seen || m_temporal_content_id != temporal.content_id)
@@ -474,18 +473,12 @@ void VertexShaderManager::SetConstants(std::span<const std::string> textures,
     }
     if (!std::isfinite(width) || !std::isfinite(height) || width == 0.0f || height == 0.0f)
       ModernGekkoTemporal::MarkCoverageInvalid(ModernGekkoTemporal::CoverageReason::InvalidViewport);
-    else
-      jitter = ModernGekkoTemporal::ComputeClipJitter(temporal.jitter_x, temporal.jitter_y,
-                                                    width, height);
+
   }
   if (!temporal.active)
     m_temporal_viewport_seen = false;
-  // Existing .zw padding after viewport.xy keeps constant offsets and size unchanged.
-  if (constants.pad2 != jitter)
-  {
-    constants.pad2 = jitter;
-    dirty = true;
-  }
+  // Guest rendering is always native. Mirror/meta replay toggles only this uniform later.
+  SetTemporalRasterJitter(false);
 
   if (xf_state_manager.DidTexMatrixInfoChange())
   {
@@ -509,6 +502,25 @@ void VertexShaderManager::SetConstants(std::span<const std::string> textures,
       constants.xfmem_pack1[i][3] = xfmem.alpha[i].hex;
     }
     constants.xfmem_numColorChans = xfmem.numChan.numColorChans;
+    dirty = true;
+  }
+}
+
+void VertexShaderManager::SetTemporalRasterJitter(bool mirror)
+{
+  ModernGekkoTemporal::SetMirrorRaster(mirror);
+  float width = 2.0f * xfmem.viewport.wd;
+  float height = -2.0f * xfmem.viewport.ht;
+  if (g_ActiveConfig.UseVertexRounding())
+  {
+    width = std::round(width);
+    height = std::round(height);
+  }
+  const auto jitter = ModernGekkoTemporal::ComputeRasterJitter(width, height);
+  // Existing .zw padding after viewport.xy preserves constant ABI offsets and size.
+  if (constants.pad2 != jitter)
+  {
+    constants.pad2 = jitter;
     dirty = true;
   }
 }

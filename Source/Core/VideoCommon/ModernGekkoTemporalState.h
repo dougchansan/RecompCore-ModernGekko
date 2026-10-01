@@ -25,6 +25,7 @@ enum class CoverageReason : u32
 struct State
 {
   bool active = false;
+  bool mirror_raster = false;
   bool coverage_valid = false;
   bool depth_convention_known = false;
   bool depth_inverted = false;
@@ -46,6 +47,11 @@ struct State
   u64 content_id = 0;
 };
 void SetActive(bool active);
+void SetMirrorRaster(bool mirror);
+bool IsMirrorRaster();
+std::array<float, 2> GetFrameJitter();
+// Uses the current raster lane without changing coverage, history or content serials.
+std::array<float, 2> ComputeRasterJitter(float width, float height);
 void SetFrameJitter(float x, float y, u64 content_id);
 // SDK optimal input pixels / native crop pixels. Halton amplitude is one input pixel.
 void SetInputPixelsPerNative(float x, float y);
