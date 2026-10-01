@@ -902,7 +902,7 @@ bool VulkanContext::CreateDevice(VkSurfaceKHR surface, bool enable_validation_la
 
   VkPhysicalDeviceFeatures device_features = m_device_info.features();
   device_info.pEnabledFeatures = &device_features;
-  // DLSS uses device-address allocations and unformatted storage-image writes.
+  // DLSS uses device addresses/unformatted writes; flow uses RG16F storage images.
   // Extension discovery alone does not enable these Vulkan features.
   VkPhysicalDeviceBufferDeviceAddressFeatures ngx_address = {
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES};
@@ -918,9 +918,10 @@ bool VulkanContext::CreateDevice(VkSurfaceKHR surface, bool enable_validation_la
     if (get_features)
       get_features(m_physical_device, &supported);
     if (!get_features || !ngx_address.bufferDeviceAddress ||
-        !supported.features.shaderStorageImageWriteWithoutFormat)
+        !supported.features.shaderStorageImageWriteWithoutFormat ||
+        !supported.features.shaderStorageImageExtendedFormats)
     {
-      WARN_LOG_FMT(VIDEO, "ModernGekko NGX: device address/storage-write features unavailable; using ordinary Vulkan");
+      WARN_LOG_FMT(VIDEO, "ModernGekko NGX: device address/storage-write/extended-format features unavailable; using ordinary Vulkan");
       m_ngx_extensions_ready = false;
       m_device_extensions = m_ordinary_device_extensions;
       extension_name_pointers.clear();
@@ -935,7 +936,8 @@ bool VulkanContext::CreateDevice(VkSurfaceKHR surface, bool enable_validation_la
       ngx_address.bufferDeviceAddressMultiDevice = VK_FALSE;
       device_info.pNext = &ngx_address;
       device_features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
-      INFO_LOG_FMT(VIDEO, "ModernGekko NGX: enabling bufferDeviceAddress and shaderStorageImageWriteWithoutFormat");
+      device_features.shaderStorageImageExtendedFormats = VK_TRUE;
+      INFO_LOG_FMT(VIDEO, "ModernGekko NGX: enabling bufferDeviceAddress, shaderStorageImageWriteWithoutFormat, shaderStorageImageExtendedFormats");
     }
   }
 
