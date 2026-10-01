@@ -1158,13 +1158,25 @@ VertexManagerBase::PrepareTemporalDraw(const AbstractPipeline* native_pipeline, 
   // geometry; texture provenance, rather than projection type, classifies the inputs.
   const bool known = !g_texture_cache->HasUnclassifiedTemporalInputs(UsedTextures());
   const auto native_blend = m_current_pipeline_config.blending_state;
-  if (!native_blend.color_update && m_current_pipeline_config.depth_state.update_enable && !known)
-    return reject("unclassified depth-only contribution");
+  const auto native_depth = m_current_pipeline_config.depth_state;
+  const bool depth_write = native_depth.test_enable && native_depth.update_enable;
+  const bool equal_depth = native_depth.test_enable && native_depth.func == CompareMode::Equal;
+  const bool depth_only = !native_blend.color_update && depth_write;
+  const bool metadata_needed = native_blend.color_update || native_blend.alpha_update || depth_write;
   const bool overwrite = known && native_blend.color_update && !native_blend.blend_enable &&
-                         !native_blend.logic_op_enable;
+                         !native_blend.logic_op_enable && (depth_write || equal_depth);
+  const bool alpha_overwrite = known && native_blend.alpha_update &&
+      (!native_blend.blend_enable || (!native_blend.subtract_alpha &&
+       native_blend.src_factor_alpha == SrcBlendFactor::One &&
+       native_blend.dst_factor_alpha == DstBlendFactor::Zero));
+  const bool alpha_dependency = native_blend.color_update && native_blend.blend_enable &&
+      (native_blend.src_factor == SrcBlendFactor::DstAlpha ||
+       native_blend.src_factor == SrcBlendFactor::InvDstAlpha ||
+       native_blend.dst_factor == DstBlendFactor::DstAlpha ||
+       native_blend.dst_factor == DstBlendFactor::InvDstAlpha);
   const auto mode = known ? TemporalPixelShaderMode::MetadataKnown :
                             TemporalPixelShaderMode::MetadataUnknown;
-  auto pipeline_for = [&](TemporalPixelShaderMode shader_mode, bool metadata) {
+  auto pipeline_for = [&](TemporalPixelShaderMode shader_mode, bool metadata, bool alpha_gate = false) {
     auto specialized = m_current_pipeline_config;
     auto uber = m_current_uber_pipeline_config;
     SetTemporalPixelShaderMode(&specialized.ps_uid, shader_mode);
@@ -1174,18 +1186,21 @@ VertexManagerBase::PrepareTemporalDraw(const AbstractPipeline* native_pipeline, 
       DepthState depth = specialized.depth_state;
       depth.update_enable = false;
       BlendingState blend{};
-      blend.color_update = true;
-      blend.alpha_update = true;
-      if (!overwrite)
-      {
-        // With exact 0/1 metadata, destination*source is binary MIN. Known blended
-        // draws preserve prior taint; unknown draws write zero without discarding depth.
-        blend.blend_enable = true;
-        blend.src_factor = SrcBlendFactor::Zero;
-        blend.dst_factor = DstBlendFactor::SrcClr;
-        blend.src_factor_alpha = SrcBlendFactor::Zero;
-        blend.dst_factor_alpha = DstBlendFactor::SrcAlpha;
-      }
+      blend.blend_enable = true;
+      blend.color_update = alpha_gate || native_blend.color_update || depth_write;
+      blend.alpha_update = !alpha_gate && native_blend.alpha_update;
+      // R tracks color/depth correspondence; A independently tracks alpha provenance.
+      // A depth-only replacement cannot certify retained RGB, even for known geometry.
+      blend.src_factor = !alpha_gate && !depth_only && overwrite ? SrcBlendFactor::One :
+                                                                  SrcBlendFactor::Zero;
+      blend.dst_factor = alpha_gate ? DstBlendFactor::DstAlpha :
+                         depth_only || overwrite ? DstBlendFactor::Zero :
+                                                   DstBlendFactor::SrcClr;
+      blend.src_factor_alpha = alpha_overwrite ? SrcBlendFactor::One : SrcBlendFactor::Zero;
+      blend.dst_factor_alpha = alpha_overwrite ? DstBlendFactor::Zero : DstBlendFactor::SrcAlpha;
+      // Exact 0/1 destination*source is binary MIN. RGB cannot repair A accidentally,
+      // and an unknown alpha-only write leaves RGB unchanged until a later alpha read.
+
       specialized.depth_state = depth;
       uber.depth_state = depth;
       specialized.blending_state = blend;
@@ -1198,11 +1213,14 @@ VertexManagerBase::PrepareTemporalDraw(const AbstractPipeline* native_pipeline, 
   plan.known = known;
   plan.overwrite = overwrite;
   plan.color_pipeline = pipeline_for(TemporalPixelShaderMode::MirrorColor, false);
-  if (native_blend.color_update)
+  if (metadata_needed)
     plan.metadata_pipeline = pipeline_for(mode, true);
+  if (alpha_dependency)
+    plan.alpha_gate_pipeline = pipeline_for(TemporalPixelShaderMode::MetadataKnown, true, true);
   plan.color_framebuffer = g_framebuffer_manager->GetTemporalMirrorFramebuffer();
   plan.metadata_framebuffer = g_framebuffer_manager->GetTemporalCoverageFramebuffer();
-  if (!plan.color_pipeline || (native_blend.color_update && !plan.metadata_pipeline))
+  if (!plan.color_pipeline || (metadata_needed && !plan.metadata_pipeline) ||
+      (alpha_dependency && !plan.alpha_gate_pipeline))
     return reject("paired shader pipeline unavailable");
   gfx->RestoreTemporalRasterState(native_state);
   return plan;
@@ -1218,6 +1236,14 @@ void VertexManagerBase::ReplayTemporalDraw(const TemporalDrawPlan& plan, u32 bas
   auto& vertex_shader_manager = Core::System::GetInstance().GetVertexShaderManager();
   vertex_shader_manager.SetTemporalRasterJitter(true);
   UploadUniforms();
+  if (plan.alpha_gate_pipeline)
+  {
+    // Propagate OLD destination-alpha taint to RGB before the ordinary metadata
+    // pass can repair alpha. This pass writes only RGB: R := R * prior A.
+    gfx->SetFramebuffer(plan.metadata_framebuffer);
+    gfx->SetPipeline(plan.alpha_gate_pipeline);
+    gfx->DrawIndexed(base_index, num_indices, base_vertex);
+  }
   if (plan.metadata_pipeline)
   {
     gfx->SetFramebuffer(plan.metadata_framebuffer);

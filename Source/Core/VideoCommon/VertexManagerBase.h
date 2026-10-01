@@ -234,6 +234,7 @@ private:
   {
     const AbstractPipeline* color_pipeline = nullptr;
     const AbstractPipeline* metadata_pipeline = nullptr;
+    const AbstractPipeline* alpha_gate_pipeline = nullptr;
     AbstractFramebuffer* color_framebuffer = nullptr;
     AbstractFramebuffer* metadata_framebuffer = nullptr;
     bool known = false;
