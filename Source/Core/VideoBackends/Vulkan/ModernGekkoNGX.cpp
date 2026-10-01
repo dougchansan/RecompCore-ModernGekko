@@ -241,8 +241,7 @@ bool Initialize(VulkanContext& context)
   s_device = context.GetDevice();
   INFO_LOG_FMT(VIDEO,
                "ModernGekko NGX: Vulkan SDK initialized on {} (result {:#x}). "
-               "Phase 1 only validates the SDK/driver handshake; DLSS "
-               "Super Resolution evaluation is not enabled yet.",
+               "Image evaluation requires the separate experimental opt-in.",
                context.GetDeviceInfo().deviceName, static_cast<unsigned>(result));
 
   NVSDK_NGX_Parameter* parameters = nullptr;
