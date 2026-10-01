@@ -67,16 +67,24 @@ void Barrier(const AbstractTexture* texture, VkImageLayout layout, VkAccessFlags
   auto* tracker=Vulkan::StateTracker::GetInstance();
   tracker->EndRenderPass();
   const auto command=Vulkan::g_command_buffer_mgr->GetCurrentCommandBuffer();
-  vk_texture->TransitionToLayout(command,layout);
+  // SDK writes are external to VKTexture's tracked compute state. Make them available
+  // before a tracked transition, whose source scope alone may omit those writes.
   VkImageMemoryBarrier barrier{};
   barrier.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-  barrier.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT;
-  barrier.dstAccessMask=access;
-  barrier.oldLayout=barrier.newLayout=layout;
+  barrier.srcAccessMask=vk_texture->GetLayout()==VK_IMAGE_LAYOUT_UNDEFINED ? 0 :
+    VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
+  barrier.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
+  barrier.oldLayout=barrier.newLayout=vk_texture->GetLayout();
   barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
   barrier.image=vk_texture->GetImage();
   barrier.subresourceRange={Vulkan::VKTexture::GetImageAspectForFormat(texture->GetFormat()),
     0,texture->GetLevels(),0,texture->GetLayers()};
+  vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&barrier);
+  vk_texture->TransitionToLayout(command,layout);
+  barrier.srcAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
+  barrier.dstAccessMask=access;
+  barrier.oldLayout=barrier.newLayout=layout;
   vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
     VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&barrier);
 }
@@ -99,7 +107,7 @@ struct ModernGekkoDLSSPresenter::State
   std::array<float,2> previous_jitter{},input_per_native{};
   MathUtil::Rectangle<int> source_rect{};
   u32 input_width=0,input_height=0,output_width=0,output_height=0,current=0;
-  u64 content_id=std::numeric_limits<u64>::max(),evaluations=0;
+  u64 content_id=std::numeric_limits<u64>::max(),evaluations=0,resource_generation=0;
   bool history=false,cut_history=false,output_valid=false,owns_feature=false,attempted=false;
   bool unavailable=false;
   u64 fallback_presents=0,rejected_packets=0,last_rejected_content=std::numeric_limits<u64>::max();
@@ -166,8 +174,12 @@ struct ModernGekkoDLSSPresenter::State
     if(!NGX::CreateFeature(Vulkan::g_command_buffer_mgr->GetCurrentCommandBuffer(),iw,ih,
       width,height,g_backend_info.bSupportsReversedDepthRange)) {Release();return false;}
     owns_feature=true;input_width=iw;input_height=ih;output_width=width;output_height=height;
+    ++resource_generation;
     Vulkan::StateTracker::GetInstance()->InvalidateCachedState();
     INFO_LOG_FMT(VIDEO,"ModernGekko DLSS: Quality input {}x{}, output {}x{}; experimental estimated motion",iw,ih,width,height);
+    const u64 owned_texel_bytes=u64(iw)*ih*24+u64(width)*height*8+16*16*4;
+    INFO_LOG_FMT(VIDEO,"ModernGekko DLSS: resource generation={}, presenter images=6, texel bytes={} (excludes flow, SDK and allocation padding)",
+      resource_generation,owned_texel_bytes);
     return true;
   }
   void Bind(u32 slot,const AbstractTexture* texture)
