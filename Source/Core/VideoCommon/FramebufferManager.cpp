@@ -425,6 +425,12 @@ bool FramebufferManager::CaptureTemporalEFB(const MathUtil::Rectangle<int>& nati
 
 namespace
 {
+bool TraceTemporalMirrorFrame()
+{
+  const char* trace = std::getenv("MODERNGEKKO_TEMPORAL_TRACE_FRAME");
+  const auto content = ModernGekkoTemporal::GetState().content_id;
+  return trace && std::string_view(trace) == "1" && content >= 90 && content <= 91;
+}
 bool TemporalMirrorRequested()
 {
   const char* evaluate = std::getenv("MODERNGEKKO_DLSS_EVALUATE");
@@ -561,6 +567,7 @@ void FramebufferManager::MirrorClearEFB(const MathUtil::Rectangle<int>& native_r
   rect.ClampUL(0, 0, GetEFBWidth(), GetEFBHeight());
   if (rect.GetWidth() <= 0 || rect.GetHeight() <= 0)
     return;
+  const bool invalid_before = m_temporal_mirror_invalid;
   auto* previous = g_gfx->GetCurrentFramebuffer();
   g_gfx->SetFramebuffer(m_temporal_mirror_framebuffer.get());
   g_gfx->ClearRegion(rect, color_enable, alpha_enable, z_enable, color, z);
@@ -604,6 +611,22 @@ void FramebufferManager::MirrorClearEFB(const MathUtil::Rectangle<int>& native_r
     if (native_rect.bottom > m_temporal_capture_rect.top &&
         native_rect.bottom < m_temporal_capture_rect.bottom)
       taint({rect.left,rect.bottom-border,rect.right,rect.bottom+border});
+  }
+  if (TraceTemporalMirrorFrame())
+  {
+    const float native_depth = static_cast<float>(z & 0xFFFFFF) / 16777216.0f;
+    const float host_depth = g_backend_info.bSupportsReversedDepthRange ? native_depth :
+                                                                             1.0f - native_depth;
+    INFO_LOG_FMT(VIDEO,
+                 "Temporal mirror trace: content={} clear rect={},{},{},{} RGB={} A={} Z={} "
+                 "normalized_depth={} host_depth={} metadata_RGB_write={} metadata_A_write={} "
+                 "RGB_known={} capture={},{},{},{} invalid_before={} invalid_after={}",
+                 ModernGekkoTemporal::GetState().content_id, native_rect.left, native_rect.top,
+                 native_rect.right, native_rect.bottom, color_enable, alpha_enable, z_enable,
+                 native_depth, host_depth, rgb_coverage_update, alpha_enable, rgb_known,
+                 m_temporal_capture_rect.left, m_temporal_capture_rect.top,
+                 m_temporal_capture_rect.right, m_temporal_capture_rect.bottom,
+                 invalid_before, m_temporal_mirror_invalid);
   }
   g_gfx->SetFramebuffer(previous);
 }
@@ -719,6 +742,9 @@ bool FramebufferManager::CertifyTemporalCoverage(const AbstractTexture* coverage
 
 bool FramebufferManager::ReinterpretPixelData(EFBReinterpretType convtype)
 {
+  if (TraceTemporalMirrorFrame())
+    INFO_LOG_FMT(VIDEO, "Temporal mirror trace: content={} invalidation=reinterpret",
+                 ModernGekkoTemporal::GetState().content_id);
   InvalidateTemporalMirrorCoverage();
   ModernGekkoTemporal::MarkCoverageInvalid(ModernGekkoTemporal::CoverageReason::Reinterpret);
   if (!m_format_conversion_pipelines[static_cast<u32>(convtype)])
@@ -1286,6 +1312,9 @@ AbstractPipeline* FramebufferManager::GetClearPipeline(bool colorEnable, bool al
 
 void FramebufferManager::PokeEFBColor(u32 x, u32 y, u32 color)
 {
+  if (TraceTemporalMirrorFrame())
+    INFO_LOG_FMT(VIDEO, "Temporal mirror trace: content={} invalidation=color poke",
+                 ModernGekkoTemporal::GetState().content_id);
   InvalidateTemporalMirrorCoverage();
   ModernGekkoTemporal::MarkCoverageInvalid(ModernGekkoTemporal::CoverageReason::Poke);
   // Flush if we exceeded the number of vertices per batch.
@@ -1306,6 +1335,9 @@ void FramebufferManager::PokeEFBColor(u32 x, u32 y, u32 color)
 
 void FramebufferManager::PokeEFBDepth(u32 x, u32 y, float depth)
 {
+  if (TraceTemporalMirrorFrame())
+    INFO_LOG_FMT(VIDEO, "Temporal mirror trace: content={} invalidation=depth poke",
+                 ModernGekkoTemporal::GetState().content_id);
   InvalidateTemporalMirrorCoverage();
   ModernGekkoTemporal::MarkCoverageInvalid(ModernGekkoTemporal::CoverageReason::Poke);
   // Flush if we exceeded the number of vertices per batch.
