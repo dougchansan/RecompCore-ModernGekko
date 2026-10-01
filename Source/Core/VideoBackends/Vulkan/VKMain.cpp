@@ -56,6 +56,7 @@ void VideoBackend::InitBackendInfo(const WindowSystemInfo& wsi)
         }
       }
 
+      VulkanContext::ForgetNGXInstance(temp_instance);
       vkDestroyInstance(temp_instance, nullptr);
     }
     else
@@ -123,6 +124,7 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
   if (!LoadVulkanInstanceFunctions(instance))
   {
     PanicAlertFmt("Failed to load Vulkan instance functions.");
+    VulkanContext::ForgetNGXInstance(instance);
     vkDestroyInstance(instance, nullptr);
     UnloadVulkanLibrary();
     return false;
@@ -134,6 +136,7 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
   if (gpu_list.empty())
   {
     PanicAlertFmt("No Vulkan physical devices available.");
+    VulkanContext::ForgetNGXInstance(instance);
     vkDestroyInstance(instance, nullptr);
     UnloadVulkanLibrary();
     return false;
@@ -151,6 +154,7 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
     if (surface == VK_NULL_HANDLE)
     {
       PanicAlertFmt("Failed to create Vulkan surface.");
+      VulkanContext::ForgetNGXInstance(instance);
       vkDestroyInstance(instance, nullptr);
       UnloadVulkanLibrary();
       return false;
@@ -246,6 +250,9 @@ void VideoBackend::Shutdown()
 {
   if (g_vulkan_context)
   {
+    // Drain CPU-side submissions before waiting for GPU idle and destroying resources.
+    if (g_command_buffer_mgr)
+      g_command_buffer_mgr->WaitForWorkerThreadIdle();
     vkDeviceWaitIdle(g_vulkan_context->GetDevice());
     ModernGekkoNGX::Shutdown(*g_vulkan_context);
   }
