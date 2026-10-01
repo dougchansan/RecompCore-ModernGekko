@@ -564,40 +564,46 @@ void FramebufferManager::MirrorClearEFB(const MathUtil::Rectangle<int>& native_r
   auto* previous = g_gfx->GetCurrentFramebuffer();
   g_gfx->SetFramebuffer(m_temporal_mirror_framebuffer.get());
   g_gfx->ClearRegion(rect, color_enable, alpha_enable, z_enable, color, z);
-  if (color_enable && z_enable && native_rect.left <= m_temporal_capture_rect.left &&
+  if (color_enable && alpha_enable && z_enable &&
+      native_rect.left <= m_temporal_capture_rect.left &&
       native_rect.top <= m_temporal_capture_rect.top &&
       native_rect.right >= m_temporal_capture_rect.right &&
       native_rect.bottom >= m_temporal_capture_rect.bottom)
     m_temporal_mirror_invalid = false;
-  if (z_enable && !color_enable)
+
+  // RGB tracks joint color/depth provenance; alpha tracks its own provenance.
+  // Held alpha is preserved on RGB-only clears. Replacing only one member of
+  // the color/depth pair cannot certify the retained member.
+  const bool rgb_coverage_update = color_enable || z_enable;
+  const bool rgb_known = color_enable && z_enable;
+  const u32 metadata = (rgb_known ? 0x00FFFFFF : 0) | (alpha_enable ? 0xFF000000 : 0);
+  if (rgb_coverage_update || alpha_enable)
   {
-    // Depth-only replacement no longer corresponds to retained mirror color.
     g_gfx->SetFramebuffer(m_temporal_coverage_framebuffer.get());
-    g_gfx->ClearRegion(rect, true, true, false, 0, 0);
-  }
-  if (color_enable)
-  {
-    g_gfx->SetFramebuffer(m_temporal_coverage_framebuffer.get());
-    g_gfx->ClearRegion(rect, true, true, false, 0xFFFF0000, 0);
-    // A constant full RGB clear is jitter-invariant inside its rectangle. A partial
-    // clear creates unjittered edges; retain uncertainty in one native pixel around them.
+    g_gfx->ClearRegion(rect, rgb_coverage_update, alpha_enable, false, metadata, 0);
+    // Unjittered partial-clear boundaries taint only the channels they affect.
+    // A boundary coinciding with the capture edge creates no interior seam.
     const int border = static_cast<int>(GetEFBScale());
     const auto taint = [&](MathUtil::Rectangle<int> edge) {
       edge.ClampUL(0, 0, GetEFBWidth(), GetEFBHeight());
       if (edge.GetWidth() > 0 && edge.GetHeight() > 0)
       {
         g_gfx->SetFramebuffer(m_temporal_coverage_framebuffer.get());
-        g_gfx->ClearRegion(edge, true, true, false, 0, 0);
+        g_gfx->ClearRegion(edge, rgb_coverage_update, alpha_enable, false, 0, 0);
       }
     };
     if (native_rect.left > m_temporal_capture_rect.left &&
-        native_rect.left < m_temporal_capture_rect.right) taint({rect.left-border,rect.top,rect.left+border,rect.bottom});
+        native_rect.left < m_temporal_capture_rect.right)
+      taint({rect.left-border,rect.top,rect.left+border,rect.bottom});
     if (native_rect.right > m_temporal_capture_rect.left &&
-        native_rect.right < m_temporal_capture_rect.right) taint({rect.right-border,rect.top,rect.right+border,rect.bottom});
+        native_rect.right < m_temporal_capture_rect.right)
+      taint({rect.right-border,rect.top,rect.right+border,rect.bottom});
     if (native_rect.top > m_temporal_capture_rect.top &&
-        native_rect.top < m_temporal_capture_rect.bottom) taint({rect.left,rect.top-border,rect.right,rect.top+border});
+        native_rect.top < m_temporal_capture_rect.bottom)
+      taint({rect.left,rect.top-border,rect.right,rect.top+border});
     if (native_rect.bottom > m_temporal_capture_rect.top &&
-        native_rect.bottom < m_temporal_capture_rect.bottom) taint({rect.left,rect.bottom-border,rect.right,rect.bottom+border});
+        native_rect.bottom < m_temporal_capture_rect.bottom)
+      taint({rect.left,rect.bottom-border,rect.right,rect.bottom+border});
   }
   g_gfx->SetFramebuffer(previous);
 }

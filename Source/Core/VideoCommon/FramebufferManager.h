@@ -114,6 +114,7 @@ public:
   AbstractFramebuffer* GetTemporalCoverageFramebuffer() const { return m_temporal_coverage_framebuffer.get(); }
   AbstractTexture* GetTemporalMirrorColorTexture() const { return m_temporal_mirror_color.get(); }
   AbstractTexture* GetTemporalMirrorDepthTexture() const { return m_temporal_mirror_depth.get(); }
+  // RGB: joint color/depth proof; A: alpha provenance, propagated when RGB reads it.
   AbstractTexture* GetTemporalCoverageTexture() const { return m_temporal_coverage.get(); }
   void InvalidateTemporalMirrorCoverage();
   void SetTemporalCaptureRect(const MathUtil::Rectangle<int>& native_rect);
