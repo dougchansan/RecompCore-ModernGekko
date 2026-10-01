@@ -1153,8 +1153,10 @@ VertexManagerBase::PrepareTemporalDraw(const AbstractPipeline* native_pipeline, 
   if (!g_framebuffer_manager->EnsureTemporalMirror())
     return reject("mirror framebuffer unavailable");
 
-  const bool known = !g_texture_cache->HasUnclassifiedTemporalInputs(UsedTextures()) &&
-                     xfmem.projection.type == ProjectionType::Perspective;
+  // Clip-space displacement uses clip.w for both projection types. Generated-shader
+  // raster fixtures prove the same signed pixel offset for perspective and orthographic
+  // geometry; texture provenance, rather than projection type, classifies the inputs.
+  const bool known = !g_texture_cache->HasUnclassifiedTemporalInputs(UsedTextures());
   const auto native_blend = m_current_pipeline_config.blending_state;
   if (!native_blend.color_update && m_current_pipeline_config.depth_state.update_enable && !known)
     return reject("unclassified depth-only contribution");
