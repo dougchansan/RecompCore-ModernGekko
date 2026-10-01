@@ -2367,12 +2367,17 @@ void TextureCacheBase::CopyRenderTargetToTexture(
         packet->content_id = state.content_id;
         packet->jitter_x = state.jitter_x;
         packet->jitter_y = state.jitter_y;
-        packet->valid = captured && state.coverage_valid;
+        const bool scissor_coverage = srcRect.left >= state.scissor_left &&
+                                      srcRect.top >= state.scissor_top &&
+                                      srcRect.right <= state.scissor_right &&
+                                      srcRect.bottom <= state.scissor_bottom;
+        packet->valid = captured && state.coverage_valid && scissor_coverage;
         packet->uniform_jitter_coverage = packet->valid;
         packet->history_reset = state.content_id <= 1;
         packet->reason = !mapping ? "unclassified XFB filter, scale, gamma or modification" :
                          !captured ? "matched EFB snapshot allocation or bounds failure" :
                          !state.coverage_valid ? "unclassified EFB contribution or mixed viewport" :
+                         !scissor_coverage ? "guest scissor clips the captured source" :
                          "";
         static u32 diagnostic_count = 0;
         if (diagnostic_count++ < 8)

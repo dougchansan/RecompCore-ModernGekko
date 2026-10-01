@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "VideoCommon/ModernGekkoTemporalState.h"
 #include <cmath>
+#include <algorithm>
 
 namespace ModernGekkoTemporal
 {
@@ -30,6 +31,9 @@ void SetFrameJitter(float x, float y, u64 content_id)
   {
     s_state.coverage_valid = false;  // Finite jitter alone does not establish coverage.
     s_coverage_invalid = !finite;
+    s_state.scissor_left = s_state.scissor_top = 0;
+    s_state.scissor_right = 640;
+    s_state.scissor_bottom = 528;
   }
   else if (s_state.jitter_x != x || s_state.jitter_y != y)
   {
@@ -61,6 +65,17 @@ void MarkGuestDrawCoverage(bool recognized_mapping)
     MarkCoverageInvalid();
   else if (!s_coverage_invalid)
     s_state.coverage_valid = true;
+}
+void MarkScissorCoverage(int left, int top, int right, int bottom)
+{
+  if (!s_state.active)
+    return;
+  s_state.scissor_left = std::max(s_state.scissor_left, left);
+  s_state.scissor_top = std::max(s_state.scissor_top, top);
+  s_state.scissor_right = std::min(s_state.scissor_right, right);
+  s_state.scissor_bottom = std::min(s_state.scissor_bottom, bottom);
+  if (left >= right || top >= bottom)
+    MarkCoverageInvalid();
 }
 State GetState()
 {
