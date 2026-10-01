@@ -18,6 +18,9 @@
 #include "VideoCommon/FrameDumper.h"
 #include "VideoCommon/FramebufferManager.h"
 #include "VideoCommon/OnScreenUI.h"
+#ifdef HAS_VULKAN
+#include "VideoCommon/ModernGekkoDLSSPresenter.h"
+#endif
 #include "VideoCommon/PostProcessing.h"
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/VideoConfig.h"
@@ -106,6 +109,9 @@ Presenter::Presenter()
 
 Presenter::~Presenter()
 {
+#ifdef HAS_VULKAN
+  m_dlss_presenter.reset();
+#endif
   // Disable ControllerInterface's aspect ratio adjustments so mapping dialog behaves normally.
   g_controller_interface.SetAspectRatioAdjustment(1);
 }
@@ -940,7 +946,16 @@ void Presenter::Present(PresentInfo* present_info)
     MathUtil::Rectangle<int> render_source_rc = AdjustForCustomCrop(m_xfb_rect);
     AdjustRectanglesToFitBounds(&render_target_rc, &render_source_rc, m_backbuffer_width,
                                 m_backbuffer_height);
-    RenderXFBToScreen(render_target_rc, m_xfb_entry->texture.get(), render_source_rc);
+#ifdef HAS_VULKAN
+    if (!m_dlss_presenter)
+      m_dlss_presenter = std::make_unique<ModernGekkoDLSSPresenter>();
+    const AbstractTexture* dlss_output = m_dlss_presenter->Render(
+        m_xfb_entry, render_source_rc, render_target_rc.GetWidth(), render_target_rc.GetHeight());
+    if (dlss_output)
+      RenderXFBToScreen(render_target_rc, dlss_output, dlss_output->GetConfig().GetRect());
+    else
+#endif
+      RenderXFBToScreen(render_target_rc, m_xfb_entry->texture.get(), render_source_rc);
   }
 
   if (m_onscreen_ui)

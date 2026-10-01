@@ -23,6 +23,9 @@ enum class DolphinKey;
 namespace VideoCommon
 {
 class OnScreenUI;
+#ifdef HAS_VULKAN
+class ModernGekkoDLSSPresenter;
+#endif
 class PostProcessing;
 
 // Presenter is a class that deals with putting the final XFB on the screen.
@@ -162,6 +165,9 @@ private:
   int m_last_window_request_width = 0;
   int m_last_window_request_height = 0;
 
+#ifdef HAS_VULKAN
+  std::unique_ptr<ModernGekkoDLSSPresenter> m_dlss_presenter;
+#endif
   std::unique_ptr<VideoCommon::PostProcessing> m_post_processor;
   std::unique_ptr<VideoCommon::OnScreenUI> m_onscreen_ui;
 
