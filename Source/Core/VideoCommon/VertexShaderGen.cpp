@@ -844,6 +844,10 @@ ShaderCode GenerateVertexShaderCode(APIType api_type, const ShaderHostConfig& ho
               "}}\n");
   }
 
+  // Apply once after viewport mirroring and rounding, including orthographic UI.
+  // Vulkan's final Y flip converts +down EFB jitter to +Y Vulkan NDC.
+  out.Write("o.pos.xy += " I_TEMPORAL_JITTER " * o.pos.w;\n");
+
   if (host_config.backend_geometry_shaders)
   {
     AssignVSOutputMembers(out, "vs", "o", uid_data->numTexGens, host_config);

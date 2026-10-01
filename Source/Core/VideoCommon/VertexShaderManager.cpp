@@ -17,6 +17,7 @@
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/FramebufferManager.h"
 #include "VideoCommon/FreeLookCamera.h"
+#include "VideoCommon/ModernGekkoTemporalState.h"
 #include "VideoCommon/GraphicsModSystem/Runtime/GraphicsModActionData.h"
 #include "VideoCommon/GraphicsModSystem/Runtime/GraphicsModManager.h"
 #include "VideoCommon/Statistics.h"
@@ -426,6 +427,32 @@ void VertexShaderManager::SetConstants(std::span<const std::string> textures,
     }
 
     memcpy(constants.projection.data(), corrected_matrix.data.data(), 4 * sizeof(float4));
+    dirty = true;
+  }
+
+  // Read each draw: frame jitter changes independently of guest registers.
+  // Match BPFunctions' native viewport rounding before EFB scaling.
+  const auto temporal = ModernGekkoTemporal::GetState();
+  std::array<float, 2> jitter{};
+  if (temporal.active)
+  {
+    float width = 2.0f * xfmem.viewport.wd;
+    float height = -2.0f * xfmem.viewport.ht;
+    if (g_ActiveConfig.UseVertexRounding())
+    {
+      width = std::round(width);
+      height = std::round(height);
+    }
+    if (!std::isfinite(width) || !std::isfinite(height) || width == 0.0f || height == 0.0f)
+      ModernGekkoTemporal::MarkCoverageInvalid();
+    else
+      jitter = ModernGekkoTemporal::ComputeClipJitter(temporal.jitter_x, temporal.jitter_y,
+                                                    width, height);
+  }
+  // Existing .zw padding after viewport.xy keeps constant offsets and size unchanged.
+  if (constants.pad2 != jitter)
+  {
+    constants.pad2 = jitter;
     dirty = true;
   }
 
