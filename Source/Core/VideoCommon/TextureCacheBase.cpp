@@ -1149,11 +1149,13 @@ bool TextureCacheBase::HasUnclassifiedTemporalInputs(BitSet32 used_textures) con
     {
     case TemporalTextureSource::NativeDepthCopy: ++depth; auxiliary_slots |= 1u << i; break;
     case TemporalTextureSource::NativeIntensityCopy: ++intensity; auxiliary_slots |= 1u << i; break;
-    case TemporalTextureSource::NativeColorCopy: ++color; ++unknown; break;
+    case TemporalTextureSource::NativeColorCopy: ++color; auxiliary_slots |= 1u << i; break;
     case TemporalTextureSource::Unknown: ++unknown; break;
     case TemporalTextureSource::NativeMemory: break;
     }
   }
+  // Copy format is not a role. Every native RTT kind must prove opacity-only
+  // use; direct scene RGB, indirect coordinates, and Z-texture dependencies reject.
   if (auxiliary_slots && !ModernGekkoTextureProvenance::CanUseAsOpacityData(bpmem, auxiliary_slots))
     ++unknown;
   static u32 diagnostics = 0;
