@@ -6,6 +6,10 @@
 
 #include <fmt/format.h>
 #include <memory>
+#include <cmath>
+#include <cstdlib>
+#include <string_view>
+#include <limits>
 
 #include "Common/ChunkFile.h"
 #include "Common/Logging/Log.h"
@@ -304,6 +308,7 @@ bool FramebufferManager::CreateEFBFramebuffer(int efb_scale)
 
 void FramebufferManager::DestroyEFBFramebuffer()
 {
+  DestroyTemporalMirror();
   m_efb_framebuffer.reset();
   m_efb_convert_framebuffer.reset();
   m_efb_color_texture.reset();
@@ -417,8 +422,298 @@ bool FramebufferManager::CaptureTemporalEFB(const MathUtil::Rectangle<int>& nati
   return true;
 }
 
+
+namespace
+{
+bool TemporalMirrorRequested()
+{
+  const char* evaluate = std::getenv("MODERNGEKKO_DLSS_EVALUATE");
+  const char* ngx = std::getenv("MODERNGEKKO_DLSS");
+  return evaluate && std::string_view(evaluate) == "1" && ngx &&
+         (std::string_view(ngx) == "1" || std::string_view(ngx) == "true" ||
+          std::string_view(ngx) == "TRUE" || std::string_view(ngx) == "on" ||
+          std::string_view(ngx) == "ON" || std::string_view(ngx) == "yes" ||
+          std::string_view(ngx) == "YES");
+}
+constexpr const char* COVERAGE_FIRST = R"(
+layout(local_size_x=8,local_size_y=8,local_size_z=1) in;
+UBO_BINDING(std140,1) uniform Params { uvec4 extent; };
+IMAGE_BINDING(rgba8,0) uniform readonly image2DArray source_image;
+IMAGE_BINDING(r32f,1) uniform writeonly image2DArray target_image;
+void main() {
+ ivec2 p=ivec2(gl_GlobalInvocationID.xy);
+ if(any(greaterThanEqual(p,ivec2(extent.zw)))) return;
+ float invalid=0.0;
+ for(int y=0;y<2;y++)for(int x=0;x<2;x++) {
+  ivec2 q=p*2+ivec2(x,y);
+  if(all(lessThan(q,ivec2(extent.xy))))
+   invalid+=imageLoad(source_image,ivec3(q,0)).r>=1.0?0.0:1.0;
+ }
+ imageStore(target_image,ivec3(p,0),vec4(invalid));
+}
+)";
+constexpr const char* COVERAGE_REDUCE = R"(
+layout(local_size_x=8,local_size_y=8,local_size_z=1) in;
+UBO_BINDING(std140,1) uniform Params { uvec4 extent; };
+IMAGE_BINDING(r32f,0) uniform readonly image2DArray source_image;
+IMAGE_BINDING(r32f,1) uniform writeonly image2DArray target_image;
+void main() {
+ ivec2 p=ivec2(gl_GlobalInvocationID.xy);
+ if(any(greaterThanEqual(p,ivec2(extent.zw)))) return;
+ float invalid=0.0;
+ for(int y=0;y<2;y++)for(int x=0;x<2;x++) {
+  ivec2 q=p*2+ivec2(x,y);
+  if(all(lessThan(q,ivec2(extent.xy))))
+   invalid+=imageLoad(source_image,ivec3(q,0)).r;
+ }
+ imageStore(target_image,ivec3(p,0),vec4(invalid));
+}
+)";
+}
+void FramebufferManager::DestroyTemporalMirror()
+{
+  if (m_temporal_mirror_framebuffer && g_gfx)
+    g_gfx->WaitForGPUIdle();
+  m_temporal_mirror_invalid = false;
+  m_temporal_capture_rect = {0, 0, static_cast<int>(EFB_WIDTH), static_cast<int>(EFB_HEIGHT)};
+  m_temporal_coverage_framebuffer.reset();
+  m_temporal_mirror_framebuffer.reset();
+  m_temporal_coverage.reset();
+  m_temporal_mirror_color.reset();
+  m_temporal_mirror_depth.reset();
+  m_temporal_coverage_reduction.clear();
+  m_temporal_coverage_readback.reset();
+  m_temporal_coverage_first.reset();
+  m_temporal_coverage_reduce.reset();
+}
+bool FramebufferManager::EnsureTemporalMirror()
+{
+  if (!TemporalMirrorRequested() || g_backend_info.api_type != APIType::Vulkan ||
+      !g_backend_info.bSupportsComputeShaders || GetEFBLayers() != 1 || GetEFBSamples() != 1 ||
+      GetEFBColorTexture()->GetFormat() != AbstractTextureFormat::RGBA8 ||
+      GetEFBDepthTexture()->GetFormat() != AbstractTextureFormat::D32F)
+    return false;
+  if (m_temporal_mirror_framebuffer)
+    return true;
+  const auto color_config = GetEFBColorTexture()->GetConfig();
+  const auto depth_config = GetEFBDepthTexture()->GetConfig();
+  m_temporal_mirror_color = g_gfx->CreateTexture(color_config, "Temporal mirror color");
+  m_temporal_mirror_depth = g_gfx->CreateTexture(depth_config, "Temporal mirror depth");
+  m_temporal_coverage = g_gfx->CreateTexture(
+      TextureConfig(GetEFBWidth(), GetEFBHeight(), 1, 1, 1, AbstractTextureFormat::RGBA8,
+                    AbstractTextureFlag_RenderTarget | AbstractTextureFlag_ComputeImage,
+                    AbstractTextureType::Texture_2DArray), "Temporal mirror coverage");
+  if (!m_temporal_mirror_color || !m_temporal_mirror_depth || !m_temporal_coverage)
+  {
+    DestroyTemporalMirror();
+    return false;
+  }
+  m_temporal_mirror_framebuffer = g_gfx->CreateFramebuffer(m_temporal_mirror_color.get(),
+                                                         m_temporal_mirror_depth.get());
+  m_temporal_coverage_framebuffer = g_gfx->CreateFramebuffer(m_temporal_coverage.get(),
+                                                           m_temporal_mirror_depth.get());
+  if (!m_temporal_mirror_framebuffer || !m_temporal_coverage_framebuffer)
+  {
+    DestroyTemporalMirror();
+    return false;
+  }
+  auto* previous = g_gfx->GetCurrentFramebuffer();
+  // Initial native contents are useful for blending, but cannot certify jitter coverage.
+  g_gfx->SetAndClearFramebuffer(m_temporal_coverage_framebuffer.get(), {},
+                                g_backend_info.bSupportsReversedDepthRange ? 1.0f : 0.0f);
+  m_efb_color_texture->FinishedRendering();
+  m_efb_depth_texture->FinishedRendering();
+  m_temporal_mirror_color->CopyRectangleFromTexture(m_efb_color_texture.get(),
+      m_efb_color_texture->GetRect(), 0, 0, m_temporal_mirror_color->GetRect(), 0, 0);
+  m_temporal_mirror_depth->CopyRectangleFromTexture(m_efb_depth_texture.get(),
+      m_efb_depth_texture->GetRect(), 0, 0, m_temporal_mirror_depth->GetRect(), 0, 0);
+  g_gfx->SetFramebuffer(previous);
+  INFO_LOG_FMT(VIDEO, "Temporal mirror allocated {}x{} RGBA8/D32F; coverage initially unknown",
+               GetEFBWidth(), GetEFBHeight());
+  return true;
+}
+void FramebufferManager::SetTemporalCaptureRect(const MathUtil::Rectangle<int>& native_rect)
+{
+  if (native_rect != m_temporal_capture_rect)
+  {
+    m_temporal_capture_rect = native_rect;
+    InvalidateTemporalMirrorCoverage();
+  }
+}
+void FramebufferManager::InvalidateTemporalMirrorCoverage()
+{
+  if (!m_temporal_coverage_framebuffer)
+    return;
+  m_temporal_mirror_invalid = true;
+  auto* previous = g_gfx->GetCurrentFramebuffer();
+  g_gfx->SetFramebuffer(m_temporal_coverage_framebuffer.get());
+  g_gfx->ClearRegion(m_temporal_coverage->GetRect(), true, true, false, 0, 0);
+  g_gfx->SetFramebuffer(previous);
+}
+void FramebufferManager::MirrorClearEFB(const MathUtil::Rectangle<int>& native_rect,
+                                      bool color_enable, bool alpha_enable, bool z_enable,
+                                      u32 color, u32 z)
+{
+  if (!m_temporal_mirror_framebuffer)
+    return;
+  auto rect = g_gfx->ConvertFramebufferRectangle(ConvertEFBRectangle(native_rect),
+                                                m_temporal_mirror_framebuffer.get());
+  rect.ClampUL(0, 0, GetEFBWidth(), GetEFBHeight());
+  if (rect.GetWidth() <= 0 || rect.GetHeight() <= 0)
+    return;
+  auto* previous = g_gfx->GetCurrentFramebuffer();
+  g_gfx->SetFramebuffer(m_temporal_mirror_framebuffer.get());
+  g_gfx->ClearRegion(rect, color_enable, alpha_enable, z_enable, color, z);
+  if (color_enable && z_enable && native_rect.left <= m_temporal_capture_rect.left &&
+      native_rect.top <= m_temporal_capture_rect.top &&
+      native_rect.right >= m_temporal_capture_rect.right &&
+      native_rect.bottom >= m_temporal_capture_rect.bottom)
+    m_temporal_mirror_invalid = false;
+  if (z_enable && !color_enable)
+  {
+    // Depth-only replacement no longer corresponds to retained mirror color.
+    g_gfx->SetFramebuffer(m_temporal_coverage_framebuffer.get());
+    g_gfx->ClearRegion(rect, true, true, false, 0, 0);
+  }
+  if (color_enable)
+  {
+    g_gfx->SetFramebuffer(m_temporal_coverage_framebuffer.get());
+    g_gfx->ClearRegion(rect, true, true, false, 0xFFFF0000, 0);
+    // A constant full RGB clear is jitter-invariant inside its rectangle. A partial
+    // clear creates unjittered edges; retain uncertainty in one native pixel around them.
+    const int border = static_cast<int>(GetEFBScale());
+    const auto taint = [&](MathUtil::Rectangle<int> edge) {
+      edge.ClampUL(0, 0, GetEFBWidth(), GetEFBHeight());
+      if (edge.GetWidth() > 0 && edge.GetHeight() > 0)
+      {
+        g_gfx->SetFramebuffer(m_temporal_coverage_framebuffer.get());
+        g_gfx->ClearRegion(edge, true, true, false, 0, 0);
+      }
+    };
+    if (native_rect.left > m_temporal_capture_rect.left &&
+        native_rect.left < m_temporal_capture_rect.right) taint({rect.left-border,rect.top,rect.left+border,rect.bottom});
+    if (native_rect.right > m_temporal_capture_rect.left &&
+        native_rect.right < m_temporal_capture_rect.right) taint({rect.right-border,rect.top,rect.right+border,rect.bottom});
+    if (native_rect.top > m_temporal_capture_rect.top &&
+        native_rect.top < m_temporal_capture_rect.bottom) taint({rect.left,rect.top-border,rect.right,rect.top+border});
+    if (native_rect.bottom > m_temporal_capture_rect.top &&
+        native_rect.bottom < m_temporal_capture_rect.bottom) taint({rect.left,rect.bottom-border,rect.right,rect.bottom+border});
+  }
+  g_gfx->SetFramebuffer(previous);
+}
+bool FramebufferManager::CaptureMirrorPacket(const MathUtil::Rectangle<int>& native_rect,
+                                             std::unique_ptr<AbstractTexture>* color,
+                                             std::unique_ptr<AbstractTexture>* depth,
+                                             std::unique_ptr<AbstractTexture>* coverage)
+{
+  if (!color || !depth || !coverage || !EnsureTemporalMirror() || m_temporal_mirror_invalid || native_rect.left < 0 ||
+      native_rect.top < 0 || native_rect.right > static_cast<int>(EFB_WIDTH) ||
+      native_rect.bottom > static_cast<int>(EFB_HEIGHT) || native_rect.GetWidth() <= 0 ||
+      native_rect.GetHeight() <= 0)
+    return false;
+  auto rect = g_gfx->ConvertFramebufferRectangle(ConvertEFBRectangle(native_rect),
+                                                m_temporal_mirror_framebuffer.get());
+  const auto snapshot = [&](AbstractTexture* source, const char* name, u32 flags) {
+    auto result = g_gfx->CreateTexture(TextureConfig(rect.GetWidth(), rect.GetHeight(), 1, 1, 1,
+        source->GetFormat(), flags, AbstractTextureType::Texture_2DArray), name);
+    if (result)
+    {
+      source->FinishedRendering();
+      result->CopyRectangleFromTexture(source, rect, 0, 0, result->GetRect(), 0, 0);
+      result->FinishedRendering();
+    }
+    return result;
+  };
+  *color = snapshot(m_temporal_mirror_color.get(), "Temporal mirror color snapshot", 0);
+  *depth = snapshot(m_temporal_mirror_depth.get(), "Temporal mirror depth snapshot", 0);
+  *coverage = snapshot(m_temporal_coverage.get(), "Temporal mirror coverage snapshot",
+                       AbstractTextureFlag_ComputeImage);
+  return *color && *depth && *coverage;
+}
+bool FramebufferManager::CertifyTemporalCoverage(const AbstractTexture* coverage,
+                                                u64* invalid_pixels)
+{
+  if (!invalid_pixels)
+    return false;
+  *invalid_pixels = std::numeric_limits<u64>::max();
+  if (!coverage || !coverage->GetWidth() || !coverage->GetHeight() || coverage->GetFormat() != AbstractTextureFormat::RGBA8 ||
+      coverage->GetLayers() != 1 || coverage->GetSamples() != 1 ||
+      g_backend_info.api_type != APIType::Vulkan || !g_backend_info.bSupportsComputeShaders ||
+      u64(coverage->GetWidth()) * coverage->GetHeight() > (1u << 24))
+    return false;
+  if (!m_temporal_coverage_first)
+    m_temporal_coverage_first = g_gfx->CreateShaderFromSource(ShaderStage::Compute,
+        COVERAGE_FIRST, nullptr, "Temporal coverage invalid count");
+  if (!m_temporal_coverage_reduce)
+    m_temporal_coverage_reduce = g_gfx->CreateShaderFromSource(ShaderStage::Compute,
+        COVERAGE_REDUCE, nullptr, "Temporal coverage count reduction");
+  if (!m_temporal_coverage_first || !m_temporal_coverage_reduce)
+    return false;
+  std::vector<std::array<u32, 2>> dimensions;
+  u32 width = coverage->GetWidth(), height = coverage->GetHeight();
+  do
+  {
+    width = (width + 1) / 2;
+    height = (height + 1) / 2;
+    dimensions.push_back({width, height});
+  } while (width > 1 || height > 1);
+  bool rebuild = m_temporal_coverage_reduction.size() != dimensions.size();
+  for (size_t i = 0; !rebuild && i < dimensions.size(); ++i)
+    rebuild = m_temporal_coverage_reduction[i]->GetWidth() != dimensions[i][0] ||
+              m_temporal_coverage_reduction[i]->GetHeight() != dimensions[i][1];
+  if (rebuild)
+  {
+    m_temporal_coverage_reduction.clear();
+    for (const auto& size : dimensions)
+    {
+      auto texture = g_gfx->CreateTexture(TextureConfig(size[0], size[1], 1, 1, 1,
+          AbstractTextureFormat::R32F, AbstractTextureFlag_ComputeImage,
+          AbstractTextureType::Texture_2DArray), "Temporal coverage sum");
+      if (!texture)
+      {
+        m_temporal_coverage_reduction.clear();
+        return false;
+      }
+      m_temporal_coverage_reduction.push_back(std::move(texture));
+    }
+  }
+  if (!m_temporal_coverage_readback)
+    m_temporal_coverage_readback = g_gfx->CreateStagingTexture(StagingTextureType::Readback,
+        TextureConfig(1, 1, 1, 1, 1, AbstractTextureFormat::R32F, 0,
+                      AbstractTextureType::Texture_2DArray));
+  if (!m_temporal_coverage_readback)
+    return false;
+  g_vertex_manager->Flush();
+  const AbstractTexture* source = coverage;
+  for (size_t i = 0; i < dimensions.size(); ++i)
+  {
+    auto* target = m_temporal_coverage_reduction[i].get();
+    const std::array<u32, 4> extent = {source->GetWidth(), source->GetHeight(),
+                                     target->GetWidth(), target->GetHeight()};
+    g_vertex_manager->UploadUtilityUniforms(extent.data(), sizeof(extent));
+    g_gfx->SetComputeImageTexture(0, const_cast<AbstractTexture*>(source), true, false);
+    g_gfx->SetComputeImageTexture(1, target, false, true);
+    g_gfx->DispatchComputeShader(i == 0 ? m_temporal_coverage_first.get() :
+        m_temporal_coverage_reduce.get(), 8, 8, 1, (target->GetWidth()+7)/8,
+        (target->GetHeight()+7)/8, 1);
+    source = target;
+  }
+  m_temporal_coverage_readback->CopyFromTexture(source);
+  m_temporal_coverage_readback->Flush();
+  if (!m_temporal_coverage_readback->Map())
+    return false;
+  const float result = *reinterpret_cast<const float*>(m_temporal_coverage_readback->GetMappedPointer());
+  m_temporal_coverage_readback->Unmap();
+  if (!std::isfinite(result) || result < 0 ||
+      result > float(u64(coverage->GetWidth()) * coverage->GetHeight()))
+    return false;
+  *invalid_pixels = static_cast<u64>(std::llround(result));
+  return *invalid_pixels == 0;
+}
+
 bool FramebufferManager::ReinterpretPixelData(EFBReinterpretType convtype)
 {
+  InvalidateTemporalMirrorCoverage();
   ModernGekkoTemporal::MarkCoverageInvalid(ModernGekkoTemporal::CoverageReason::Reinterpret);
   if (!m_format_conversion_pipelines[static_cast<u32>(convtype)])
     return false;
@@ -920,6 +1215,7 @@ void FramebufferManager::ClearEFB(const MathUtil::Rectangle<int>& rc, bool color
   }
 
   g_gfx->ClearRegion(target_rc, color_enable, alpha_enable, z_enable, color, z);
+  MirrorClearEFB(rc, color_enable, alpha_enable, z_enable, color, z);
 }
 
 bool FramebufferManager::CompileClearPipelines()
@@ -984,6 +1280,7 @@ AbstractPipeline* FramebufferManager::GetClearPipeline(bool colorEnable, bool al
 
 void FramebufferManager::PokeEFBColor(u32 x, u32 y, u32 color)
 {
+  InvalidateTemporalMirrorCoverage();
   ModernGekkoTemporal::MarkCoverageInvalid(ModernGekkoTemporal::CoverageReason::Poke);
   // Flush if we exceeded the number of vertices per batch.
   if ((m_color_poke_vertices.size() + 6) > MAX_POKE_VERTICES)
@@ -1003,6 +1300,7 @@ void FramebufferManager::PokeEFBColor(u32 x, u32 y, u32 color)
 
 void FramebufferManager::PokeEFBDepth(u32 x, u32 y, float depth)
 {
+  InvalidateTemporalMirrorCoverage();
   ModernGekkoTemporal::MarkCoverageInvalid(ModernGekkoTemporal::CoverageReason::Poke);
   // Flush if we exceeded the number of vertices per batch.
   if ((m_depth_poke_vertices.size() + 6) > MAX_POKE_VERTICES)

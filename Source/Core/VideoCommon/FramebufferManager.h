@@ -108,6 +108,22 @@ public:
                           std::unique_ptr<AbstractTexture>* color,
                           std::unique_ptr<AbstractTexture>* depth);
 
+  // Vulkan experiment: native EFB stays unjittered; the mirror is independently rasterized.
+  bool EnsureTemporalMirror();
+  AbstractFramebuffer* GetTemporalMirrorFramebuffer() const { return m_temporal_mirror_framebuffer.get(); }
+  AbstractFramebuffer* GetTemporalCoverageFramebuffer() const { return m_temporal_coverage_framebuffer.get(); }
+  AbstractTexture* GetTemporalMirrorColorTexture() const { return m_temporal_mirror_color.get(); }
+  AbstractTexture* GetTemporalMirrorDepthTexture() const { return m_temporal_mirror_depth.get(); }
+  AbstractTexture* GetTemporalCoverageTexture() const { return m_temporal_coverage.get(); }
+  void InvalidateTemporalMirrorCoverage();
+  void SetTemporalCaptureRect(const MathUtil::Rectangle<int>& native_rect);
+  bool CaptureMirrorPacket(const MathUtil::Rectangle<int>& native_rect,
+                           std::unique_ptr<AbstractTexture>* color,
+                           std::unique_ptr<AbstractTexture>* depth,
+                           std::unique_ptr<AbstractTexture>* coverage);
+  // Exact GPU sum of pixels whose R coverage channel is not 1; blocking scalar readback.
+  bool CertifyTemporalCoverage(const AbstractTexture* coverage, u64* invalid_pixels);
+
   bool ReinterpretPixelData(EFBReinterpretType convtype);
   PixelFormat GetPrevPixelFormat() const { return m_prev_efb_format; }
   void StorePixelFormat(PixelFormat new_format) { m_prev_efb_format = new_format; }
@@ -197,6 +213,19 @@ protected:
 
   void DoLoadState(PointerWrap& p);
   void DoSaveState(PointerWrap& p);
+
+  MathUtil::Rectangle<int> m_temporal_capture_rect{0, 0, 640, 528};
+  bool m_temporal_mirror_invalid = false;
+  void DestroyTemporalMirror();
+  void MirrorClearEFB(const MathUtil::Rectangle<int>& native_rect, bool color_enable,
+                      bool alpha_enable, bool z_enable, u32 color, u32 z);
+  std::unique_ptr<AbstractTexture> m_temporal_mirror_color, m_temporal_mirror_depth;
+  std::unique_ptr<AbstractTexture> m_temporal_coverage;
+  std::unique_ptr<AbstractFramebuffer> m_temporal_mirror_framebuffer;
+  std::unique_ptr<AbstractFramebuffer> m_temporal_coverage_framebuffer;
+  std::unique_ptr<AbstractShader> m_temporal_coverage_first, m_temporal_coverage_reduce;
+  std::vector<std::unique_ptr<AbstractTexture>> m_temporal_coverage_reduction;
+  std::unique_ptr<AbstractStagingTexture> m_temporal_coverage_readback;
 
   float m_efb_scale = 1.0f;
   PixelFormat m_prev_efb_format;
