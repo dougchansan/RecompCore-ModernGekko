@@ -96,7 +96,7 @@ struct ModernGekkoDLSSPresenter::State
   std::unique_ptr<AbstractTexture> output,cut_texture;
   std::unique_ptr<AbstractStagingTexture> cut_readback;
   std::array<u8,16*16*4> previous_cut{};
-  std::array<float,2> previous_jitter{};
+  std::array<float,2> previous_jitter{},input_per_native{};
   MathUtil::Rectangle<int> source_rect{};
   u32 input_width=0,input_height=0,output_width=0,output_height=0,current=0;
   u64 content_id=std::numeric_limits<u64>::max(),evaluations=0;
@@ -191,16 +191,27 @@ const AbstractTexture* ModernGekkoDLSSPresenter::Render(const RcTcacheEntry& ent
   }
   ModernGekkoTemporal::SetActive(true);
   const auto packet=TextureCacheBase::GetTemporalPacket(entry,source_rect);
-  if(!packet || !packet->valid || !packet->color || !packet->depth) {
+  if(!packet || !packet->color || !packet->depth) {
     s.ResetHistory();return nullptr;
   }
   if(packet->color->GetWidth()!=packet->depth->GetWidth() ||
      packet->color->GetHeight()!=packet->depth->GetHeight() ||
      !packet->color->GetWidth() || !packet->color->GetHeight() ||
+     packet->efb_rect.GetWidth()<=0 || packet->efb_rect.GetHeight()<=0 ||
      !std::isfinite(packet->jitter_x) || !std::isfinite(packet->jitter_y)) {
     s.ResetHistory();return nullptr;
   }
   if(!s.Configure(width,height)) {s.ResetHistory();return nullptr;}
+  const std::array<float,2> input_per_native={
+    float(s.input_width)/packet->efb_rect.GetWidth(),
+    float(s.input_height)/packet->efb_rect.GetHeight()};
+  ModernGekkoTemporal::SetInputPixelsPerNative(input_per_native[0],input_per_native[1]);
+  if(s.input_per_native!=input_per_native) {
+    s.input_per_native=input_per_native;s.ResetHistory();
+    // The captured packet predates this raster jitter scale; await a newly rendered packet.
+    return nullptr;
+  }
+  if(!packet->valid) {s.ResetHistory();return nullptr;}
   const bool same_crop=s.source_rect==source_rect;
   if(packet->content_id==s.content_id && same_crop && s.attempted)
     return s.output_valid ? s.output.get() : nullptr;
@@ -214,8 +225,8 @@ const AbstractTexture* ModernGekkoDLSSPresenter::Render(const RcTcacheEntry& ent
   g_gfx->SetComputeImageTexture(0,color,false,true);g_gfx->SetComputeImageTexture(1,depth,false,true);
   g_gfx->DispatchComputeShader(s.resample.get(),8,8,1,(s.input_width+7)/8,(s.input_height+7)/8,1);
   const bool cut=s.IsCut(color);
-  const std::array<float,2> jitter={packet->jitter_x*s.input_width/packet->color->GetWidth(),
-    packet->jitter_y*s.input_height/packet->color->GetHeight()};
+  const std::array<float,2> jitter={packet->jitter_x*input_per_native[0],
+    packet->jitter_y*input_per_native[1]};
   bool reset=!s.history || cut || packet->history_reset;
   ModernGekkoOpticalFlow::Inputs inputs;
   inputs.current_color=color;inputs.previous_color=s.color[1-s.current].get();
