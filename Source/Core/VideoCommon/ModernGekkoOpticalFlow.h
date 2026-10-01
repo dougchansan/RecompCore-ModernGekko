@@ -29,6 +29,9 @@ public:
     u32 width = 0, height = 0;
     std::array<float, 2> current_jitter{}, previous_jitter{};
     bool history_valid = false;
+    // Explicit caller guarantee: EVERY input pixel received the reported projection jitter.
+    // Do not set for mixed world/UI images. Paired masks take precedence when supplied.
+    bool uniform_jitter_coverage = false;
     // Raw normalized-depth disagreement is conservative rejection, not 3D reprojection.
     float depth_rejection_threshold = 0.015f;
   };

@@ -26,7 +26,7 @@ UBO_BINDING(std140, 1) uniform Params {
   vec4 sizes; // destination xy, parent/source zw
   vec4 control; // has_parent, history, paired_depth, paired_jitter_mask
   vec4 jitter; // current xy, previous zw
-  vec4 limits; // depth threshold
+  vec4 limits; // depth threshold, proven uniform jitter coverage
 };
 SAMPLER_BINDING(0) uniform sampler2DArray src0;
 SAMPLER_BINDING(1) uniform sampler2DArray src1;
@@ -58,10 +58,13 @@ void main() {
   ivec2 ip=ivec2(gl_GlobalInvocationID.xy);
   if(any(greaterThanEqual(ip,ivec2(sizes.xy)))) return;
   vec2 p=(vec2(ip)+0.5)*sizes.zw/sizes.xy-0.5;
-  vec2 stepSize=all(equal(sizes.xy,sizes.zw)) ? vec2(0.0) : sizes.zw/sizes.xy*0.25;
-  vec3 c=vec3(0.0);
-  for(int y=0;y<2;++y) for(int x=0;x<2;++x)
-    c+=sampleColor(src0,p+(vec2(x,y)*2.0-1.0)*stepSize,sizes.zw)*0.25;
+  vec3 c=sampleColor(src0,p,sizes.zw);
+  if(any(notEqual(sizes.xy,sizes.zw))) {
+    const float weights[5]=float[5](1.0,4.0,6.0,4.0,1.0);
+    c=vec3(0.0);
+    for(int y=-2;y<=2;++y) for(int x=-2;x<=2;++x)
+      c+=sampleColor(src0,p+vec2(x,y),sizes.zw)*weights[x+2]*weights[y+2]/256.0;
+  }
   imageStore(dst0,ivec3(ip,0),vec4(c,1.0));
 }
 )";
@@ -72,17 +75,25 @@ void main() {
   vec2 p=vec2(ip), base=vec2(0.0);
   if(control.x>0.5) {
     vec2 parent=(p+0.5)*sizes.zw/sizes.xy-0.5;
-    base=sampleColor(src2,parent,sizes.zw).xy*sizes.xy/sizes.zw;
+    vec4 prior=textureLod(src2,vec3((parent+0.5)/sizes.zw,0.0),0.0);
+    if(prior.w>0.1) base=prior.xy*sizes.xy/sizes.zw;
   }
   float best=1e10;
   vec2 flow=base;
-  int radius=control.x>0.5 ? 1 : 2;
-  for(int y=-2;y<=2;++y) for(int x=-2;x<=2;++x) {
-    if(abs(x)>radius || abs(y)>radius) continue;
-    vec2 candidate=base+vec2(x,y);
-    if(!inside(p+candidate)) continue;
-    float e=patchError(p,candidate);
-    if(e<best) { best=e; flow=candidate; }
+  // At full resolution also test a local zero-centred basin: aliased coarse correspondence
+  // must not trap small actual motion in a distant local minimum.
+  for(int seed=0;seed<2;++seed) {
+    if(seed==1 && control.y<0.5) continue;
+    vec2 origin=seed==0 ? base : vec2(0.0);
+    int radius=seed==0 ? 2 : 4;
+    for(int y=-4;y<=4;++y) for(int x=-4;x<=4;++x) {
+      if(abs(x)>radius || abs(y)>radius) continue;
+      vec2 candidate=origin+vec2(x,y);
+      if(!inside(p+candidate)) continue;
+      float e=patchError(p,candidate);
+      if(e+0.000001*dot(candidate,candidate)<best+0.000001*dot(flow,flow))
+        { best=e; flow=candidate; }
+    }
   }
   // Quadratic minimum at each axis gives subpixel correspondence from bilinear samples.
   vec2 sub=vec2(0.0);
@@ -94,6 +105,27 @@ void main() {
     if(curvature>1e-7) sub[axis]=clamp(0.5*(a-b)/curvature,-0.5,0.5);
   }
   flow+=sub;
+  // Joint least-squares refinement accounts for coupled x/y gradients; the axis parabola
+  // alone is inaccurate on oblique features. Reject singular (aperture/flat) systems.
+  for(int iteration=0;iteration<3;++iteration) {
+    float hxx=0.0,hxy=0.0,hyy=0.0,bx=0.0,by=0.0;
+    for(int y=-1;y<=1;++y) for(int x=-1;x<=1;++x) {
+      vec2 at=p+vec2(x,y)+flow;
+      vec3 d=sampleColor(src1,at,sizes.xy)-sampleColor(src0,p+vec2(x,y),sizes.xy);
+      vec3 gx=(sampleColor(src1,at+vec2(0.25,0.0),sizes.xy)-
+               sampleColor(src1,at-vec2(0.25,0.0),sizes.xy))*2.0;
+      vec3 gy=(sampleColor(src1,at+vec2(0.0,0.25),sizes.xy)-
+               sampleColor(src1,at-vec2(0.0,0.25),sizes.xy))*2.0;
+      hxx+=dot(gx,gx);hxy+=dot(gx,gy);hyy+=dot(gy,gy);
+      bx+=dot(gx,d);by+=dot(gy,d);
+    }
+    float determinant=hxx*hyy-hxy*hxy;
+    if(determinant<1e-8) break;
+    vec2 delta=vec2(hyy*bx-hxy*by,hxx*by-hxy*bx)/determinant;
+    vec2 candidate=flow-clamp(delta,vec2(-0.5),vec2(0.5));
+    if(!inside(p+candidate) || patchError(p,candidate)>patchError(p,flow)) break;
+    flow=candidate;
+  }
   float error=patchError(p,flow), alternative=1e10;
   // Separated alternatives reject repeated texture; adjacent samples are the same minimum.
   for(int y=-2;y<=2;++y) for(int x=-2;x<=2;++x) {
@@ -101,6 +133,12 @@ void main() {
     alternative=min(alternative,patchError(p,flow+vec2(x,y)));
   }
   float unique=clamp((alternative-error)/max(alternative,0.0001),0.0,1.0);
+  float mean=0.0, square=0.0;
+  for(int y=-1;y<=1;++y) for(int x=-1;x<=1;++x) {
+    float l=dot(sampleColor(src0,p+vec2(x,y),sizes.xy),vec3(0.2126,0.7152,0.0722));
+    mean+=l/9.0; square+=l*l/9.0;
+  }
+  unique*=smoothstep(0.00005,0.0005,max(0.0,square-mean*mean));
   imageStore(dst0,ivec3(ip,0),vec4(flow,error,unique));
 }
 )";
@@ -133,6 +171,8 @@ void main() {
     float mask=min(sampleColor(mask0,p,sizes.xy).r,sampleColor(mask1,q,sizes.xy).r);
     // Only classified world pixels lose raster jitter; guest UI keeps its measured displacement.
     flow+=(jitter.xy-jitter.zw)*step(0.9,mask);
+  } else if(limits.y>0.5) {
+    flow+=jitter.xy-jitter.zw;
   } else if(any(greaterThan(abs(jitter.xy-jitter.zw),vec2(0.00001)))) {
     // Jittered inputs without classification cannot supply unjittered UI/world vectors.
     confidence=0.0;
@@ -215,6 +255,15 @@ void ModernGekkoOpticalFlow::BindSample(u32 slot,const AbstractTexture* texture)
 void ModernGekkoOpticalFlow::Dispatch(const AbstractShader* shader,u32 width,u32 height)
 {
   g_gfx->DispatchComputeShader(shader,8,8,1,(width+7)/8,(height+7)/8,1);
+  // Order sampled compute reads before resource reuse as writes in this or the next Run.
+  // VKTexture's generic sampled-layout transition currently tracks fragment reads only.
+  VkMemoryBarrier barrier{};
+  barrier.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+  barrier.srcAccessMask=VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+  barrier.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+  vkCmdPipelineBarrier(Vulkan::g_command_buffer_mgr->GetCurrentCommandBuffer(),
+    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,
+    1,&barrier,0,nullptr,0,nullptr);
 }
 
 ModernGekkoOpticalFlow::Result ModernGekkoOpticalFlow::Run(const Inputs& in)
@@ -251,6 +300,7 @@ ModernGekkoOpticalFlow::Result ModernGekkoOpticalFlow::Run(const Inputs& in)
       u.sizes={float(config.width),float(config.height),float(parent->GetConfig().width),
                float(parent->GetConfig().height)};
       u.control[0]=level+1<LEVELS ? 1.0f : 0.0f;
+      u.control[1]=level==0 ? 1.0f : 0.0f;
       g_vertex_manager->UploadUtilityUniforms(&u,sizeof(u));
       BindSample(0,m_color[direction][level].get());
       BindSample(1,m_color[1-direction][level].get());
@@ -266,6 +316,7 @@ ModernGekkoOpticalFlow::Result ModernGekkoOpticalFlow::Run(const Inputs& in)
   u.control={0.0f,history ? 1.0f : 0.0f,depth ? 1.0f : 0.0f,masks ? 1.0f : 0.0f};
   u.jitter={in.current_jitter[0],in.current_jitter[1],in.previous_jitter[0],in.previous_jitter[1]};
   u.limits[0]=in.depth_rejection_threshold;
+  u.limits[1]=in.uniform_jitter_coverage ? 1.0f : 0.0f;
   g_vertex_manager->UploadUtilityUniforms(&u,sizeof(u));
   BindSample(0,m_color[0][0].get()); BindSample(1,m_color[1][0].get());
   BindSample(2,m_flow[0][0].get()); BindSample(3,m_flow[1][0].get());
