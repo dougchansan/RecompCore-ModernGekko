@@ -750,13 +750,19 @@ ShaderCode GeneratePixelShaderCode(APIType api_type, const ShaderHostConfig& hos
                                    CustomPixelContents custom_contents)
 {
   pixel_shader_uid_data variant = *uid_data;
-  const bool metadata = variant.temporal_mode >=
-                        static_cast<u32>(TemporalPixelShaderMode::MetadataKnown);
+  const auto mode = static_cast<TemporalPixelShaderMode>(variant.temporal_mode);
+  const bool overlay = mode == TemporalPixelShaderMode::Overlay;
+  const bool metadata = variant.temporal_mode >= 2 && !overlay;
+  const bool dynamic_mask = mode == TemporalPixelShaderMode::MetadataKnownOpaqueAlpha ||
+                            mode == TemporalPixelShaderMode::MetadataUnknownOpaqueAlpha;
+  const bool depth_metadata = mode == TemporalPixelShaderMode::DepthKnownEarly ||
+                              mode == TemporalPixelShaderMode::DepthUnknownEarly;
+  const bool native_dual_alpha = !variant.no_dual_src;
   if (variant.temporal_mode != 0)
     variant.bounding_box = 0;
-  if (metadata)
+  if (metadata || overlay)
   {
-    variant.no_dual_src = 1;
+    variant.no_dual_src = !dynamic_mask;
     variant.uint_output = 0;
     variant.blend_enable = 0;
     variant.logic_op_enable = 0;
@@ -822,7 +828,7 @@ ShaderCode GeneratePixelShaderCode(APIType api_type, const ShaderHostConfig& hos
     out.Write("FORCE_EARLY_Z; \n");
   }
 
-  const bool use_framebuffer_fetch = !metadata &&
+  const bool use_framebuffer_fetch = !metadata && !overlay &&
       (uid_data->blend_enable || uid_data->logic_op_enable ||
        uid_data->ztest == EmulatedZ::EarlyWithFBFetch);
 
@@ -944,7 +950,7 @@ ShaderCode GeneratePixelShaderCode(APIType api_type, const ShaderHostConfig& hos
   out.Write("void main()\n{{\n");
   if (metadata)
     out.Write("\tbool temporal_alpha_pass = {};\n",
-              uid_data->Pretest == AlphaTestResult::Fail ? "false" : "true");
+              uid_data->Pretest == AlphaTestResult::Fail && !depth_metadata ? "false" : "true");
 
   out.Write("\tfloat4 rawpos = gl_FragCoord;\n");
 
@@ -1017,8 +1023,9 @@ ShaderCode GeneratePixelShaderCode(APIType api_type, const ShaderHostConfig& hos
   // NOTE: Fragment may not be discarded if alpha test always fails and early depth test is enabled
   // (in this case we need to write a depth value if depth test passes regardless of the alpha
   // testing result)
-  if (uid_data->Pretest == AlphaTestResult::Undetermined ||
-      (uid_data->Pretest == AlphaTestResult::Fail && uid_data->ztest == EmulatedZ::Late))
+  if (!depth_metadata &&
+      (uid_data->Pretest == AlphaTestResult::Undetermined ||
+       (uid_data->Pretest == AlphaTestResult::Fail && uid_data->ztest == EmulatedZ::Late)))
   {
     WriteAlphaTest(out, uid_data, api_type, uid_data->per_pixel_depth,
                    !uid_data->no_dual_src || uid_data->blend_enable);
@@ -1135,10 +1142,29 @@ ShaderCode GeneratePixelShaderCode(APIType api_type, const ShaderHostConfig& hos
   else if (use_framebuffer_fetch)
     out.Write("\treal_ocol0 = ocol0;\n");
 
+  if (metadata || overlay)
+    out.Write("\tfloat temporal_opacity = {};\n",
+              native_dual_alpha ? "float(prev.a) / 255.0" : "ocol0.a");
+  if (overlay)
+    out.Write("\tocol0.a = temporal_opacity;\n");
   if (metadata)
+  {
+    const bool known = mode == TemporalPixelShaderMode::MetadataKnown ||
+                       mode == TemporalPixelShaderMode::MetadataKnownOpaqueAlpha ||
+                       mode == TemporalPixelShaderMode::Boundary ||
+                       mode == TemporalPixelShaderMode::DepthKnownEarly;
     out.Write("\tocol0 = float4({0}, {0}, {0}, {0});\n",
-              variant.temporal_mode == static_cast<u32>(TemporalPixelShaderMode::MetadataKnown) ?
-                  "(temporal_alpha_pass ? 1.0 : 0.0)" : "0.0");
+              known ? "(temporal_alpha_pass ? 1.0 : 0.0)" : "0.0");
+    if (dynamic_mask)
+    {
+      if (known)
+        out.Write("\tocol1 = temporal_opacity == 1.0 ? float4(0.0, 0.0, 0.0, 1.0) : "
+                  "float4(1.0, 1.0, 1.0, 0.0);\n");
+      else
+        out.Write("\tocol1 = temporal_opacity == 0.0 ? float4(1.0, 1.0, 1.0, 0.0) : "
+                  "float4(0.0, 0.0, 0.0, 1.0);\n");
+    }
+  }
 
   if (uid_data->bounding_box)
     out.Write("\tUpdateBoundingBox(rawpos.xy);\n");
@@ -1651,7 +1677,8 @@ static void WriteAlphaTest(ShaderCode& out, const pixel_shader_uid_data* uid_dat
   else
     out.Write(")) {{\n");
 
-  if (uid_data->temporal_mode >= static_cast<u32>(TemporalPixelShaderMode::MetadataKnown))
+  if (uid_data->temporal_mode >= 2 &&
+      uid_data->temporal_mode != static_cast<u32>(TemporalPixelShaderMode::Overlay))
     out.Write("\t\ttemporal_alpha_pass = false;\n");
 
   if (uid_data->uint_output)

@@ -20,16 +20,19 @@ struct pixel_ubershader_uid_data
   u32 per_pixel_depth : 1;
   u32 uint_output : 1;
   u32 no_dual_src : 1;
-  u32 temporal_mode : 2;
+  u32 temporal_mode : 4;
 
   u32 NumValues() const { return sizeof(pixel_ubershader_uid_data); }
 };
 #pragma pack()
 
 using PixelShaderUid = ShaderUid<pixel_ubershader_uid_data>;
-inline void SetTemporalPixelShaderMode(PixelShaderUid* uid, TemporalPixelShaderMode mode)
+inline void SetTemporalPixelShaderMode(PixelShaderUid* uid, TemporalPixelShaderMode mode,
+                                      bool native_dual_alpha = true)
 {
   uid->GetUidData()->temporal_mode = static_cast<u32>(mode);
+  if (static_cast<u32>(mode) >= 2)
+    uid->GetUidData()->no_dual_src = !native_dual_alpha;
 }
 
 

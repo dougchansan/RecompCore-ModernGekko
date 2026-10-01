@@ -41,10 +41,12 @@ void ClearUnusedPixelShaderUidBits(APIType api_type, const ShaderHostConfig& hos
   pixel_ubershader_uid_data* const uid_data = uid->GetUidData();
 
   // With fbfetch, ubershaders always blend using that and don't use dual src
-  if (host_config.backend_shader_framebuffer_fetch || !host_config.backend_dual_source_blend)
+  if (uid_data->temporal_mode < 2 &&
+      (host_config.backend_shader_framebuffer_fetch || !host_config.backend_dual_source_blend))
     uid_data->no_dual_src = 1;
   // Dual source is always enabled in the shader if this bug is not present
-  else if (!DriverDetails::HasBug(DriverDetails::BUG_BROKEN_DUAL_SOURCE_BLENDING))
+  else if (uid_data->temporal_mode < 2 &&
+           !DriverDetails::HasBug(DriverDetails::BUG_BROKEN_DUAL_SOURCE_BLENDING))
     uid_data->no_dual_src = 0;
 
   // OpenGL and Vulkan convert implicitly normalized color outputs to their uint representation.
@@ -61,18 +63,24 @@ ShaderCode GenPixelShader(APIType api_type, const ShaderHostConfig& host_config,
   const bool msaa = host_config.msaa;
   const bool ssaa = host_config.ssaa;
   const bool stereo = host_config.stereo;
-  const bool metadata = uid_data->temporal_mode >=
-                        static_cast<u32>(TemporalPixelShaderMode::MetadataKnown);
+  const auto mode = static_cast<TemporalPixelShaderMode>(uid_data->temporal_mode);
+  const bool overlay = mode == TemporalPixelShaderMode::Overlay;
+  const bool metadata = uid_data->temporal_mode >= 2 && !overlay;
+  const bool dynamic_mask = mode == TemporalPixelShaderMode::MetadataKnownOpaqueAlpha ||
+                            mode == TemporalPixelShaderMode::MetadataUnknownOpaqueAlpha;
+  const bool depth_metadata = mode == TemporalPixelShaderMode::DepthKnownEarly ||
+                              mode == TemporalPixelShaderMode::DepthUnknownEarly;
+  const bool native_dual_alpha = !uid_data->no_dual_src;
   pixel_ubershader_uid_data variant = *uid_data;
-  if (metadata)
+  if (metadata || overlay)
   {
-    variant.no_dual_src = 1;
+    variant.no_dual_src = !dynamic_mask;
     variant.uint_output = 0;
   }
   uid_data = &variant;
-  const bool use_framebuffer_fetch = !metadata && host_config.backend_shader_framebuffer_fetch;
-  const bool use_dual_source = !metadata && host_config.backend_dual_source_blend &&
-                               !uid_data->no_dual_src;
+  const bool use_framebuffer_fetch = !metadata && !overlay && host_config.backend_shader_framebuffer_fetch;
+  const bool use_dual_source = dynamic_mask ||
+      (!metadata && !overlay && host_config.backend_dual_source_blend && !uid_data->no_dual_src);
   const bool early_depth = uid_data->early_depth != 0;
   const bool per_pixel_depth = uid_data->per_pixel_depth != 0;
   const bool bounding_box = uid_data->temporal_mode == 0 && host_config.bounding_box;
@@ -1028,7 +1036,8 @@ ShaderCode GenPixelShader(APIType api_type, const ShaderHostConfig& host_config,
     out.Write("  #define discard_fragment discard\n");
   }
 
-  out.Write("  if (bpmem_alphaTest != 0u) {{\n"
+  out.Write("  if ({}) {{\n", depth_metadata ? "false" : "bpmem_alphaTest != 0u");
+  out.Write(
             "    bool comp0 = alphaCompare(TevResult.a, " I_ALPHA ".r, {});\n",
             BitfieldExtract<&AlphaTest::comp0>("bpmem_alphaTest"));
   out.Write("    bool comp1 = alphaCompare(TevResult.a, " I_ALPHA ".g, {});\n",
@@ -1307,10 +1316,28 @@ ShaderCode GenPixelShader(APIType api_type, const ShaderHostConfig& host_config,
               "  }}\n");
   }
 
+  if (metadata || overlay)
+    out.Write("  float temporal_opacity = {};\n",
+              native_dual_alpha ? "float(TevResult.a) / 255.0" : "ocol0.a");
+  if (overlay)
+    out.Write("  ocol0.a = temporal_opacity;\n");
   if (metadata)
-    out.Write("  ocol0 = float4({0}, {0}, {0}, {0});\n",
-              uid_data->temporal_mode == static_cast<u32>(TemporalPixelShaderMode::MetadataKnown) ?
-                  "1.0" : "0.0");
+  {
+    const bool known = mode == TemporalPixelShaderMode::MetadataKnown ||
+                       mode == TemporalPixelShaderMode::MetadataKnownOpaqueAlpha ||
+                       mode == TemporalPixelShaderMode::Boundary ||
+                       mode == TemporalPixelShaderMode::DepthKnownEarly;
+    out.Write("  ocol0 = float4({0}, {0}, {0}, {0});\n", known ? "1.0" : "0.0");
+    if (dynamic_mask)
+    {
+      if (known)
+        out.Write("  ocol1 = temporal_opacity == 1.0 ? float4(0.0, 0.0, 0.0, 1.0) : "
+                  "float4(1.0, 1.0, 1.0, 0.0);\n");
+      else
+        out.Write("  ocol1 = temporal_opacity == 0.0 ? float4(1.0, 1.0, 1.0, 0.0) : "
+                  "float4(0.0, 0.0, 0.0, 1.0);\n");
+    }
+  }
 
   out.Write("}}\n"
             "\n"

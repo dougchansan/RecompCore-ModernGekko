@@ -26,7 +26,13 @@ enum class TemporalPixelShaderMode : u32
   Native = 0,
   MirrorColor = 1,
   MetadataKnown = 2,
-  MetadataUnknown = 3
+  MetadataUnknown = 3,
+  MetadataKnownOpaqueAlpha = 4,
+  MetadataUnknownOpaqueAlpha = 5,
+  Overlay = 6,
+  Boundary = 7,
+  DepthKnownEarly = 8,
+  DepthUnknownEarly = 9
 };
 
 #pragma pack(1)
@@ -36,8 +42,7 @@ struct pixel_shader_uid_data
 
   u32 num_values;  // TODO: Shouldn't be a u32
   u32 NumValues() const { return num_values; }
-  u32 temporal_mode : 2;
-  u32 pad0 : 2;
+  u32 temporal_mode : 4;
   u32 useDstAlpha : 1;
   u32 no_dual_src : 1;
   AlphaTestResult Pretest : 2;
@@ -167,9 +172,13 @@ struct pixel_shader_uid_data
 #pragma pack()
 
 using PixelShaderUid = ShaderUid<pixel_shader_uid_data>;
-inline void SetTemporalPixelShaderMode(PixelShaderUid* uid, TemporalPixelShaderMode mode)
+inline void SetTemporalPixelShaderMode(PixelShaderUid* uid, TemporalPixelShaderMode mode,
+                                      bool native_dual_alpha = true)
 {
   uid->GetUidData()->temporal_mode = static_cast<u32>(mode);
+  // For replay, this existing bit records which native alpha drives RGB blending.
+  if (static_cast<u32>(mode) >= 2)
+    uid->GetUidData()->no_dual_src = !native_dual_alpha;
 }
 
 
