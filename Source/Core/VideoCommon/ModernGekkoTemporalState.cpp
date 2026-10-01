@@ -10,6 +10,7 @@ namespace
 State s_state;
 bool s_has_frame = false;
 bool s_coverage_invalid = false;
+std::array<int, 4> s_current_scissor{0, 0, 640, 528};
 }
 void SetActive(bool active)
 {
@@ -31,9 +32,10 @@ void SetFrameJitter(float x, float y, u64 content_id)
   {
     s_state.coverage_valid = false;  // Finite jitter alone does not establish coverage.
     s_coverage_invalid = !finite;
-    s_state.scissor_left = s_state.scissor_top = 0;
-    s_state.scissor_right = 640;
-    s_state.scissor_bottom = 528;
+    s_state.scissor_left = s_current_scissor[0];
+    s_state.scissor_top = s_current_scissor[1];
+    s_state.scissor_right = s_current_scissor[2];
+    s_state.scissor_bottom = s_current_scissor[3];
   }
   else if (s_state.jitter_x != x || s_state.jitter_y != y)
   {
@@ -68,6 +70,8 @@ void MarkGuestDrawCoverage(bool recognized_mapping)
 }
 void MarkScissorCoverage(int left, int top, int right, int bottom)
 {
+  // Keep the current guest configuration even while temporal rendering is disabled.
+  s_current_scissor = {left, top, right, bottom};
   if (!s_state.active)
     return;
   s_state.scissor_left = std::max(s_state.scissor_left, left);
