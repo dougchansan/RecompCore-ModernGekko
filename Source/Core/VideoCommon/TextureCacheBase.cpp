@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -17,6 +16,7 @@
 #endif
 
 #include <fmt/format.h>
+#include <cstdlib>
 
 #include "Common/Align.h"
 #include "Common/Assert.h"
