@@ -80,7 +80,7 @@ std::string GetDiskShaderCacheFileName(APIType api_type, const char* type, bool 
   filename += type;
   // The release-base Git SHA stays fixed while the reviewed host overlay changes shader code.
   if (api_type == APIType::Vulkan)
-    filename += "-temporal1";
+    filename += "-temporal2";
 
   if (include_gameid)
   {

@@ -124,6 +124,8 @@ struct ModernGekkoTemporalPacket
 {
   std::unique_ptr<AbstractTexture> color;
   std::unique_ptr<AbstractTexture> depth;
+  std::unique_ptr<AbstractTexture> coverage;
+  u64 invalid_pixels = UINT64_MAX;
   MathUtil::Rectangle<int> efb_rect;
   u64 content_id = 0;
   float jitter_x = 0.0f;
@@ -138,8 +140,14 @@ struct ModernGekkoTemporalPacket
   std::string reason = "no matched EFB snapshot";
 };
 
+enum class TemporalTextureSource : u8
+{
+  NativeMemory, NativeDepthCopy, NativeIntensityCopy, NativeColorCopy, Unknown
+};
+
 struct TCacheEntry
 {
+  TemporalTextureSource temporal_source = TemporalTextureSource::NativeMemory;
   std::shared_ptr<ModernGekkoTemporalPacket> temporal_packet;
 
   // common members
@@ -309,6 +317,8 @@ public:
   RcTcacheEntry GetXFBTexture(u32 address, u32 width, u32 height, u32 stride,
                               MathUtil::Rectangle<int>* display_rect);
 
+  bool HasUnclassifiedTemporalInputs(BitSet32 used_textures) const;
+
   virtual void BindTextures(BitSet32 used_textures, const std::array<SamplerState, 8>& samplers);
   void CopyRenderTargetToTexture(u32 dstAddr, EFBCopyFormat dstFormat, u32 width, u32 height,
                                  u32 dstStride, bool is_depth_copy,
@@ -453,6 +463,14 @@ private:
   // m_bound_textures are actually active in the current draw
   // It's valid for textures to be in here after they've been invalidated
   std::array<RcTcacheEntry, 8> m_bound_textures{};
+
+  struct TemporalCopyRegion
+  {
+    u32 address, size;
+    TemporalTextureSource source;
+  };
+  std::deque<TemporalCopyRegion> m_temporal_copy_regions;
+  bool m_temporal_provenance_overflow = false;
 
   TexPool m_texture_pool;
   u64 m_last_entry_id = 0;

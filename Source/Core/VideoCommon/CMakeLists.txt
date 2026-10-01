@@ -295,3 +295,11 @@ if(MSVC)
   # Add precompiled header
   target_link_libraries(videocommon PRIVATE use_pch)
 endif()
+
+# Paired Vulkan rendering uses the backend framebuffer types only when Vulkan is enabled.
+if(ENABLE_VULKAN)
+  target_include_directories(videocommon PRIVATE
+    ${PROJECT_SOURCE_DIR}/Externals/Vulkan-Headers/include
+    ${PROJECT_SOURCE_DIR}/Externals/VulkanMemoryAllocator/include
+  )
+endif()
