@@ -89,11 +89,15 @@ bool Initialize(VulkanContext& context)
 
   const std::filesystem::path data_path = GetApplicationDataPath();
   const std::wstring data_path_wide = data_path.wstring();
-  NVSDK_NGX_FeatureCommonInfo feature_info = {};
+  // Keep SDK-referenced search-path storage alive through Shutdown.
+  static NVSDK_NGX_FeatureCommonInfo feature_info;
+  feature_info = {};
   feature_info.LoggingInfo.LoggingCallback = LogSDKMessage;
   feature_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
-  std::wstring feature_path_wide;
-  const wchar_t* feature_path = nullptr;
+  static std::wstring feature_path_wide;
+  feature_path_wide.clear();
+  static const wchar_t* feature_path;
+  feature_path = nullptr;
   if (const char* path = std::getenv("MODERNGEKKO_NGX_FEATURE_PATH"); path && *path)
   {
     feature_path_wide = std::filesystem::path{path}.wstring();
