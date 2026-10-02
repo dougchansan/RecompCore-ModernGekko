@@ -1163,7 +1163,7 @@ bool TextureCacheBase::HasUnclassifiedTemporalInputs(BitSet32 used_textures) con
   const auto temporal = ModernGekkoTemporal::GetState();
   const bool trace = std::getenv("MODERNGEKKO_TEMPORAL_TRACE_FRAME") &&
                      temporal.content_id >= 90 && temporal.content_id <= 91;
-  if (temporal.active && ((unknown || depth || intensity || color) && diagnostics++ < 32 || trace))
+  if (temporal.active && (((unknown || depth || intensity || color) && diagnostics++ < 32) || trace))
     INFO_LOG_FMT(VIDEO, "Temporal sampled inputs: unknown={} colorRT={} depthRT={} intensityRT={}",
                  unknown, color, depth, intensity);
   return unknown != 0;
