@@ -1117,8 +1117,30 @@ SamplerState TextureCacheBase::GetSamplerState(u32 index, float custom_tex_scale
   return state;
 }
 
-bool TextureCacheBase::HasUnclassifiedTemporalInputs(BitSet32 used_textures) const
+void TextureCacheBase::RefreshNativeTemporalAncestry() const
 {
+  const auto cid = ModernGekkoTemporal::GetState().content_id;
+  if (m_native_ancestry_content != cid)
+  {
+    m_native_ancestry_content = cid;
+    m_native_ancestry_unknown = false;
+    m_native_initialized_rects.clear();
+  }
+}
+void TextureCacheBase::RejectTemporalNativeAncestry()
+{
+  RefreshNativeTemporalAncestry();
+  m_native_ancestry_unknown = true;
+}
+void TextureCacheBase::RecordTemporalNativeClear(const MathUtil::Rectangle<int>& rect, bool rgb, bool alpha)
+{
+  RefreshNativeTemporalAncestry();
+  if (rgb && alpha && m_native_initialized_rects.size() < 32)
+    m_native_initialized_rects.push_back(rect);
+}
+bool TextureCacheBase::HasUnclassifiedTemporalInputs(BitSet32 used_textures, bool allow_native_geometry_fields) const
+{
+  RefreshNativeTemporalAncestry();
   u32 unknown = 0, depth = 0, intensity = 0, color = 0, auxiliary_slots = 0;
   for (u32 i = 0; i < m_bound_textures.size(); ++i)
   {
@@ -1147,6 +1169,24 @@ bool TextureCacheBase::HasUnclassifiedTemporalInputs(BitSet32 used_textures) con
           }
       }
     }
+    bool native_field = allow_native_geometry_fields && entry->temporal_native_field_proven &&
+        entry->temporal_producer_observed && entry->temporal_producer_content == m_native_ancestry_content &&
+        source == TemporalTextureSource::NativeColorCopy && !entry->may_have_overlapping_textures;
+    bool sampled = false;
+    for (u32 stage = 0; native_field && stage <= bpmem.genMode.numtevstages; ++stage)
+    {
+      const auto& order = bpmem.tevorders[stage / 2];
+      if (!order.getEnable(stage & 1) || order.getTexMap(stage & 1) != i) continue;
+      sampled = true;
+      const u32 coord = order.getTexCoord(stage & 1);
+      if (coord >= xfmem.numTexGen.numTexGens) { native_field = false; break; }
+      const auto& gen = xfmem.texMtxInfo[coord];
+      native_field = gen.texgentype == TexGenType::Regular && gen.sourcerow == SourceRow::Geom &&
+          gen.projection == TexSize::STQ && gen.inputform == TexInputForm::ABC1 &&
+          !bpmem.tevind[stage].IsActive();
+    }
+    if (native_field && sampled)
+      continue; // Current initialized native material field, sampled before raster jitter.
     switch (source)
     {
     case TemporalTextureSource::NativeDepthCopy: ++depth; auxiliary_slots |= 1u << i; break;
@@ -1173,12 +1213,12 @@ bool TextureCacheBase::HasUnclassifiedTemporalInputs(BitSet32 used_textures) con
     {
       if (!(auxiliary_slots & (1u << slot))) continue;
       const auto& entry = m_bound_textures[slot];
-      INFO_LOG_FMT(VIDEO, "Temporal RTT dependency: content={} slot={} observed={} producer_content={} crop={}x{} source={} texture={}x{} RGB_dependency={}",
+      INFO_LOG_FMT(VIDEO, "Temporal RTT dependency: content={} slot={} observed={} producer_content={} crop={}x{} source={} texture={}x{} RGB_dependency={} native_field_proven={} overlapping={}",
           temporal.content_id, slot, entry->temporal_producer_observed,
           entry->temporal_producer_content, entry->temporal_producer_rect.GetWidth(),
           entry->temporal_producer_rect.GetHeight(), static_cast<u32>(entry->temporal_source),
           entry->texture->GetWidth(), entry->texture->GetHeight(),
-          !ModernGekkoTextureProvenance::CanUseAsOpacityData(bpmem, 1u << slot));
+          !ModernGekkoTextureProvenance::CanUseAsOpacityData(bpmem, 1u << slot), entry->temporal_native_field_proven, entry->may_have_overlapping_textures);
       for (u32 stage = 0; stage <= bpmem.genMode.numtevstages; ++stage)
       {
         const auto& order = bpmem.tevorders[stage / 2];
@@ -1192,6 +1232,7 @@ bool TextureCacheBase::HasUnclassifiedTemporalInputs(BitSet32 used_textures) con
       }
     }
   }
+  if (unknown) m_native_ancestry_unknown = true;
   return unknown != 0;
 }
 
@@ -2492,6 +2533,12 @@ void TextureCacheBase::CopyRenderTargetToTexture(
       entry->temporal_producer_content = ModernGekkoTemporal::GetState().content_id;
       entry->temporal_producer_rect = srcRect;
       entry->temporal_producer_observed = true;
+      RefreshNativeTemporalAncestry();
+      const bool initialized = std::any_of(m_native_initialized_rects.begin(), m_native_initialized_rects.end(),
+          [&](const auto& clear) { return clear.left <= srcRect.left && clear.top <= srcRect.top &&
+              clear.right >= srcRect.right && clear.bottom >= srcRect.bottom; });
+      entry->temporal_native_field_proven = !is_xfb_copy && initialized &&
+          !m_native_ancestry_unknown && !ModernGekkoTemporal::IsMirrorRaster();
       entry->SetGeneralParameters(dstAddr, 0, baseFormat, is_xfb_copy);
       entry->SetDimensions(tex_w, tex_h, 1);
       entry->frameCount = FRAMECOUNT_INVALID;

@@ -155,6 +155,7 @@ struct TCacheEntry
   u64 temporal_producer_content = 0;
   MathUtil::Rectangle<int> temporal_producer_rect{};
   bool temporal_producer_observed = false;
+  bool temporal_native_field_proven = false;
   std::shared_ptr<ModernGekkoTemporalPacket> temporal_packet;
 
   // common members
@@ -324,7 +325,9 @@ public:
   RcTcacheEntry GetXFBTexture(u32 address, u32 width, u32 height, u32 stride,
                               MathUtil::Rectangle<int>* display_rect);
 
-  bool HasUnclassifiedTemporalInputs(BitSet32 used_textures) const;
+  bool HasUnclassifiedTemporalInputs(BitSet32 used_textures, bool allow_native_geometry_fields = false) const;
+  void RejectTemporalNativeAncestry();
+  void RecordTemporalNativeClear(const MathUtil::Rectangle<int>& rect, bool rgb, bool alpha);
 
   virtual void BindTextures(BitSet32 used_textures, const std::array<SamplerState, 8>& samplers);
   void CopyRenderTargetToTexture(u32 dstAddr, EFBCopyFormat dstFormat, u32 width, u32 height,
@@ -386,6 +389,10 @@ private:
   static constexpr size_t MAX_TEMPORAL_PACKETS = 2;
   std::deque<std::weak_ptr<TCacheEntry>> m_recent_temporal_entries;
   size_t m_temporal_snapshot_high_water_bytes = 0;
+  mutable u64 m_native_ancestry_content = UINT64_MAX;
+  mutable bool m_native_ancestry_unknown = true;
+  mutable std::vector<MathUtil::Rectangle<int>> m_native_initialized_rects;
+  void RefreshNativeTemporalAncestry() const;
   void RetireTemporalPackets(size_t keep);
   void ReportTemporalSnapshotMemory();
 
