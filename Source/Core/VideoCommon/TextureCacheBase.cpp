@@ -47,6 +47,7 @@
 #include "VideoCommon/GraphicsModSystem/Runtime/GraphicsModManager.h"
 #include "VideoCommon/ModernGekkoTemporalState.h"
 #include "VideoCommon/ModernGekkoTextureProvenance.h"
+#include "VideoCommon/XFMemory.h"
 #include "VideoCommon/OpcodeDecoding.h"
 #include "VideoCommon/PixelShaderManager.h"
 #include "VideoCommon/Present.h"
@@ -1166,6 +1167,31 @@ bool TextureCacheBase::HasUnclassifiedTemporalInputs(BitSet32 used_textures) con
   if (temporal.active && (((unknown || depth || intensity || color) && diagnostics++ < 32) || trace))
     INFO_LOG_FMT(VIDEO, "Temporal sampled inputs: unknown={} colorRT={} depthRT={} intensityRT={}",
                  unknown, color, depth, intensity);
+  if (trace && unknown && auxiliary_slots)
+  {
+    for (u32 slot = 0; slot < 8; ++slot)
+    {
+      if (!(auxiliary_slots & (1u << slot))) continue;
+      const auto& entry = m_bound_textures[slot];
+      INFO_LOG_FMT(VIDEO, "Temporal RTT dependency: content={} slot={} observed={} producer_content={} crop={}x{} source={} texture={}x{} RGB_dependency={}",
+          temporal.content_id, slot, entry->temporal_producer_observed,
+          entry->temporal_producer_content, entry->temporal_producer_rect.GetWidth(),
+          entry->temporal_producer_rect.GetHeight(), static_cast<u32>(entry->temporal_source),
+          entry->texture->GetWidth(), entry->texture->GetHeight(),
+          !ModernGekkoTextureProvenance::CanUseAsOpacityData(bpmem, 1u << slot));
+      for (u32 stage = 0; stage <= bpmem.genMode.numtevstages; ++stage)
+      {
+        const auto& order = bpmem.tevorders[stage / 2];
+        if (!order.getEnable(stage & 1) || order.getTexMap(stage & 1) != slot) continue;
+        const u32 coord = order.getTexCoord(stage & 1);
+        if (coord >= xfmem.numTexGen.numTexGens) continue;
+        const auto& gen = xfmem.texMtxInfo[coord];
+        INFO_LOG_FMT(VIDEO, "Temporal RTT sampling: slot={} stage={} coord={} generator={} source_row={} projection={} input_form={} indirect={}",
+            slot, stage, coord, static_cast<u32>(gen.texgentype), static_cast<u32>(gen.sourcerow),
+            static_cast<u32>(gen.projection), static_cast<u32>(gen.inputform), bpmem.tevind[stage].IsActive());
+      }
+    }
+  }
   return unknown != 0;
 }
 
@@ -2463,6 +2489,9 @@ void TextureCacheBase::CopyRenderTargetToTexture(
     if (entry)
     {
       entry->temporal_source = is_xfb_copy ? TemporalTextureSource::NativeColorCopy : temporal_source;
+      entry->temporal_producer_content = ModernGekkoTemporal::GetState().content_id;
+      entry->temporal_producer_rect = srcRect;
+      entry->temporal_producer_observed = true;
       entry->SetGeneralParameters(dstAddr, 0, baseFormat, is_xfb_copy);
       entry->SetDimensions(tex_w, tex_h, 1);
       entry->frameCount = FRAMECOUNT_INVALID;

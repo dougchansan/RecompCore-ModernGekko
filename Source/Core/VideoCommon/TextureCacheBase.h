@@ -152,6 +152,9 @@ enum class TemporalTextureSource : u8
 struct TCacheEntry
 {
   TemporalTextureSource temporal_source = TemporalTextureSource::NativeMemory;
+  u64 temporal_producer_content = 0;
+  MathUtil::Rectangle<int> temporal_producer_rect{};
+  bool temporal_producer_observed = false;
   std::shared_ptr<ModernGekkoTemporalPacket> temporal_packet;
 
   // common members
