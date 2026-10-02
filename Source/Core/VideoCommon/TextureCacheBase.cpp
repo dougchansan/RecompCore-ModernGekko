@@ -182,6 +182,8 @@ void TextureCacheBase::ReportTemporalSnapshotMemory()
 
 void TextureCacheBase::Invalidate()
 {
+  RejectTemporalNativeAncestry();
+  m_native_initialized_rects.clear();
   RetireTemporalPackets(0);
   FlushEFBCopies();
   TMEM::InvalidateAll();
@@ -445,6 +447,10 @@ void TextureCacheBase::ScaleTextureCacheEntryTo(RcTcacheEntry& entry, u32 new_wi
     return;
   }
 
+  entry->temporal_native_field_proven = false;
+  entry->temporal_producer_observed = false;
+  if (entry->temporal_source != TemporalTextureSource::NativeMemory)
+    entry->temporal_source = TemporalTextureSource::Unknown;
   const u32 max = g_backend_info.MaxTextureSize;
   if (max < new_width || max < new_height)
   {
@@ -608,7 +614,11 @@ void TextureCacheBase::DoState(PointerWrap& p)
   if (p.IsWriteMode() || p.IsMeasureMode())
     DoSaveState(p);
   else
+  {
+    RejectTemporalNativeAncestry();
+    m_native_initialized_rects.clear();
     DoLoadState(p);
+  }
 }
 
 void TextureCacheBase::DoSaveState(PointerWrap& p)
