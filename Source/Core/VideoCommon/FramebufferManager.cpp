@@ -808,7 +808,8 @@ bool FramebufferManager::SnapshotTemporalOverlay(std::unique_ptr<AbstractTexture
   auto copy=g_gfx->CreateTexture(TextureConfig(rect.GetWidth(),rect.GetHeight(),1,1,1,
       AbstractTextureFormat::RGBA8,0,AbstractTextureType::Texture_2DArray),"Temporal overlay snapshot");
   if(!copy) {RejectTemporalSplit();return false;}
-  m_temporal_overlay_color->FinishedRendering();
+  // Copy directly from the color producer and restore its attachment layout.
+  // A redundant sampled transition would discard the actual producer access scope.
   copy->CopyRectangleFromTexture(m_temporal_overlay_color.get(),rect,0,0,copy->GetRect(),0,0);
   copy->FinishedRendering();*overlay=std::move(copy);return true;
 }
