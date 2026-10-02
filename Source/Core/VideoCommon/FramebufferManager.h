@@ -254,6 +254,7 @@ protected:
 
   MathUtil::Rectangle<int> m_temporal_capture_rect{0, 0, 640, 528};
   bool m_temporal_mirror_invalid = false;
+  void RefreshTemporalSplitContent();
   void DestroyTemporalMirror();
   void MirrorClearEFB(const MathUtil::Rectangle<int>& native_rect, bool color_enable,
                       bool alpha_enable, bool z_enable, u32 color, u32 z);

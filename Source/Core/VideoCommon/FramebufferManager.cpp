@@ -535,6 +535,11 @@ void main() {
 }
 )";
 }
+void FramebufferManager::RefreshTemporalSplitContent()
+{
+  if (m_temporal_split_content != ModernGekkoTemporal::GetState().content_id)
+    ResetTemporalSplitForNewContent();
+}
 void FramebufferManager::ResetTemporalSplitForNewContent()
 {
   m_temporal_split_content = ModernGekkoTemporal::GetState().content_id;
@@ -554,6 +559,7 @@ void FramebufferManager::RejectTemporalSplit()
 }
 void FramebufferManager::InvalidateTemporalSplit()
 {
+  RefreshTemporalSplitContent();
   // Once a verified reset erased the world depth, the unsplit EFB is no longer
   // a safe fallback input for reconstruction, even if its provenance is known.
   if (m_temporal_boundary_detected || m_temporal_frozen_world || m_temporal_overlay_active)
@@ -737,26 +743,37 @@ bool FramebufferManager::CertifyTemporalBoundary(const MathUtil::Rectangle<int>&
 bool FramebufferManager::FreezeWorldBeforeOverlay()
 {
   const auto state=ModernGekkoTemporal::GetState();
-  if (!m_temporal_boundary_proven || m_temporal_boundary_content!=state.content_id ||
-      !state.depth_convention_known ||
-      (state.reason_bits & static_cast<u32>(ModernGekkoTemporal::CoverageReason::MixedDepthConvention)))
-  {
+  const auto fail = [&](std::string_view reason, u64 color_invalid, u64 depth_invalid) {
+    static u64 failures = 0;
+    if (++failures <= 8 || failures % 120 == 0 || TraceTemporalMirrorFrame())
+      INFO_LOG_FMT(VIDEO,
+                   "Temporal world freeze rejected: content={} reason={} boundary_proven={} "
+                   "boundary_detected={} boundary_content={} split_rejected={} mirror_invalid={} "
+                   "depth_known={} depth_inverted={} bits={} color_invalid={} depth_invalid={}",
+                   state.content_id, reason, m_temporal_boundary_proven,
+                   m_temporal_boundary_detected, m_temporal_boundary_content,
+                   m_temporal_split_rejected, m_temporal_mirror_invalid,
+                   state.depth_convention_known, state.depth_inverted, state.reason_bits,
+                   color_invalid, depth_invalid);
     if (m_temporal_boundary_detected)
       RejectTemporalSplit();
     return false;
-  }
+  };
+  if (!m_temporal_boundary_proven || m_temporal_boundary_content!=state.content_id)
+    return fail("missing or stale boundary proof",~u64{0},~u64{0});
+  if (!state.depth_convention_known ||
+      (state.reason_bits & static_cast<u32>(ModernGekkoTemporal::CoverageReason::MixedDepthConvention)))
+    return fail("unknown or mixed depth convention",~u64{0},~u64{0});
   auto world=std::make_shared<TemporalWorldSnapshot>();
   world->native_rect=m_temporal_capture_rect;world->content_id=state.content_id;
   world->jitter_x=state.jitter_x;world->jitter_y=state.jitter_y;
   world->depth_convention_known=state.depth_convention_known;world->depth_inverted=state.depth_inverted;
   if (!CaptureMirrorPacket(world->native_rect,&world->color,&world->depth,
-      &world->color_coverage,&world->depth_coverage) ||
-      !CertifyTemporalCoverage(world->color_coverage.get(),world->depth_coverage.get(),
-          &world->color_invalid,&world->depth_invalid,false))
-  {
-    RejectTemporalSplit();
-    return false;
-  }
+      &world->color_coverage,&world->depth_coverage))
+    return fail("mirror snapshot unavailable",world->color_invalid,world->depth_invalid);
+  if (!CertifyTemporalCoverage(world->color_coverage.get(),world->depth_coverage.get(),
+      &world->color_invalid,&world->depth_invalid,false))
+    return fail("uncertified color or depth provenance",world->color_invalid,world->depth_invalid);
   m_temporal_frozen_world=std::move(world);
   return true;
 }
@@ -827,8 +844,7 @@ bool FramebufferManager::EnsureTemporalMirror()
       GetEFBColorTexture()->GetFormat() != AbstractTextureFormat::RGBA8 ||
       GetEFBDepthTexture()->GetFormat() != AbstractTextureFormat::D32F)
     return false;
-  if (m_temporal_split_content != ModernGekkoTemporal::GetState().content_id)
-    ResetTemporalSplitForNewContent();
+  RefreshTemporalSplitContent();
   if (m_temporal_mirror_framebuffer)
     return true;
   const auto color_config = GetEFBColorTexture()->GetConfig();
@@ -880,6 +896,7 @@ bool FramebufferManager::EnsureTemporalMirror()
 }
 void FramebufferManager::SetTemporalCaptureRect(const MathUtil::Rectangle<int>& native_rect)
 {
+  RefreshTemporalSplitContent();
   if (native_rect != m_temporal_capture_rect)
   {
     m_temporal_capture_rect = native_rect;
@@ -888,6 +905,7 @@ void FramebufferManager::SetTemporalCaptureRect(const MathUtil::Rectangle<int>& 
 }
 void FramebufferManager::InvalidateTemporalMirrorCoverage()
 {
+  RefreshTemporalSplitContent();
   InvalidateTemporalSplit();
   if (!m_temporal_coverage_framebuffer)
     return;
@@ -903,6 +921,7 @@ void FramebufferManager::MirrorClearEFB(const MathUtil::Rectangle<int>& native_r
                                       bool color_enable, bool alpha_enable, bool z_enable,
                                       u32 color, u32 z)
 {
+  RefreshTemporalSplitContent();
   if (!m_temporal_mirror_framebuffer)
     return;
   if (m_temporal_overlay_active)
