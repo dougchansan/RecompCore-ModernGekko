@@ -1136,6 +1136,8 @@ VertexManagerBase::PrepareTemporalDraw(const AbstractPipeline* native_pipeline, 
 
   auto* gfx = Vulkan::VKGfx::GetInstance();
   const auto native_state = gfx->SaveTemporalRasterState();
+  bool allow_native_geometry_fields = false;
+  bool no_indirect = false;
   auto trace = [&](bool known, bool overwrite, bool alpha_gate, std::string_view reason) {
     const char* enabled = std::getenv("MODERNGEKKO_TEMPORAL_TRACE_FRAME");
     const auto state = ModernGekkoTemporal::GetState();
@@ -1160,7 +1162,8 @@ VertexManagerBase::PrepareTemporalDraw(const AbstractPipeline* native_pipeline, 
       "RGB={} A={} ztest={} zwrite={} zfunc={} blend={} src={} dst={} projection={} "
       "viewport=({},{},{},{}) scissor_count={} scissors={} "
       "gpuVP=({},{},{},{},{},{}) gpuScissor=({},{},{},{}) "
-      "uid_ztest={} uid_fragdepth={} uid_ztex={} uid_alpha_pretest={} uid_bbox={} reason={}",
+      "uid_ztest={} uid_fragdepth={} uid_ztex={} uid_alpha_pretest={} uid_bbox={} "
+      "allow_fields={} no_indirect={} configured_indirect={} sampled_indirect={} reason={}",
       state.content_id, order, m_index_generator.GetIndexLen(), known, overwrite, alpha_gate,
       bool(blend.color_update), bool(blend.alpha_update), bool(depth.test_enable),
       bool(depth.update_enable), static_cast<u32>(depth.func.Value()), bool(blend.blend_enable),
@@ -1171,7 +1174,8 @@ VertexManagerBase::PrepareTemporalDraw(const AbstractPipeline* native_pipeline, 
       native_state.viewport.height, native_state.viewport.minDepth, native_state.viewport.maxDepth,
       native_state.scissor.offset.x, native_state.scissor.offset.y, native_state.scissor.extent.width,
       native_state.scissor.extent.height, static_cast<u32>(ps->ztest), static_cast<u32>(ps->per_pixel_depth),
-      static_cast<u32>(ps->ztex_op), static_cast<u32>(ps->Pretest), static_cast<u32>(ps->bounding_box), reason);
+      static_cast<u32>(ps->ztex_op), static_cast<u32>(ps->Pretest), static_cast<u32>(ps->bounding_box), allow_native_geometry_fields,
+      no_indirect, bpmem.genMode.numindstages.Value(), static_cast<u32>(ps->nIndirectStagesUsed), reason);
   };
   auto reject = [&](std::string_view reason) {
     g_texture_cache->RejectTemporalNativeAncestry();
@@ -1205,14 +1209,14 @@ VertexManagerBase::PrepareTemporalDraw(const AbstractPipeline* native_pipeline, 
   const auto native_blend = m_current_pipeline_config.blending_state;
   const auto native_depth = m_current_pipeline_config.depth_state;
   const bool depth_write = native_depth.test_enable && native_depth.update_enable;
-  bool no_indirect = bpmem.genMode.numindstages == 0 && ps->nIndirectStagesUsed == 0;
+  no_indirect = bpmem.genMode.numindstages == 0 && ps->nIndirectStagesUsed == 0;
   for (const auto& indirect : bpmem.tevind)
   {
     no_indirect = no_indirect && !indirect.IsActive() && !indirect.fb_addprev &&
                   indirect.sw == IndTexWrap::ITW_OFF && indirect.tw == IndTexWrap::ITW_OFF;
   }
   const auto temporal_state = ModernGekkoTemporal::GetState();
-  const bool allow_native_geometry_fields = xfmem.projection.type == ProjectionType::Perspective &&
+  allow_native_geometry_fields = xfmem.projection.type == ProjectionType::Perspective &&
       native_blend.color_update && depth_write && temporal_state.depth_convention_known &&
       !(temporal_state.reason_bits & static_cast<u32>(ModernGekkoTemporal::CoverageReason::MixedDepthConvention)) &&
       ps->ztex_op == ZTexOp::Disabled && !ps->per_pixel_depth && no_indirect;
