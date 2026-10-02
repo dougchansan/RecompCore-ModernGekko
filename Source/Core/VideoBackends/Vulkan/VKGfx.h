@@ -9,6 +9,7 @@
 
 #include "Common/CommonTypes.h"
 #include "VideoBackends/Vulkan/Constants.h"
+#include "VideoBackends/Vulkan/StateTracker.h"
 #include "VideoCommon/AbstractGfx.h"
 #include "VideoCommon/Constants.h"
 
@@ -34,6 +35,7 @@ public:
     const VKPipeline* pipeline = nullptr;
     VkViewport viewport{};
     VkRect2D scissor{};
+    StateTracker::GraphicsBindings bindings{};
   };
   TemporalRasterState SaveTemporalRasterState() const;
   void RestoreTemporalRasterState(const TemporalRasterState& state);

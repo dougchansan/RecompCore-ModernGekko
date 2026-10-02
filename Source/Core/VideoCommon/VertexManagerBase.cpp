@@ -52,6 +52,9 @@
 #include "VideoBackends/Vulkan/VKGfx.h"
 #include "VideoBackends/Vulkan/StateTracker.h"
 #include "VideoCommon/ModernGekkoTemporalState.h"
+#ifdef Always
+#undef Always
+#endif
 #endif
 
 std::unique_ptr<VertexManagerBase> g_vertex_manager;
@@ -1175,6 +1178,7 @@ VertexManagerBase::PrepareTemporalDraw(const AbstractPipeline* native_pipeline, 
     static u64 rejected_draws = 0;
     if (++rejected_draws <= 8 || rejected_draws % 120 == 0)
       INFO_LOG_FMT(VIDEO, "Temporal mirror: rejected draws={} reason={}", rejected_draws, reason);
+    g_framebuffer_manager->InvalidateTemporalSplit();
     g_framebuffer_manager->InvalidateTemporalMirrorCoverage();
     gfx->RestoreTemporalRasterState(native_state);
     return TemporalDrawPlan{};
@@ -1201,11 +1205,11 @@ VertexManagerBase::PrepareTemporalDraw(const AbstractPipeline* native_pipeline, 
   const auto native_blend = m_current_pipeline_config.blending_state;
   const auto native_depth = m_current_pipeline_config.depth_state;
   const bool depth_write = native_depth.test_enable && native_depth.update_enable;
-  const bool equal_depth = native_depth.test_enable && native_depth.func == CompareMode::Equal;
-  const bool depth_only = !native_blend.color_update && depth_write;
-  const bool metadata_needed = native_blend.color_update || native_blend.alpha_update || depth_write;
   const bool overwrite = known && native_blend.color_update && !native_blend.blend_enable &&
-                         !native_blend.logic_op_enable && (depth_write || equal_depth);
+                         !native_blend.logic_op_enable;
+  const bool opacity_blend = native_blend.color_update && native_blend.blend_enable &&
+      !native_blend.subtract && native_blend.src_factor == SrcBlendFactor::SrcAlpha &&
+      native_blend.dst_factor == DstBlendFactor::InvSrcAlpha;
   const bool alpha_overwrite = known && native_blend.alpha_update &&
       (!native_blend.blend_enable || (!native_blend.subtract_alpha &&
        native_blend.src_factor_alpha == SrcBlendFactor::One &&
@@ -1215,33 +1219,69 @@ VertexManagerBase::PrepareTemporalDraw(const AbstractPipeline* native_pipeline, 
        native_blend.src_factor == SrcBlendFactor::InvDstAlpha ||
        native_blend.dst_factor == DstBlendFactor::DstAlpha ||
        native_blend.dst_factor == DstBlendFactor::InvDstAlpha);
-  const auto mode = known ? TemporalPixelShaderMode::MetadataKnown :
-                            TemporalPixelShaderMode::MetadataUnknown;
-  auto pipeline_for = [&](TemporalPixelShaderMode shader_mode, bool metadata, bool alpha_gate = false) {
+  const auto known_mode = known ? TemporalPixelShaderMode::MetadataKnown :
+                                 TemporalPixelShaderMode::MetadataUnknown;
+  const auto color_mode = opacity_blend ?
+      (known ? TemporalPixelShaderMode::MetadataKnownOpaqueAlpha :
+               TemporalPixelShaderMode::MetadataUnknownOpaqueAlpha) : known_mode;
+  const bool physical_early = ps->ztest == EmulatedZ::ForcedEarly;
+  const auto depth_mode = physical_early ?
+      (known ? TemporalPixelShaderMode::DepthKnownEarly : TemporalPixelShaderMode::DepthUnknownEarly) :
+      known_mode;
+  enum class Pass { Color, Alpha, AlphaGate, DepthMetadata, Mirror, BoundaryProof, OverlayColor };
+  auto pipeline_for = [&](TemporalPixelShaderMode shader_mode, Pass pass) {
     auto specialized = m_current_pipeline_config;
     auto uber = m_current_uber_pipeline_config;
-    SetTemporalPixelShaderMode(&specialized.ps_uid, shader_mode);
-    UberShader::SetTemporalPixelShaderMode(&uber.ps_uid, shader_mode);
-    if (metadata)
+    SetTemporalPixelShaderMode(&specialized.ps_uid, shader_mode, native_blend.use_dual_src);
+    UberShader::SetTemporalPixelShaderMode(&uber.ps_uid, shader_mode, native_blend.use_dual_src);
+    if (pass != Pass::Mirror)
     {
       DepthState depth = specialized.depth_state;
-      depth.update_enable = false;
+      depth.update_enable = pass == Pass::BoundaryProof;
+      if (pass == Pass::OverlayColor)
+      {
+        depth.test_enable = false;
+        depth.update_enable = false;
+      }
       BlendingState blend{};
       blend.blend_enable = true;
-      blend.color_update = alpha_gate || native_blend.color_update || depth_write;
-      blend.alpha_update = !alpha_gate && native_blend.alpha_update;
-      // R tracks color/depth correspondence; A independently tracks alpha provenance.
-      // A depth-only replacement cannot certify retained RGB, even for known geometry.
-      blend.src_factor = !alpha_gate && !depth_only && overwrite ? SrcBlendFactor::One :
-                                                                  SrcBlendFactor::Zero;
-      blend.dst_factor = alpha_gate ? DstBlendFactor::DstAlpha :
-                         depth_only || overwrite ? DstBlendFactor::Zero :
-                                                   DstBlendFactor::SrcClr;
+      blend.color_update = pass != Pass::Alpha;
+      blend.alpha_update = pass == Pass::Alpha;
+      blend.src_factor = SrcBlendFactor::Zero;
+      blend.dst_factor = DstBlendFactor::SrcClr;
       blend.src_factor_alpha = alpha_overwrite ? SrcBlendFactor::One : SrcBlendFactor::Zero;
       blend.dst_factor_alpha = alpha_overwrite ? DstBlendFactor::Zero : DstBlendFactor::SrcAlpha;
-      // Exact 0/1 destination*source is binary MIN. RGB cannot repair A accidentally,
-      // and an unknown alpha-only write leaves RGB unchanged until a later alpha read.
-
+      if (pass == Pass::AlphaGate)
+        blend.dst_factor = DstBlendFactor::DstAlpha;
+      else if (pass == Pass::DepthMetadata || (pass == Pass::Color && overwrite))
+      {
+        blend.src_factor = SrcBlendFactor::One;
+        blend.dst_factor = DstBlendFactor::Zero;
+      }
+      else if (pass == Pass::Color && opacity_blend)
+      {
+        // Secondary alpha is an exact selector: known opaque repairs, fractional
+        // known retains history, and any nonzero unknown contribution taints.
+        blend.use_dual_src = true;
+        blend.src_factor = SrcBlendFactor::SrcAlpha;
+        blend.dst_factor = DstBlendFactor::InvSrcAlpha;
+      }
+      if (pass == Pass::BoundaryProof)
+      {
+        blend.blend_enable = false;
+        blend.color_update = true;
+        blend.alpha_update = false;
+      }
+      else if (pass == Pass::OverlayColor)
+      {
+        blend.use_dual_src = false;
+        blend.color_update = true;
+        blend.alpha_update = true;
+        blend.src_factor = SrcBlendFactor::SrcAlpha;
+        blend.dst_factor = DstBlendFactor::InvSrcAlpha;
+        blend.src_factor_alpha = SrcBlendFactor::One;
+        blend.dst_factor_alpha = DstBlendFactor::InvSrcAlpha;
+      }
       specialized.depth_state = depth;
       uber.depth_state = depth;
       specialized.blending_state = blend;
@@ -1253,15 +1293,56 @@ VertexManagerBase::PrepareTemporalDraw(const AbstractPipeline* native_pipeline, 
   };
   plan.known = known;
   plan.overwrite = overwrite;
-  plan.color_pipeline = pipeline_for(TemporalPixelShaderMode::MirrorColor, false);
-  if (metadata_needed)
-    plan.metadata_pipeline = pipeline_for(mode, true);
+  if (g_framebuffer_manager->IsTemporalOverlayActive())
+  {
+    if (!known || xfmem.projection.type != ProjectionType::Orthographic ||
+        native_depth.test_enable || native_depth.update_enable || !opacity_blend)
+    {
+      g_framebuffer_manager->RejectTemporalSplit();
+      return reject("unsupported draw after verified world/overlay boundary");
+    }
+    plan.overlay_pipeline = pipeline_for(TemporalPixelShaderMode::Overlay, Pass::OverlayColor);
+    plan.overlay_framebuffer = g_framebuffer_manager->GetTemporalOverlayFramebuffer();
+    if (!plan.overlay_pipeline || !plan.overlay_framebuffer)
+    {
+      g_framebuffer_manager->RejectTemporalSplit();
+      return reject("overlay pipeline or framebuffer unavailable");
+    }
+    trace(known, false, false, "unjittered overlay");
+    gfx->RestoreTemporalRasterState(native_state);
+    return plan;
+  }
+  const bool boundary_candidate = known && !native_blend.color_update && !native_blend.alpha_update &&
+      depth_write && native_depth.func == CompareMode::Always &&
+      xfmem.projection.type == ProjectionType::Orthographic &&
+      (static_cast<u32>(ps->Pretest) & 3u) == static_cast<u32>(AlphaTestResult::Pass) &&
+      !ps->per_pixel_depth && ps->ztex_op == ZTexOp::Disabled &&
+      (m_current_primitive_type == PrimitiveType::Triangles ||
+       m_current_primitive_type == PrimitiveType::TriangleStrip);
+  if (boundary_candidate)
+  {
+    if (!g_framebuffer_manager->EnsureTemporalBoundary())
+      return reject("boundary scratch framebuffer unavailable");
+    plan.boundary_pipeline = pipeline_for(TemporalPixelShaderMode::Boundary, Pass::BoundaryProof);
+    plan.boundary_framebuffer = g_framebuffer_manager->GetTemporalBoundaryFramebuffer();
+    if (!plan.boundary_pipeline || !plan.boundary_framebuffer)
+      return reject("boundary proof pipeline unavailable");
+  }
+  plan.color_pipeline = pipeline_for(TemporalPixelShaderMode::MirrorColor, Pass::Mirror);
+  if (native_blend.color_update)
+    plan.metadata_pipeline = pipeline_for(color_mode, Pass::Color);
+  if (native_blend.alpha_update)
+    plan.alpha_pipeline = pipeline_for(known_mode, Pass::Alpha);
   if (alpha_dependency)
-    plan.alpha_gate_pipeline = pipeline_for(TemporalPixelShaderMode::MetadataKnown, true, true);
+    plan.alpha_gate_pipeline = pipeline_for(TemporalPixelShaderMode::MetadataKnown, Pass::AlphaGate);
+  if (depth_write)
+    plan.depth_pipeline = pipeline_for(depth_mode, Pass::DepthMetadata);
   plan.color_framebuffer = g_framebuffer_manager->GetTemporalMirrorFramebuffer();
   plan.metadata_framebuffer = g_framebuffer_manager->GetTemporalCoverageFramebuffer();
-  if (!plan.color_pipeline || (metadata_needed && !plan.metadata_pipeline) ||
-      (alpha_dependency && !plan.alpha_gate_pipeline))
+  plan.depth_framebuffer = g_framebuffer_manager->GetTemporalDepthCoverageFramebuffer();
+  if (!plan.color_pipeline || (native_blend.color_update && !plan.metadata_pipeline) ||
+      (native_blend.alpha_update && !plan.alpha_pipeline) ||
+      (alpha_dependency && !plan.alpha_gate_pipeline) || (depth_write && !plan.depth_pipeline))
     return reject("paired shader pipeline unavailable");
   trace(known, overwrite, alpha_dependency, "paired");
   gfx->RestoreTemporalRasterState(native_state);
@@ -1271,11 +1352,61 @@ VertexManagerBase::PrepareTemporalDraw(const AbstractPipeline* native_pipeline, 
 void VertexManagerBase::ReplayTemporalDraw(const TemporalDrawPlan& plan, u32 base_index,
                                          u32 num_indices, u32 base_vertex)
 {
-  if (!plan.color_pipeline)
+  if (!plan.color_pipeline && !plan.overlay_pipeline)
     return;
   auto* gfx = Vulkan::VKGfx::GetInstance();
   const auto native_state = gfx->SaveTemporalRasterState();
   auto& vertex_shader_manager = Core::System::GetInstance().GetVertexShaderManager();
+  auto restore_native = [&]() {
+    gfx->RestoreTemporalRasterState(native_state);
+    InvalidateConstants();
+    vertex_shader_manager.SetTemporalRasterJitter(false);
+    UploadUniforms();
+  };
+  if (plan.overlay_pipeline)
+  {
+    vertex_shader_manager.SetTemporalRasterJitter(false);
+    UploadUniforms();
+    gfx->SetFramebuffer(plan.overlay_framebuffer);
+    gfx->SetPipeline(plan.overlay_pipeline);
+    gfx->DrawIndexed(base_index, num_indices, base_vertex);
+    restore_native();
+    return;
+  }
+  if (plan.boundary_pipeline)
+  {
+    // Native guest effects have already happened once. This separate scratch draw
+    // proves actual raster coverage and stored depth without touching the mirror.
+    vertex_shader_manager.SetTemporalRasterJitter(false);
+    UploadUniforms();
+    g_framebuffer_manager->ResetTemporalBoundary();
+    gfx->SetFramebuffer(plan.boundary_framebuffer);
+    gfx->SetPipeline(plan.boundary_pipeline);
+    gfx->DrawIndexed(base_index, num_indices, base_vertex);
+    u64 mask_invalid = ~u64{0}, nonfinite = ~u64{0};
+    float depth_min = std::numeric_limits<float>::quiet_NaN();
+    float depth_max = depth_min;
+    const bool proven = g_framebuffer_manager->CertifyTemporalBoundary(
+        g_framebuffer_manager->GetTemporalCaptureRect(), &mask_invalid, &depth_min, &depth_max,
+        &nonfinite, false);
+    bool frozen = false;
+    if (proven)
+    {
+      frozen = g_framebuffer_manager->FreezeWorldBeforeOverlay() &&
+               g_framebuffer_manager->ActivateTemporalOverlay();
+      if (!frozen)
+        g_framebuffer_manager->RejectTemporalSplit();
+    }
+    INFO_LOG_FMT(VIDEO, "Temporal boundary: content={} proven={} mask_invalid={} depth_min={} "
+                       "depth_max={} nonfinite={} world_frozen={}",
+                 ModernGekkoTemporal::GetState().content_id, proven, mask_invalid, depth_min,
+                 depth_max, nonfinite, frozen);
+    restore_native();
+    if (proven)
+      return;
+    // Proof utilities may upload utility vertices and uniforms; restore committed
+    // geometry bindings and upload fresh unchanged GX constants before replay.
+  }
   vertex_shader_manager.SetTemporalRasterJitter(true);
   UploadUniforms();
   if (plan.alpha_gate_pipeline)
@@ -1292,6 +1423,18 @@ void VertexManagerBase::ReplayTemporalDraw(const TemporalDrawPlan& plan, u32 bas
     gfx->SetPipeline(plan.metadata_pipeline);
     gfx->DrawIndexed(base_index, num_indices, base_vertex);
   }
+  if (plan.alpha_pipeline)
+  {
+    gfx->SetFramebuffer(plan.metadata_framebuffer);
+    gfx->SetPipeline(plan.alpha_pipeline);
+    gfx->DrawIndexed(base_index, num_indices, base_vertex);
+  }
+  if (plan.depth_pipeline)
+  {
+    gfx->SetFramebuffer(plan.depth_framebuffer);
+    gfx->SetPipeline(plan.depth_pipeline);
+    gfx->DrawIndexed(base_index, num_indices, base_vertex);
+  }
   gfx->SetFramebuffer(plan.color_framebuffer);
   gfx->SetPipeline(plan.color_pipeline);
   gfx->DrawIndexed(base_index, num_indices, base_vertex);
@@ -1300,9 +1443,7 @@ void VertexManagerBase::ReplayTemporalDraw(const TemporalDrawPlan& plan, u32 bas
     INFO_LOG_FMT(VIDEO, "Temporal mirror: paired draws={} metadata={} known={} overwrite={}",
                  paired_draws, plan.metadata_pipeline != nullptr, plan.known, plan.overwrite);
   // Replay bypasses DrawCurrentBatch/OnDraw, bounding-box flushes, statistics, and queries.
-  vertex_shader_manager.SetTemporalRasterJitter(false);
-  UploadUniforms();
-  gfx->RestoreTemporalRasterState(native_state);
+  restore_native();
 }
 #endif
 

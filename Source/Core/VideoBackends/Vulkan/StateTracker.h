@@ -30,6 +30,32 @@ public:
   static bool CreateInstance();
   static void DestroyInstance();
 
+  struct GraphicsBindings
+  {
+    VkBuffer vertex_buffer, index_buffer;
+    VkDeviceSize vertex_offset, index_offset;
+    VkIndexType index_type;
+    std::array<VkDescriptorBufferInfo, NUM_UBO_DESCRIPTOR_SET_BINDINGS> ubos;
+    std::array<u32, NUM_UBO_DESCRIPTOR_SET_BINDINGS> ubo_offsets;
+    std::array<VkDescriptorImageInfo, VideoCommon::MAX_PIXEL_SHADER_SAMPLERS> samplers;
+    VkDescriptorBufferInfo ssbo, vertex_ssbo;
+  };
+  GraphicsBindings SaveGraphicsBindings() const
+  {
+    return {m_vertex_buffer, m_index_buffer, m_vertex_buffer_offset, m_index_buffer_offset,
+            m_index_type, m_bindings.gx_ubo_bindings, m_bindings.gx_ubo_offsets,
+            m_bindings.samplers, m_bindings.ssbo, m_bindings.gx_uber_vertex_ssbo};
+  }
+  void RestoreGraphicsBindings(const GraphicsBindings& state)
+  {
+    m_vertex_buffer = state.vertex_buffer; m_index_buffer = state.index_buffer;
+    m_vertex_buffer_offset = state.vertex_offset; m_index_buffer_offset = state.index_offset;
+    m_index_type = state.index_type; m_bindings.gx_ubo_bindings = state.ubos;
+    m_bindings.gx_ubo_offsets = state.ubo_offsets; m_bindings.samplers = state.samplers;
+    m_bindings.ssbo = state.ssbo; m_bindings.gx_uber_vertex_ssbo = state.vertex_ssbo;
+    InvalidateCachedState();
+  }
+
   VKFramebuffer* GetFramebuffer() const { return m_framebuffer; }
   const VKPipeline* GetPipeline() const { return m_pipeline; }
   const VkViewport& GetViewport() const { return m_viewport; }

@@ -594,7 +594,7 @@ VKGfx::TemporalRasterState VKGfx::SaveTemporalRasterState() const
 {
   const auto* tracker = StateTracker::GetInstance();
   return {tracker->GetFramebuffer(), tracker->GetPipeline(), tracker->GetViewport(),
-          tracker->GetScissor()};
+          tracker->GetScissor(), tracker->SaveGraphicsBindings()};
 }
 
 void VKGfx::RestoreTemporalRasterState(const TemporalRasterState& state)
@@ -603,6 +603,7 @@ void VKGfx::RestoreTemporalRasterState(const TemporalRasterState& state)
   tracker->EndRenderPass();
   if (state.framebuffer)
     SetFramebuffer(state.framebuffer);
+  tracker->RestoreGraphicsBindings(state.bindings);
   tracker->SetPipeline(state.pipeline);
   tracker->SetViewport(state.viewport);
   tracker->SetScissor(state.scissor);

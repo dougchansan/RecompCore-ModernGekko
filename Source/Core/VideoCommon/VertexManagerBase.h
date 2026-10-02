@@ -235,8 +235,15 @@ private:
     const AbstractPipeline* color_pipeline = nullptr;
     const AbstractPipeline* metadata_pipeline = nullptr;
     const AbstractPipeline* alpha_gate_pipeline = nullptr;
+    const AbstractPipeline* alpha_pipeline = nullptr;
+    const AbstractPipeline* depth_pipeline = nullptr;
+    const AbstractPipeline* boundary_pipeline = nullptr;
+    const AbstractPipeline* overlay_pipeline = nullptr;
     AbstractFramebuffer* color_framebuffer = nullptr;
     AbstractFramebuffer* metadata_framebuffer = nullptr;
+    AbstractFramebuffer* depth_framebuffer = nullptr;
+    AbstractFramebuffer* boundary_framebuffer = nullptr;
+    AbstractFramebuffer* overlay_framebuffer = nullptr;
     bool known = false;
     bool overwrite = false;
   };
