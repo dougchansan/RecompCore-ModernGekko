@@ -122,10 +122,14 @@ struct fmt::formatter<EFBCopyParams>
 // Immutable per-copy snapshot; presentation retains this shared owner through GPU completion.
 struct ModernGekkoTemporalPacket
 {
-  std::unique_ptr<AbstractTexture> color;
-  std::unique_ptr<AbstractTexture> depth;
-  std::unique_ptr<AbstractTexture> coverage;
+  std::shared_ptr<AbstractTexture> color;
+  std::shared_ptr<AbstractTexture> depth;
+  std::shared_ptr<AbstractTexture> coverage;
+  std::shared_ptr<AbstractTexture> depth_coverage;
+  std::unique_ptr<AbstractTexture> overlay;
+  bool world_frozen = false;
   u64 invalid_pixels = UINT64_MAX;
+  u64 invalid_depth_pixels = UINT64_MAX;
   MathUtil::Rectangle<int> efb_rect;
   u64 content_id = 0;
   float jitter_x = 0.0f;

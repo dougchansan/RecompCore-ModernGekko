@@ -161,7 +161,7 @@ void TextureCacheBase::ReportTemporalSnapshotMemory()
     if (!packet->color || !packet->depth || !seen.insert(packet.get()).second)
       continue;
     ++count;
-    for (const auto* texture : {packet->color.get(), packet->depth.get(), packet->coverage.get()})
+    for (const auto* texture : {packet->color.get(), packet->depth.get(), packet->coverage.get(), packet->depth_coverage.get(), packet->overlay.get()})
     {
       if (!texture)
         continue;
@@ -2521,38 +2521,73 @@ void TextureCacheBase::CopyRenderTargetToTexture(
         }
         // Retire before allocation; the local shared owner protects a reused packet.
         RetireTemporalPackets(MAX_TEMPORAL_PACKETS - 1);
-        const bool captured = duplicate_temporal_content ||
-                              (mapping && g_framebuffer_manager->CaptureMirrorPacket(
-                                              srcRect, &packet->color, &packet->depth,
-                                              &packet->coverage));
-        const bool certified = duplicate_temporal_content ||
-            (captured && g_framebuffer_manager->CertifyTemporalCoverage(
-                             packet->coverage.get(), &packet->invalid_pixels));
+        bool captured = duplicate_temporal_content;
+        bool certified = duplicate_temporal_content;
+        const auto frozen = g_framebuffer_manager->GetFrozenTemporalWorld();
+        if (!duplicate_temporal_content && mapping && frozen && frozen->native_rect == srcRect &&
+            g_framebuffer_manager->IsTemporalOverlayActive())
+        {
+          // Aliasing owners keep the immutable frozen resources alive until GPU completion.
+          packet->color = std::shared_ptr<AbstractTexture>(frozen, frozen->color.get());
+          packet->depth = std::shared_ptr<AbstractTexture>(frozen, frozen->depth.get());
+          packet->coverage = std::shared_ptr<AbstractTexture>(frozen, frozen->color_coverage.get());
+          packet->depth_coverage = std::shared_ptr<AbstractTexture>(frozen, frozen->depth_coverage.get());
+          packet->content_id = frozen->content_id;
+          packet->jitter_x = frozen->jitter_x;
+          packet->jitter_y = frozen->jitter_y;
+          packet->depth_convention_known = frozen->depth_convention_known;
+          packet->depth_inverted = frozen->depth_inverted;
+          packet->invalid_pixels = frozen->color_invalid;
+          packet->invalid_depth_pixels = frozen->depth_invalid;
+          packet->world_frozen = true;
+          captured = g_framebuffer_manager->SnapshotTemporalOverlay(&packet->overlay);
+          certified = captured && frozen->color_invalid == 0 && frozen->depth_invalid == 0;
+        }
+        else if (!duplicate_temporal_content && mapping)
+        {
+          std::unique_ptr<AbstractTexture> color, depth, coverage, depth_coverage;
+          captured = g_framebuffer_manager->CaptureMirrorPacket(srcRect, &color, &depth,
+                                                                &coverage, &depth_coverage);
+          packet->color = std::move(color);
+          packet->depth = std::move(depth);
+          packet->coverage = std::move(coverage);
+          packet->depth_coverage = std::move(depth_coverage);
+          certified = captured && g_framebuffer_manager->CertifyTemporalCoverage(
+              packet->coverage.get(), packet->depth_coverage.get(), &packet->invalid_pixels,
+              &packet->invalid_depth_pixels);
+        }
         const auto state = ModernGekkoTemporal::GetState();
         if (!duplicate_temporal_content)
         {
-          packet->content_id = state.content_id;
-          packet->jitter_x = state.jitter_x;
-          packet->jitter_y = state.jitter_y;
+          if (!packet->world_frozen)
+          {
+            packet->content_id = state.content_id;
+            packet->jitter_x = state.jitter_x;
+            packet->jitter_y = state.jitter_y;
+          }
           const bool scissor_coverage = srcRect.left >= state.scissor_left &&
                                         srcRect.top >= state.scissor_top &&
                                         srcRect.right <= state.scissor_right &&
                                         srcRect.bottom <= state.scissor_bottom;
           const bool clear_coverage = ModernGekkoTemporal::HasClearCoverageForRect(
               state, srcRect.left, srcRect.top, srcRect.right, srcRect.bottom);
-          packet->depth_convention_known = state.depth_convention_known;
-          packet->depth_inverted = state.depth_inverted;
+          if (!packet->world_frozen)
+          {
+            packet->depth_convention_known = state.depth_convention_known;
+            packet->depth_inverted = state.depth_inverted;
+          }
           // Native RTT producers stay unjittered. Final mirrored pixels, not historical
           // pass-wide viewport/copy flags, now provide the stronger coverage proof.
           packet->valid = captured && certified && packet->invalid_pixels == 0 &&
-                          state.depth_convention_known &&
-                          (state.reason_bits & static_cast<u32>(
-                              ModernGekkoTemporal::CoverageReason::MixedDepthConvention)) == 0;
+                          packet->invalid_depth_pixels == 0 && packet->depth_convention_known &&
+                          (packet->world_frozen || (state.reason_bits & static_cast<u32>(
+                              ModernGekkoTemporal::CoverageReason::MixedDepthConvention)) == 0);
           packet->uniform_jitter_coverage = packet->valid;
           packet->history_reset = state.content_id <= 1;
           packet->reason = !mapping ? "unclassified XFB filter, scale, gamma or modification" :
                            !captured ? "matched EFB snapshot allocation or bounds failure" :
-                           packet->invalid_pixels != UINT64_MAX && packet->invalid_pixels != 0 ? "uncertified final mirrored pixels" :
+                           packet->invalid_pixels != UINT64_MAX && packet->invalid_pixels != 0 ? "uncertified final mirrored color pixels" :
+                           packet->invalid_depth_pixels != UINT64_MAX && packet->invalid_depth_pixels != 0 ? "uncertified final mirrored depth pixels" :
                            !certified ? "GPU pixel coverage certification unavailable" :
                            !state.depth_convention_known ||
                                (state.reason_bits & static_cast<u32>(ModernGekkoTemporal::CoverageReason::MixedDepthConvention)) != 0 ?

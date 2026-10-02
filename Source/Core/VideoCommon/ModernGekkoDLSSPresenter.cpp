@@ -44,6 +44,21 @@ void main() {
   imageStore(depth_target,ivec3(p,0),vec4(texelFetch(depth_source,ivec3(q,0),0).r));
 }
 )";
+constexpr const char* OVERLAY_COMPOSITE = R"(
+layout(local_size_x=8, local_size_y=8, local_size_z=1) in;
+UBO_BINDING(std140, 1) uniform Params { vec4 extent; };
+SAMPLER_BINDING(0) uniform sampler2DArray world_source;
+SAMPLER_BINDING(1) uniform sampler2DArray overlay_source;
+IMAGE_BINDING(rgba16f, 0) uniform writeonly image2DArray composed_target;
+void main() {
+  ivec2 p=ivec2(gl_GlobalInvocationID.xy);
+  if(any(greaterThanEqual(p,ivec2(extent.xy)))) return;
+  vec2 uv=(vec2(p)+0.5)/extent.xy;
+  vec3 world=textureLod(world_source,vec3(uv,0),0).rgb;
+  vec4 overlay=textureLod(overlay_source,vec3(uv,0),0);
+  imageStore(composed_target,ivec3(p,0),vec4(overlay.rgb+world*(1.0-overlay.a),1.0));
+}
+)";
 constexpr const char* CUT_SAMPLE = R"(
 layout(local_size_x=8, local_size_y=8, local_size_z=1) in;
 SAMPLER_BINDING(0) uniform sampler2DArray color_source;
@@ -102,9 +117,9 @@ NGX::Image Image(const AbstractTexture* texture)
 struct ModernGekkoDLSSPresenter::State
 {
   std::unique_ptr<ModernGekkoOpticalFlow> flow;
-  std::unique_ptr<AbstractShader> resample,cut_shader;
+  std::unique_ptr<AbstractShader> resample,cut_shader,overlay_shader;
   std::array<std::unique_ptr<AbstractTexture>,2> color,depth;
-  std::unique_ptr<AbstractTexture> output,cut_texture;
+  std::unique_ptr<AbstractTexture> output,cut_texture,composed;
   std::unique_ptr<AbstractStagingTexture> cut_readback;
   std::array<u8,16*16*4> previous_cut{};
   std::array<float,2> previous_jitter{},input_per_native{};
@@ -123,7 +138,7 @@ struct ModernGekkoDLSSPresenter::State
     if(g_gfx && (owns_feature || output)) g_gfx->WaitForGPUIdle();
     if(owns_feature) NGX::DestroyFeature();
     owns_feature=false;
-    flow.reset();color={};depth={};output.reset();cut_texture.reset();cut_readback.reset();
+    flow.reset();color={};depth={};output.reset();cut_texture.reset();cut_readback.reset();composed.reset();
     input_width=input_height=output_width=output_height=0;
     ResetHistory();
   }
@@ -191,6 +206,31 @@ struct ModernGekkoDLSSPresenter::State
   {
     Barrier(texture,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_ACCESS_SHADER_READ_BIT);
     g_gfx->SetTexture(slot,texture);g_gfx->SetSamplerState(slot,RenderState::GetLinearSamplerState());
+  }
+  const AbstractTexture* Presentation(const ModernGekkoTemporalPacket& packet)
+  {
+    if (!packet.overlay)
+      return output.get();
+    if (!packet.world_frozen || !output || !packet.overlay->GetWidth() || !packet.overlay->GetHeight())
+      return nullptr;
+    if (!overlay_shader)
+      overlay_shader = g_gfx->CreateShaderFromSource(ShaderStage::Compute, OVERLAY_COMPOSITE,
+                                                    nullptr, "DLSS world and guest overlay");
+    if (!composed)
+      composed = g_gfx->CreateTexture(TextureConfig(output_width, output_height, 1, 1, 1,
+          AbstractTextureFormat::RGBA16F, AbstractTextureFlag_ComputeImage,
+          AbstractTextureType::Texture_2DArray), "DLSS world plus guest overlay");
+    if (!overlay_shader || !composed)
+      return nullptr;
+    Bind(0, output.get());
+    Bind(1, packet.overlay.get());
+    const std::array<float,4> extent = {float(output_width),float(output_height),0,0};
+    g_vertex_manager->UploadUtilityUniforms(extent.data(), sizeof(extent));
+    g_gfx->SetComputeImageTexture(0, composed.get(), false, true);
+    g_gfx->DispatchComputeShader(overlay_shader.get(),8,8,1,(output_width+7)/8,(output_height+7)/8,1);
+    Barrier(composed.get(),VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_ACCESS_SHADER_READ_BIT);
+    Vulkan::StateTracker::GetInstance()->InvalidateCachedState();
+    return composed.get();
   }
   bool IsCut(const AbstractTexture* texture)
   {
@@ -298,7 +338,7 @@ const AbstractTexture* ModernGekkoDLSSPresenter::Render(const RcTcacheEntry& ent
     return fallback("SDK Quality configuration or allocation failed");
   const bool same_crop=s.source_rect==source_rect;
   if(packet->content_id==s.content_id && same_crop && s.attempted)
-    return s.output_valid ? s.output.get() : nullptr;
+    return s.output_valid ? s.Presentation(*packet) : nullptr;
   if(!same_crop) s.ResetHistory();
   s.source_rect=source_rect;s.content_id=packet->content_id;s.attempted=true;
   auto* color=s.color[s.current].get();auto* depth=s.depth[s.current].get();
@@ -336,6 +376,7 @@ const AbstractTexture* ModernGekkoDLSSPresenter::Render(const RcTcacheEntry& ent
   s.history=s.output_valid;s.current=1-s.current;++s.evaluations;
   if(!s.output_valid) return fallback("SDK evaluation failed");
   s.consecutive_rejections=0;
-  return s.output.get();
+  const auto* presentation = s.Presentation(*packet);
+  return presentation ? presentation : fallback("guest overlay composition unavailable");
 }
 }
