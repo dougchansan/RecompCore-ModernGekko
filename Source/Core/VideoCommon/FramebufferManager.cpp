@@ -6,6 +6,7 @@
 
 #include <fmt/format.h>
 #include <memory>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <string_view>
@@ -31,6 +32,33 @@
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/VideoCommon.h"
 #include "VideoCommon/VideoConfig.h"
+#ifdef HAS_VULKAN
+#include "VideoBackends/Vulkan/ModernGekkoTiming.h"
+
+namespace
+{
+class ScopedTemporalCPUTime
+{
+public:
+  explicit ScopedTemporalCPUTime(const char* scope)
+      : m_scope(scope), m_enabled(ModernGekkoTiming::Enabled()),
+        m_start(m_enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{})
+  {
+  }
+  ~ScopedTemporalCPUTime()
+  {
+    if (m_enabled)
+      ModernGekkoTiming::CPU(m_scope, std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - m_start).count());
+  }
+private:
+  const char* m_scope;
+  bool m_enabled;
+  std::chrono::steady_clock::time_point m_start;
+};
+}
+#endif
+
 
 // Maximum number of pixels poked in one batch * 6
 constexpr size_t MAX_POKE_VERTICES = 32768;
@@ -606,6 +634,9 @@ bool FramebufferManager::CertifyTemporalBoundary(const MathUtil::Rectangle<int>&
                                                  float* depth_max, u64* nonfinite,
                                                  bool flush_vertex)
 {
+#ifdef HAS_VULKAN
+  const ScopedTemporalCPUTime timing("boundary_cpu");
+#endif
   m_temporal_boundary_proven = false;
   if (!mask_invalid || !depth_min || !depth_max || !nonfinite)
     return false;
@@ -743,6 +774,9 @@ bool FramebufferManager::CertifyTemporalBoundary(const MathUtil::Rectangle<int>&
 }
 bool FramebufferManager::FreezeWorldBeforeOverlay()
 {
+#ifdef HAS_VULKAN
+  const ScopedTemporalCPUTime timing("freeze_cpu");
+#endif
   const auto state=ModernGekkoTemporal::GetState();
   const auto fail = [&](std::string_view reason, u64 color_invalid, u64 depth_invalid) {
     static u64 failures = 0;
@@ -802,6 +836,9 @@ bool FramebufferManager::ActivateTemporalOverlay()
 }
 bool FramebufferManager::SnapshotTemporalOverlay(std::unique_ptr<AbstractTexture>* overlay)
 {
+#ifdef HAS_VULKAN
+  const ScopedTemporalCPUTime timing("overlay_snapshot_cpu");
+#endif
   if(!overlay || !m_temporal_overlay_active || !m_temporal_frozen_world) return false;
   const auto rect=g_gfx->ConvertFramebufferRectangle(ConvertEFBRectangle(m_temporal_capture_rect),
                                                      m_temporal_overlay_framebuffer.get());
