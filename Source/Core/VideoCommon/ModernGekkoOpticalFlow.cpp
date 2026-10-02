@@ -4,7 +4,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <string>
+#include "Common/Logging/Log.h"
 #include "VideoCommon/AbstractGfx.h"
 #include "VideoCommon/AbstractShader.h"
 #include "VideoCommon/AbstractTexture.h"
@@ -42,8 +45,35 @@ IMAGE_BINDING(FLOW_OUTPUT_FORMAT, 0) uniform writeonly image2DArray dst0;
 vec3 sampleColor(sampler2DArray s, vec2 p, vec2 extent) {
   return textureLod(s, vec3((p+0.5)/extent, 0.0), 0.0).rgb;
 }
+vec3 estimateCurrent(vec2 p) {
+#ifdef FLOW_HALF
+  if(control.y>0.5 && limits.z>0.0)
+    return sampleColor(src4,(p+0.5)*limits.zw/sizes.xy-0.5,limits.zw);
+#endif
+  return sampleColor(src0,p,sizes.xy);
+}
+vec3 estimatePrevious(vec2 p) {
+#ifdef FLOW_HALF
+  if(control.y>0.5 && limits.z>0.0)
+    return sampleColor(src5,(p+0.5)*limits.zw/sizes.xy-0.5,limits.zw);
+#endif
+  return sampleColor(src1,p,sizes.xy);
+}
 float patchError(vec2 p, vec2 flow) {
   float e=0.0;
+#ifdef FLOW_HALF
+  if(control.y>0.5 && limits.z>0.0) {
+    vec2 full=(p+0.5)*limits.zw/sizes.xy-0.5;
+    vec2 displacement=flow*limits.zw/sizes.xy;
+    for(int y=-1;y<=1;++y) for(int x=-1;x<=1;++x) {
+      vec2 offset=vec2(x,y);
+      vec3 d=sampleColor(src4,full+offset,limits.zw)-
+             sampleColor(src5,full+offset+displacement,limits.zw);
+      e+=dot(d,d)/27.0;
+    }
+    return e;
+  }
+#endif
   for(int y=-1;y<=1;++y) for(int x=-1;x<=1;++x) {
     vec2 offset=vec2(x,y);
     vec3 d=sampleColor(src0,p+offset,sizes.xy)-sampleColor(src1,p+offset+flow,sizes.xy);
@@ -66,7 +96,25 @@ void main() {
     for(int y=-2;y<=2;++y) for(int x=-2;x<=2;++x)
       c+=sampleColor(src0,p+vec2(x,y),sizes.zw)*weights[x+2]*weights[y+2]/256.0;
   }
-  imageStore(dst0,ivec3(ip,0),vec4(c,1.0));
+  float footprint_valid=1.0;
+#ifdef FLOW_HALF
+  // The Gaussian coarse-color footprint must not bridge a normalized-depth edge.
+  // Carry this binary validity in otherwise unused pyramid alpha.
+  if(control.z>0.5 && control.w>0.5) {
+    ivec2 base=ivec2(floor(p)), maximum=ivec2(sizes.zw)-1;
+    float low=1e10, high=-1e10;
+    // Bilinear Gaussian samples span up to 6x6 original texels, not just their
+    // nearest 5x5 centers. Include every nonzero contributing footprint.
+    for(int y=-2;y<=3;++y) for(int x=-2;x<=3;++x) {
+      if((x==3 && fract(p.x)==0.0) || (y==3 && fract(p.y)==0.0)) continue;
+      float d=texelFetch(src4,ivec3(clamp(base+ivec2(x,y),ivec2(0),maximum),0),0).r;
+      if(isnan(d) || isinf(d)) footprint_valid=0.0;
+      low=min(low,d); high=max(high,d);
+    }
+    footprint_valid*=high-low<=limits.x ? 1.0 : 0.0;
+  }
+#endif
+  imageStore(dst0,ivec3(ip,0),vec4(c,footprint_valid));
 }
 )";
 constexpr const char* ESTIMATE = R"(
@@ -74,6 +122,12 @@ void main() {
   ivec2 ip=ivec2(gl_GlobalInvocationID.xy);
   if(any(greaterThanEqual(ip,ivec2(sizes.xy)))) return;
   vec2 p=vec2(ip), base=vec2(0.0);
+  vec2 search_step=vec2(1.0);
+#ifdef FLOW_HALF
+  // Finest half-grid cells still search one full-resolution pixel per candidate,
+  // so true integer correspondence is not hidden between two coarse candidates.
+  if(control.y>0.5 && limits.z>0.0) search_step=sizes.xy/limits.zw;
+#endif
   if(control.x>0.5) {
     vec2 parent=(p+0.5)*sizes.zw/sizes.xy-0.5;
     vec4 prior=textureLod(src2,vec3((parent+0.5)/sizes.zw,0.0),0.0);
@@ -89,7 +143,7 @@ void main() {
     int radius=seed==0 ? 2 : 4;
     for(int y=-4;y<=4;++y) for(int x=-4;x<=4;++x) {
       if(abs(x)>radius || abs(y)>radius) continue;
-      vec2 candidate=origin+vec2(x,y);
+      vec2 candidate=origin+vec2(x,y)*search_step;
       if(!inside(p+candidate)) continue;
       float e=patchError(p,candidate);
       if(e+0.000001*dot(candidate,candidate)<best+0.000001*dot(flow,flow))
@@ -99,11 +153,11 @@ void main() {
   // Quadratic minimum at each axis gives subpixel correspondence from bilinear samples.
   vec2 sub=vec2(0.0);
   for(int axis=0;axis<2;++axis) {
-    vec2 step=axis==0 ? vec2(1.0,0.0) : vec2(0.0,1.0);
+    vec2 step=axis==0 ? vec2(search_step.x,0.0) : vec2(0.0,search_step.y);
     if(!inside(p+flow-step) || !inside(p+flow+step)) continue;
     float a=patchError(p,flow-step), b=patchError(p,flow+step);
     float curvature=a+b-2.0*best;
-    if(curvature>1e-7) sub[axis]=clamp(0.5*(a-b)/curvature,-0.5,0.5);
+    if(curvature>1e-7) sub[axis]=clamp(0.5*(a-b)/curvature,-0.5,0.5)*search_step[axis];
   }
   flow+=sub;
   // Joint least-squares refinement accounts for coupled x/y gradients; the axis parabola
@@ -111,12 +165,20 @@ void main() {
   for(int iteration=0;iteration<3;++iteration) {
     float hxx=0.0,hxy=0.0,hyy=0.0,bx=0.0,by=0.0;
     for(int y=-1;y<=1;++y) for(int x=-1;x<=1;++x) {
-      vec2 at=p+vec2(x,y)+flow;
-      vec3 d=sampleColor(src1,at,sizes.xy)-sampleColor(src0,p+vec2(x,y),sizes.xy);
-      vec3 gx=(sampleColor(src1,at+vec2(0.25,0.0),sizes.xy)-
-               sampleColor(src1,at-vec2(0.25,0.0),sizes.xy))*2.0;
-      vec3 gy=(sampleColor(src1,at+vec2(0.0,0.25),sizes.xy)-
-               sampleColor(src1,at-vec2(0.0,0.25),sizes.xy))*2.0;
+      vec2 offset=vec2(x,y), gradient_step=vec2(0.25), gradient_scale=vec2(2.0);
+#ifdef FLOW_HALF
+      if(control.y>0.5 && limits.z>0.0) {
+        offset*=sizes.xy/limits.zw;
+        gradient_step*=sizes.xy/limits.zw;
+        gradient_scale*=limits.zw/sizes.xy;
+      }
+#endif
+      vec2 at=p+offset+flow;
+      vec3 d=estimatePrevious(at)-estimateCurrent(p+offset);
+      vec3 gx=(estimatePrevious(at+vec2(gradient_step.x,0.0))-
+               estimatePrevious(at-vec2(gradient_step.x,0.0)))*gradient_scale.x;
+      vec3 gy=(estimatePrevious(at+vec2(0.0,gradient_step.y))-
+               estimatePrevious(at-vec2(0.0,gradient_step.y)))*gradient_scale.y;
       hxx+=dot(gx,gx);hxy+=dot(gx,gy);hyy+=dot(gy,gy);
       bx+=dot(gx,d);by+=dot(gy,d);
     }
@@ -130,8 +192,8 @@ void main() {
   float error=patchError(p,flow), alternative=1e10;
   // Separated alternatives reject repeated texture; adjacent samples are the same minimum.
   for(int y=-2;y<=2;++y) for(int x=-2;x<=2;++x) {
-    if(x*x+y*y<4 || !inside(p+flow+vec2(x,y))) continue;
-    alternative=min(alternative,patchError(p,flow+vec2(x,y)));
+    if(x*x+y*y<4 || !inside(p+flow+vec2(x,y)*search_step)) continue;
+    alternative=min(alternative,patchError(p,flow+vec2(x,y)*search_step));
   }
   float unique=clamp((alternative-error)/max(alternative,0.0001),0.0,1.0);
   float mean=0.0, square=0.0;
@@ -140,6 +202,16 @@ void main() {
     mean+=l/9.0; square+=l*l/9.0;
   }
   unique*=smoothstep(0.00005,0.0005,max(0.0,square-mean*mean));
+#ifdef FLOW_HALF
+  if(control.y>0.5) {
+    float valid=texelFetch(src0,ivec3(ip,0),0).a;
+    ivec2 base=ivec2(floor(p+flow)), maximum=ivec2(sizes.xy)-1;
+    // Never interpolate a valid footprint across an invalid neighboring footprint.
+    for(int y=0;y<=1;++y) for(int x=0;x<=1;++x)
+      valid=min(valid,texelFetch(src1,ivec3(clamp(base+ivec2(x,y),ivec2(0),maximum),0),0).a);
+    unique*=valid;
+  }
+#endif
   imageStore(dst0,ivec3(ip,0),vec4(flow,error,unique));
 }
 )";
@@ -147,16 +219,78 @@ constexpr const char* CONFIDENCE = R"(
 IMAGE_BINDING(rgba8, 1) uniform writeonly image2DArray dst1;
 SAMPLER_BINDING(6) uniform sampler2DArray mask0;
 SAMPLER_BINDING(7) uniform sampler2DArray mask1;
+#ifdef FLOW_HALF
+float nearestDepth(sampler2DArray depth,vec2 p) {
+  ivec2 at=clamp(ivec2(floor(p+0.5)),ivec2(0),ivec2(sizes.xy)-1);
+  return texelFetch(depth,ivec3(at,0),0).r;
+}
+vec4 gatherFlow(sampler2DArray field,sampler2DArray source_color,sampler2DArray target_color,
+                sampler2DArray source_depth,sampler2DArray target_depth,
+                sampler2DArray source_mask,vec2 p,out float support) {
+  vec2 coarse=(p+0.5)*sizes.zw/sizes.xy-0.5;
+  ivec2 base=ivec2(floor(coarse)), maximum=ivec2(sizes.zw)-1;
+  vec2 fraction=fract(coarse), sum=vec2(0.0);
+  float weights=0.0, worst_error=0.0, minimum_quality=1.0;
+  support=0.0;
+  vec3 color=sampleColor(source_color,p,sizes.xy);
+  for(int y=0;y<=1;++y) for(int x=0;x<=1;++x) {
+    ivec2 tap=clamp(base+ivec2(x,y),ivec2(0),maximum);
+    float geometric=(x==0 ? 1.0-fraction.x : fraction.x)*
+                    (y==0 ? 1.0-fraction.y : fraction.y);
+    if(geometric<0.00001) continue;
+    vec4 raw=texelFetch(field,ivec3(tap,0),0);
+    if(raw.w<0.05) continue;
+    vec2 center=(vec2(tap)+0.5)*sizes.xy/sizes.zw-0.5;
+    vec2 flow=raw.xy*sizes.xy/sizes.zw; // Actual anisotropic odd-size ratio.
+    if(!inside(center+flow)) continue;
+    if(control.z>0.5) {
+      float at=nearestDepth(source_depth,p), origin=nearestDepth(source_depth,center);
+      float target=nearestDepth(target_depth,center+flow);
+      vec3 depths=vec3(at,origin,target);
+      if(any(isnan(depths)) || any(isinf(depths)) ||
+         abs(at-origin)>limits.x || abs(origin-target)>limits.x) continue;
+    }
+    if(control.w>0.5) {
+      float at=sampleColor(source_mask,p,sizes.xy).r;
+      float origin=sampleColor(source_mask,center,sizes.xy).r;
+      if((origin>0.1 && origin<0.9) || step(0.9,at)!=step(0.9,origin)) continue;
+    }
+    vec3 difference=color-sampleColor(source_color,center,sizes.xy);
+    vec3 mapped_difference=sampleColor(source_color,center,sizes.xy)-
+                           sampleColor(target_color,center+flow,sizes.xy);
+    float weight=geometric*exp(-dot(difference,difference)/0.04)*
+                          exp(-dot(mapped_difference,mapped_difference)/0.01);
+    if(weight<0.00001) continue;
+    sum+=flow*weight; weights+=weight; support+=geometric;
+    worst_error=max(worst_error,raw.z);
+    minimum_quality=min(minimum_quality,raw.w);
+  }
+  if(weights<=0.00001) { support=0.0; return vec4(0.0,0.0,1.0,0.0); }
+  return vec4(sum/weights,worst_error,minimum_quality);
+}
+#endif
 void main() {
   ivec2 ip=ivec2(gl_GlobalInvocationID.xy);
   if(any(greaterThanEqual(ip,ivec2(sizes.xy)))) return;
   vec2 p=vec2(ip);
+#ifdef FLOW_HALF
+  float forward_support, backward_support;
+  vec4 forward=gatherFlow(src2,src0,src1,src4,src5,mask0,p,forward_support);
+  vec2 flow=forward.xy, q=p+flow;
+  vec4 backward=gatherFlow(src3,src1,src0,src5,src4,mask1,q,backward_support);
+  // Coarse residuals cannot certify thin full-resolution occluders or aliased texture.
+  forward.z=max(forward.z,patchError(p,flow));
+#else
   vec4 forward=textureLod(src2,vec3((p+0.5)/sizes.xy,0.0),0.0);
   vec2 flow=forward.xy, q=p+flow;
   vec4 backward=textureLod(src3,vec3((q+0.5)/sizes.xy,0.0),0.0);
+#endif
   float agreement=length(flow+backward.xy);
   float confidence=(1.0-smoothstep(0.5,1.5,agreement)) *
     (1.0-smoothstep(0.001,0.012,forward.z)) * smoothstep(0.05,0.3,forward.w);
+#ifdef FLOW_HALF
+  confidence*=smoothstep(0.15,0.5,min(forward_support,backward_support));
+#endif
   float mean=0.0, square=0.0;
   for(int y=-1;y<=1;++y) for(int x=-1;x<=1;++x) {
     float l=dot(sampleColor(src0,p+vec2(x,y),sizes.xy),vec3(0.2126,0.7152,0.0722));
@@ -200,15 +334,24 @@ ModernGekkoOpticalFlow::~ModernGekkoOpticalFlow() = default;
 
 bool ModernGekkoOpticalFlow::Initialize(u32 width, u32 height)
 {
+  const char* half_option=std::getenv("MODERNGEKKO_DLSS_FLOW_HALF");
+  const bool half=half_option && std::strcmp(half_option,"1")==0;
+  if(m_half_resolution!=half) {
+    m_downsample.reset(); m_estimate.reset(); m_confidence.reset();
+    m_width=0; m_height=0;
+  }
+  m_half_resolution=half;
+  const std::string variant=half ? "#define FLOW_HALF 1\n" : "";
+
   if(!m_downsample)
     m_downsample=g_gfx->CreateShaderFromSource(ShaderStage::Compute,
-      std::string(COMMON)+DOWNSAMPLE,nullptr,"ModernGekko optical flow downsample");
+      variant+COMMON+DOWNSAMPLE,nullptr,"ModernGekko optical flow downsample");
   if(!m_estimate)
     m_estimate=g_gfx->CreateShaderFromSource(ShaderStage::Compute,
-      std::string(COMMON)+ESTIMATE,nullptr,"ModernGekko optical flow estimate");
+      variant+COMMON+ESTIMATE,nullptr,"ModernGekko optical flow estimate");
   if(!m_confidence)
     m_confidence=g_gfx->CreateShaderFromSource(ShaderStage::Compute,
-      std::string("#define FLOW_OUTPUT_FORMAT rg16f\n")+COMMON+CONFIDENCE,nullptr,"ModernGekko optical flow confidence");
+      std::string("#define FLOW_OUTPUT_FORMAT rg16f\n")+variant+COMMON+CONFIDENCE,nullptr,"ModernGekko optical flow confidence");
   if(!m_downsample || !m_estimate || !m_confidence) return false;
   if(m_width==width && m_height==height && m_motion && m_bias) return true;
   auto allocate=[&](u32 w,u32 h,AbstractTextureFormat format,const char* name) {
@@ -218,8 +361,9 @@ bool ModernGekkoOpticalFlow::Initialize(u32 width, u32 height)
   m_width=0; m_height=0;
   for(size_t direction=0;direction<2;++direction)
     for(size_t level=0;level<LEVELS;++level) {
-      const u32 w=std::max(1u,(width+(1u<<level)-1)>>level);
-      const u32 h=std::max(1u,(height+(1u<<level)-1)>>level);
+      const size_t shift=level+(half ? 1 : 0);
+      const u32 w=std::max(1u,(width+(1u<<shift)-1)>>shift);
+      const u32 h=std::max(1u,(height+(1u<<shift)-1)>>shift);
       m_color[direction][level]=allocate(w,h,AbstractTextureFormat::RGBA16F,"Flow pyramid");
       m_flow[direction][level]=allocate(w,h,AbstractTextureFormat::RGBA16F,"Flow correspondence");
       if(!m_color[direction][level] || !m_flow[direction][level]) return false;
@@ -228,6 +372,9 @@ bool ModernGekkoOpticalFlow::Initialize(u32 width, u32 height)
   m_bias=allocate(width,height,AbstractTextureFormat::RGBA8,"Flow current color bias");
   if(!m_motion || !m_bias) return false;
   m_width=width; m_height=height;
+  if(half)
+    INFO_LOG_FMT(VIDEO, "ModernGekko flow: half grid input={}x{} finest={}x{} output={}x{}",
+                 width,height,m_color[0][0]->GetWidth(),m_color[0][0]->GetHeight(),width,height);
   return true;
 }
 
@@ -273,6 +420,9 @@ ModernGekkoOpticalFlow::Result ModernGekkoOpticalFlow::Run(const Inputs& in)
      !g_gfx || !g_vertex_manager || in.width<32 || in.height<32 ||
      !Matches(in.current_color,in.width,in.height)) return {};
   const bool history=in.history_valid && Matches(in.previous_color,in.width,in.height);
+  const bool depth=history && Matches(in.current_depth,in.width,in.height) &&
+                   Matches(in.previous_depth,in.width,in.height);
+
   if(!std::isfinite(in.depth_rejection_threshold) || in.depth_rejection_threshold<=0.0f)
     return {};
   for(float value:in.current_jitter) if(!std::isfinite(value)) return {};
@@ -289,6 +439,11 @@ ModernGekkoOpticalFlow::Result ModernGekkoOpticalFlow::Run(const Inputs& in)
       const auto& config=m_color[direction][level]->GetConfig();
       u.sizes={float(config.width),float(config.height),float(source->GetConfig().width),
                float(source->GetConfig().height)};
+      if(m_half_resolution) {
+        u.control={0.0f,0.0f,depth ? 1.0f : 0.0f,level==0 ? 1.0f : 0.0f};
+        u.limits[0]=in.depth_rejection_threshold;
+        BindSample(4,depth ? (direction ? in.previous_depth : in.current_depth) : source);
+      }
       g_vertex_manager->UploadUtilityUniforms(&u,sizeof(u));
       BindSample(0,source);
       g_gfx->SetComputeImageTexture(0,m_color[direction][level].get(),false,true);
@@ -306,6 +461,11 @@ ModernGekkoOpticalFlow::Result ModernGekkoOpticalFlow::Run(const Inputs& in)
                float(parent->GetConfig().height)};
       u.control[0]=level+1<LEVELS ? 1.0f : 0.0f;
       u.control[1]=level==0 ? 1.0f : 0.0f;
+      if(m_half_resolution) {
+        u.limits[2]=float(in.width); u.limits[3]=float(in.height);
+        BindSample(4,direction && history ? in.previous_color : in.current_color);
+        BindSample(5,!direction && history ? in.previous_color : in.current_color);
+      }
       g_vertex_manager->UploadUtilityUniforms(&u,sizeof(u));
       BindSample(0,m_color[direction][level].get());
       BindSample(1,m_color[1-direction][level].get());
@@ -315,17 +475,18 @@ ModernGekkoOpticalFlow::Result ModernGekkoOpticalFlow::Run(const Inputs& in)
       Dispatch(m_estimate.get(),config.width,config.height);
       ModernGekkoTiming::End(token);
     }
-  const bool depth=history && Matches(in.current_depth,in.width,in.height) &&
-                   Matches(in.previous_depth,in.width,in.height);
   const bool masks=history && Matches(in.current_jitter_mask,in.width,in.height) &&
                    Matches(in.previous_jitter_mask,in.width,in.height);
-  u.sizes={float(in.width),float(in.height),float(in.width),float(in.height)};
+  u.sizes={float(in.width),float(in.height),float(m_flow[0][0]->GetWidth()),
+           float(m_flow[0][0]->GetHeight())};
   u.control={0.0f,history ? 1.0f : 0.0f,depth ? 1.0f : 0.0f,masks ? 1.0f : 0.0f};
   u.jitter={in.current_jitter[0],in.current_jitter[1],in.previous_jitter[0],in.previous_jitter[1]};
   u.limits[0]=in.depth_rejection_threshold;
   u.limits[1]=in.uniform_jitter_coverage ? 1.0f : 0.0f;
+  u.limits[2]=u.limits[3]=0.0f;
   g_vertex_manager->UploadUtilityUniforms(&u,sizeof(u));
-  BindSample(0,m_color[0][0].get()); BindSample(1,m_color[1][0].get());
+  BindSample(0,m_half_resolution ? in.current_color : m_color[0][0].get());
+  BindSample(1,m_half_resolution ? (history ? in.previous_color : in.current_color) : m_color[1][0].get());
   BindSample(2,m_flow[0][0].get()); BindSample(3,m_flow[1][0].get());
   BindSample(4,depth ? in.current_depth : m_color[0][0].get());
   BindSample(5,depth ? in.previous_depth : m_color[1][0].get());

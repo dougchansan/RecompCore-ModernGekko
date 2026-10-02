@@ -14,6 +14,7 @@ namespace VideoCommon
 {
 // Experimental image correspondence, not geometry-derived motion. Inputs must be matched XFB
 // snapshots with identical crop/scale and one layer. History advances on new XFBs, not presents.
+// MODERNGEKKO_DLSS_FLOW_HALF=1 opts into a ceil-half estimation grid; outputs stay full sized.
 class ModernGekkoOpticalFlow
 {
 public:
@@ -42,7 +43,7 @@ public:
     // RGBA8: R=1-confidence (current-color bias), alpha=1. SDK format must be validated.
     const AbstractTexture* bias = nullptr;
     bool history_used = false;
-    // No CPU readback or GPU timestamps: callers must measure coverage/timing separately.
+    // No CPU readback. Optional timestamp profiling is nonblocking; coverage remains caller-owned.
   };
 
   ModernGekkoOpticalFlow();
@@ -63,5 +64,6 @@ private:
   std::array<std::array<std::unique_ptr<AbstractTexture>, LEVELS>, 2> m_flow;
   std::unique_ptr<AbstractTexture> m_motion, m_bias;
   u32 m_width = 0, m_height = 0;
+  bool m_half_resolution = false;
 };
 }  // namespace VideoCommon
