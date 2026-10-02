@@ -2547,7 +2547,12 @@ void TextureCacheBase::CopyRenderTargetToTexture(
       const bool initialized = std::any_of(m_native_initialized_rects.begin(), m_native_initialized_rects.end(),
           [&](const auto& clear) { return clear.left <= srcRect.left && clear.top <= srcRect.top &&
               clear.right >= srcRect.right && clear.bottom >= srcRect.bottom; });
-      entry->temporal_native_field_proven = !is_xfb_copy && initialized &&
+      const auto native_field_filter = GetVRAMCopyFilterCoefficients(filter_coefficients);
+      const bool native_field_footprint = !scaleByHalf && y_scale == 1.0f && gamma == 1.0f &&
+          g_ActiveConfig.bCopyEFBScaled && width == static_cast<u32>(srcRect.GetWidth()) &&
+          height == static_cast<u32>(srcRect.GetHeight()) &&
+          native_field_filter == std::array<u32, 3>{0, 64, 0};
+      entry->temporal_native_field_proven = !is_xfb_copy && initialized && native_field_footprint &&
           !m_native_ancestry_unknown && !ModernGekkoTemporal::IsMirrorRaster();
       entry->SetGeneralParameters(dstAddr, 0, baseFormat, is_xfb_copy);
       entry->SetDimensions(tex_w, tex_h, 1);
