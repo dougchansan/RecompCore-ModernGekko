@@ -98,7 +98,13 @@ bool Initialize()
   if (s_unavailable || !Vulkan::g_vulkan_context || !Vulkan::g_command_buffer_mgr)
     return false;
   const auto& context = *Vulkan::g_vulkan_context;
-  const u32 valid_bits = context.GetGraphicsQueueProperties().timestampValidBits;
+  u32 queue_count = 0;
+  vkGetPhysicalDeviceQueueFamilyProperties(context.GetPhysicalDevice(), &queue_count, nullptr);
+  std::vector<VkQueueFamilyProperties> queues(queue_count);
+  if (queue_count)
+    vkGetPhysicalDeviceQueueFamilyProperties(context.GetPhysicalDevice(), &queue_count, queues.data());
+  const u32 family = context.GetGraphicsQueueFamilyIndex();
+  const u32 valid_bits = family < queue_count ? queues[family].timestampValidBits : 0;
   VkPhysicalDeviceProperties properties{};
   vkGetPhysicalDeviceProperties(context.GetPhysicalDevice(), &properties);
   if (!valid_bits || !std::isfinite(properties.limits.timestampPeriod) ||
