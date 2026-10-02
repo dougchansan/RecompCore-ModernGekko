@@ -1143,6 +1143,7 @@ bool FramebufferManager::CertifyTemporalCoverage(const AbstractTexture* color_co
 
 bool FramebufferManager::ReinterpretPixelData(EFBReinterpretType convtype)
 {
+  g_texture_cache->RejectTemporalNativeAncestry();
   if (TraceTemporalMirrorFrame())
     INFO_LOG_FMT(VIDEO, "Temporal mirror trace: content={} invalidation=reinterpret",
                  ModernGekkoTemporal::GetState().content_id);
@@ -1714,6 +1715,7 @@ AbstractPipeline* FramebufferManager::GetClearPipeline(bool colorEnable, bool al
 
 void FramebufferManager::PokeEFBColor(u32 x, u32 y, u32 color)
 {
+  g_texture_cache->RejectTemporalNativeAncestry();
   if (TraceTemporalMirrorFrame())
     INFO_LOG_FMT(VIDEO, "Temporal mirror trace: content={} invalidation=color poke",
                  ModernGekkoTemporal::GetState().content_id);
@@ -1737,6 +1739,7 @@ void FramebufferManager::PokeEFBColor(u32 x, u32 y, u32 color)
 
 void FramebufferManager::PokeEFBDepth(u32 x, u32 y, float depth)
 {
+  g_texture_cache->RejectTemporalNativeAncestry();
   if (TraceTemporalMirrorFrame())
     INFO_LOG_FMT(VIDEO, "Temporal mirror trace: content={} invalidation=depth poke",
                  ModernGekkoTemporal::GetState().content_id);
