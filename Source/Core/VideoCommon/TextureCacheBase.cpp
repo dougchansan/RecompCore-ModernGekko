@@ -1187,8 +1187,8 @@ bool TextureCacheBase::HasUnclassifiedTemporalInputs(BitSet32 used_textures) con
         if (coord >= xfmem.numTexGen.numTexGens) continue;
         const auto& gen = xfmem.texMtxInfo[coord];
         INFO_LOG_FMT(VIDEO, "Temporal RTT sampling: slot={} stage={} coord={} generator={} source_row={} projection={} input_form={} indirect={}",
-            slot, stage, coord, static_cast<u32>(gen.texgentype), static_cast<u32>(gen.sourcerow),
-            static_cast<u32>(gen.projection), static_cast<u32>(gen.inputform), bpmem.tevind[stage].IsActive());
+            slot, stage, coord, static_cast<u32>(gen.texgentype.Value()), static_cast<u32>(gen.sourcerow.Value()),
+            static_cast<u32>(gen.projection.Value()), static_cast<u32>(gen.inputform.Value()), bpmem.tevind[stage].IsActive());
       }
     }
   }
