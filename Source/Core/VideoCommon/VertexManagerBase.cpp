@@ -1174,6 +1174,7 @@ VertexManagerBase::PrepareTemporalDraw(const AbstractPipeline* native_pipeline, 
       static_cast<u32>(ps->ztex_op), static_cast<u32>(ps->Pretest), static_cast<u32>(ps->bounding_box), reason);
   };
   auto reject = [&](std::string_view reason) {
+    g_texture_cache->RejectTemporalNativeAncestry();
     trace(false, false, false, reason);
     static u64 rejected_draws = 0;
     if (++rejected_draws <= 8 || rejected_draws % 120 == 0)
@@ -1201,10 +1202,22 @@ VertexManagerBase::PrepareTemporalDraw(const AbstractPipeline* native_pipeline, 
   // Clip-space displacement uses clip.w for both projection types. Generated-shader
   // raster fixtures prove the same signed pixel offset for perspective and orthographic
   // geometry; texture provenance, rather than projection type, classifies the inputs.
-  const bool known = !g_texture_cache->HasUnclassifiedTemporalInputs(UsedTextures());
   const auto native_blend = m_current_pipeline_config.blending_state;
   const auto native_depth = m_current_pipeline_config.depth_state;
   const bool depth_write = native_depth.test_enable && native_depth.update_enable;
+  bool no_indirect = bpmem.genMode.numindstages == 0 && ps->nIndirectStagesUsed == 0;
+  for (const auto& indirect : bpmem.tevind)
+  {
+    no_indirect = no_indirect && !indirect.IsActive() && !indirect.fb_addprev &&
+                  indirect.sw == IndTexWrap::ITW_OFF && indirect.tw == IndTexWrap::ITW_OFF;
+  }
+  const auto temporal_state = ModernGekkoTemporal::GetState();
+  const bool allow_native_geometry_fields = xfmem.projection.type == ProjectionType::Perspective &&
+      native_blend.color_update && depth_write && temporal_state.depth_convention_known &&
+      !(temporal_state.reason_bits & static_cast<u32>(ModernGekkoTemporal::CoverageReason::MixedDepthConvention)) &&
+      ps->ztex_op == ZTexOp::Disabled && !ps->per_pixel_depth && no_indirect;
+  const bool known = !g_texture_cache->HasUnclassifiedTemporalInputs(
+      UsedTextures(), allow_native_geometry_fields);
   const bool overwrite = known && native_blend.color_update && !native_blend.blend_enable &&
                          !native_blend.logic_op_enable;
   const bool opacity_blend = native_blend.color_update && native_blend.blend_enable &&
