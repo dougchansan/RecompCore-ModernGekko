@@ -280,6 +280,7 @@ ModernGekkoOpticalFlow::Result ModernGekkoOpticalFlow::Run(const Inputs& in)
   if(!Initialize(in.width,in.height)) return {};
   g_vertex_manager->Flush();
   Uniforms u;
+  const auto total_token=ModernGekkoTiming::Begin("flow_total_gpu");
   const auto pyramid_token=ModernGekkoTiming::Begin("flow_pyramid_gpu");
   for(size_t direction=0;direction<2;++direction)
     for(size_t level=0;level<LEVELS;++level) {
@@ -335,6 +336,7 @@ ModernGekkoOpticalFlow::Result ModernGekkoOpticalFlow::Run(const Inputs& in)
   const auto confidence_token=ModernGekkoTiming::Begin("flow_confidence_gpu");
   Dispatch(m_confidence.get(),in.width,in.height);
   ModernGekkoTiming::End(confidence_token);
+  ModernGekkoTiming::End(total_token);
   // Force tracked compute-write -> read transitions before reuse or NGX evaluation.
   BindSample(0,m_motion.get()); BindSample(1,m_bias.get());
   Vulkan::StateTracker::GetInstance()->InvalidateCachedState();
