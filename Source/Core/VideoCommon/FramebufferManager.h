@@ -45,6 +45,16 @@ inline bool AddressRangesOverlap(u32 aLower, u32 aUpper, u32 bLower, u32 bUpper)
   return !((aLower >= bUpper) || (bLower >= aUpper));
 }
 
+struct TemporalWorldSnapshot
+{
+  std::unique_ptr<AbstractTexture> color, depth, color_coverage, depth_coverage;
+  MathUtil::Rectangle<int> native_rect;
+  u64 content_id = 0;
+  float jitter_x = 0, jitter_y = 0;
+  bool depth_convention_known = false, depth_inverted = false;
+  u64 color_invalid = ~u64{0}, depth_invalid = ~u64{0};
+};
+
 class FramebufferManager final
 {
 public:
@@ -116,14 +126,41 @@ public:
   AbstractTexture* GetTemporalMirrorDepthTexture() const { return m_temporal_mirror_depth.get(); }
   // RGB: joint color/depth proof; A: alpha provenance, propagated when RGB reads it.
   AbstractTexture* GetTemporalCoverageTexture() const { return m_temporal_coverage.get(); }
+  AbstractFramebuffer* GetTemporalDepthCoverageFramebuffer() const { return m_temporal_depth_coverage_framebuffer.get(); }
+  AbstractTexture* GetTemporalDepthCoverageTexture() const { return m_temporal_depth_coverage.get(); }
   void InvalidateTemporalMirrorCoverage();
   void SetTemporalCaptureRect(const MathUtil::Rectangle<int>& native_rect);
+  const MathUtil::Rectangle<int>& GetTemporalCaptureRect() const { return m_temporal_capture_rect; }
   bool CaptureMirrorPacket(const MathUtil::Rectangle<int>& native_rect,
                            std::unique_ptr<AbstractTexture>* color,
                            std::unique_ptr<AbstractTexture>* depth,
-                           std::unique_ptr<AbstractTexture>* coverage);
+                           std::unique_ptr<AbstractTexture>* coverage,
+                           std::unique_ptr<AbstractTexture>* depth_coverage = nullptr);
   // Exact GPU sum of pixels whose R coverage channel is not 1; blocking scalar readback.
-  bool CertifyTemporalCoverage(const AbstractTexture* coverage, u64* invalid_pixels);
+  bool CertifyTemporalCoverage(const AbstractTexture* coverage, u64* invalid_pixels,
+                               bool flush_vertex = true);
+  bool CertifyTemporalCoverage(const AbstractTexture* color_coverage,
+                               const AbstractTexture* depth_coverage, u64* color_invalid,
+                               u64* depth_invalid, bool flush_vertex = true);
+
+  bool EnsureTemporalBoundary();
+  AbstractFramebuffer* GetTemporalBoundaryFramebuffer() const { return m_temporal_boundary_framebuffer.get(); }
+  AbstractTexture* GetTemporalBoundaryMaskTexture() const { return m_temporal_boundary_mask.get(); }
+  AbstractTexture* GetTemporalBoundaryDepthTexture() const { return m_temporal_boundary_depth.get(); }
+  void ResetTemporalBoundary();
+  bool CertifyTemporalBoundary(const MathUtil::Rectangle<int>& native_rect,
+                               u64* mask_invalid, float* depth_min, float* depth_max,
+                               u64* nonfinite, bool flush_vertex = false);
+  bool FreezeWorldBeforeOverlay();
+  std::shared_ptr<const TemporalWorldSnapshot> GetFrozenTemporalWorld() const { return m_temporal_frozen_world; }
+  bool ActivateTemporalOverlay();
+  bool IsTemporalOverlayActive() const { return m_temporal_overlay_active; }
+  AbstractFramebuffer* GetTemporalOverlayFramebuffer() const { return m_temporal_overlay_framebuffer.get(); }
+  AbstractTexture* GetTemporalOverlayTexture() const { return m_temporal_overlay_color.get(); }
+  bool SnapshotTemporalOverlay(std::unique_ptr<AbstractTexture>* overlay);
+  void InvalidateTemporalSplit();
+  void RejectTemporalSplit();
+  void ResetTemporalSplitForNewContent();
 
   bool ReinterpretPixelData(EFBReinterpretType convtype);
   PixelFormat GetPrevPixelFormat() const { return m_prev_efb_format; }
@@ -221,9 +258,25 @@ protected:
   void MirrorClearEFB(const MathUtil::Rectangle<int>& native_rect, bool color_enable,
                       bool alpha_enable, bool z_enable, u32 color, u32 z);
   std::unique_ptr<AbstractTexture> m_temporal_mirror_color, m_temporal_mirror_depth;
-  std::unique_ptr<AbstractTexture> m_temporal_coverage;
+  std::unique_ptr<AbstractTexture> m_temporal_coverage, m_temporal_depth_coverage;
   std::unique_ptr<AbstractFramebuffer> m_temporal_mirror_framebuffer;
   std::unique_ptr<AbstractFramebuffer> m_temporal_coverage_framebuffer;
+  std::unique_ptr<AbstractFramebuffer> m_temporal_depth_coverage_framebuffer;
+  std::unique_ptr<AbstractTexture> m_temporal_boundary_mask, m_temporal_boundary_depth;
+  std::unique_ptr<AbstractFramebuffer> m_temporal_boundary_framebuffer;
+  std::unique_ptr<AbstractTexture> m_temporal_boundary_depth_copy;
+  std::unique_ptr<AbstractFramebuffer> m_temporal_boundary_depth_copy_framebuffer;
+  std::unique_ptr<AbstractShader> m_temporal_boundary_depth_copy_shader;
+  std::unique_ptr<AbstractPipeline> m_temporal_boundary_depth_copy_pipeline;
+  std::unique_ptr<AbstractShader> m_temporal_boundary_first, m_temporal_boundary_reduce;
+  std::vector<std::array<std::unique_ptr<AbstractTexture>, 3>> m_temporal_boundary_reduction;
+  bool m_temporal_boundary_proven = false, m_temporal_overlay_active = false;
+  bool m_temporal_split_rejected = false, m_temporal_boundary_detected = false;
+  u64 m_temporal_split_content = ~u64{0};
+  u64 m_temporal_boundary_content = 0;
+  std::shared_ptr<TemporalWorldSnapshot> m_temporal_frozen_world;
+  std::unique_ptr<AbstractTexture> m_temporal_overlay_color, m_temporal_overlay_depth;
+  std::unique_ptr<AbstractFramebuffer> m_temporal_overlay_framebuffer;
   std::unique_ptr<AbstractShader> m_temporal_coverage_first, m_temporal_coverage_reduce;
   std::vector<std::unique_ptr<AbstractTexture>> m_temporal_coverage_reduction;
   std::unique_ptr<AbstractStagingTexture> m_temporal_coverage_readback;
