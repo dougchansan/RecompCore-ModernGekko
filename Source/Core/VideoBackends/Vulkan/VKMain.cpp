@@ -9,6 +9,7 @@
 #include "VideoBackends/Vulkan/CommandBufferManager.h"
 #include "VideoBackends/Vulkan/ObjectCache.h"
 #include "VideoBackends/Vulkan/ModernGekkoNGX.h"
+#include "VideoBackends/Vulkan/ModernGekkoTiming.h"
 #include "VideoBackends/Vulkan/StateTracker.h"
 #include "VideoBackends/Vulkan/VKBoundingBox.h"
 #include "VideoBackends/Vulkan/VKGfx.h"
@@ -254,6 +255,7 @@ void VideoBackend::Shutdown()
     if (g_command_buffer_mgr)
       g_command_buffer_mgr->WaitForWorkerThreadIdle();
     vkDeviceWaitIdle(g_vulkan_context->GetDevice());
+    ModernGekkoTiming::Shutdown();
     ModernGekkoNGX::Shutdown(*g_vulkan_context);
   }
 

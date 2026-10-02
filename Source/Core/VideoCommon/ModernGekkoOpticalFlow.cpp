@@ -13,6 +13,7 @@
 #include "VideoCommon/VideoConfig.h"
 #include "VideoBackends/Vulkan/CommandBufferManager.h"
 #include "VideoBackends/Vulkan/StateTracker.h"
+#include "VideoBackends/Vulkan/ModernGekkoTiming.h"
 #include "VideoBackends/Vulkan/VKTexture.h"
 
 namespace VideoCommon
@@ -279,6 +280,7 @@ ModernGekkoOpticalFlow::Result ModernGekkoOpticalFlow::Run(const Inputs& in)
   if(!Initialize(in.width,in.height)) return {};
   g_vertex_manager->Flush();
   Uniforms u;
+  const auto pyramid_token=ModernGekkoTiming::Begin("flow_pyramid_gpu");
   for(size_t direction=0;direction<2;++direction)
     for(size_t level=0;level<LEVELS;++level) {
       const AbstractTexture* source=level ? m_color[direction][level-1].get() :
@@ -291,6 +293,8 @@ ModernGekkoOpticalFlow::Result ModernGekkoOpticalFlow::Run(const Inputs& in)
       g_gfx->SetComputeImageTexture(0,m_color[direction][level].get(),false,true);
       Dispatch(m_downsample.get(),config.width,config.height);
     }
+  ModernGekkoTiming::End(pyramid_token);
+  static constexpr const char* estimate_names[2][LEVELS]={{"flow_fwd_L0","flow_fwd_L1","flow_fwd_L2","flow_fwd_L3","flow_fwd_L4"},{"flow_bwd_L0","flow_bwd_L1","flow_bwd_L2","flow_bwd_L3","flow_bwd_L4"}};
   for(size_t direction=0;direction<2;++direction)
     for(size_t reverse=LEVELS;reverse>0;--reverse) {
       const size_t level=reverse-1;
@@ -306,7 +310,9 @@ ModernGekkoOpticalFlow::Result ModernGekkoOpticalFlow::Run(const Inputs& in)
       BindSample(1,m_color[1-direction][level].get());
       BindSample(2,parent);
       g_gfx->SetComputeImageTexture(0,m_flow[direction][level].get(),false,true);
+      const auto token=ModernGekkoTiming::Begin(estimate_names[direction][level]);
       Dispatch(m_estimate.get(),config.width,config.height);
+      ModernGekkoTiming::End(token);
     }
   const bool depth=history && Matches(in.current_depth,in.width,in.height) &&
                    Matches(in.previous_depth,in.width,in.height);
@@ -326,7 +332,9 @@ ModernGekkoOpticalFlow::Result ModernGekkoOpticalFlow::Run(const Inputs& in)
   BindSample(7,masks ? in.previous_jitter_mask : m_color[1][0].get());
   g_gfx->SetComputeImageTexture(0,m_motion.get(),false,true);
   g_gfx->SetComputeImageTexture(1,m_bias.get(),false,true);
+  const auto confidence_token=ModernGekkoTiming::Begin("flow_confidence_gpu");
   Dispatch(m_confidence.get(),in.width,in.height);
+  ModernGekkoTiming::End(confidence_token);
   // Force tracked compute-write -> read transitions before reuse or NGX evaluation.
   BindSample(0,m_motion.get()); BindSample(1,m_bias.get());
   Vulkan::StateTracker::GetInstance()->InvalidateCachedState();

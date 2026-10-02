@@ -20,6 +20,7 @@
 #include "VideoCommon/VideoConfig.h"
 #include "VideoBackends/Vulkan/CommandBufferManager.h"
 #include "VideoBackends/Vulkan/ModernGekkoNGX.h"
+#include "VideoBackends/Vulkan/ModernGekkoTiming.h"
 #include "VideoBackends/Vulkan/StateTracker.h"
 #include "VideoBackends/Vulkan/VKTexture.h"
 
@@ -227,7 +228,9 @@ struct ModernGekkoDLSSPresenter::State
     const std::array<float,4> extent = {float(output_width),float(output_height),0,0};
     g_vertex_manager->UploadUtilityUniforms(extent.data(), sizeof(extent));
     g_gfx->SetComputeImageTexture(0, composed.get(), false, true);
+    const auto overlay_token=ModernGekkoTiming::Begin("overlay_compose_gpu");
     g_gfx->DispatchComputeShader(overlay_shader.get(),8,8,1,(output_width+7)/8,(output_height+7)/8,1);
+    ModernGekkoTiming::End(overlay_token);
     Barrier(composed.get(),VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_ACCESS_SHADER_READ_BIT);
     Vulkan::StateTracker::GetInstance()->InvalidateCachedState();
     return composed.get();
@@ -267,6 +270,7 @@ ModernGekkoDLSSPresenter::~ModernGekkoDLSSPresenter()
 const AbstractTexture* ModernGekkoDLSSPresenter::Render(const RcTcacheEntry& entry,
   const MathUtil::Rectangle<int>& source_rect,u32 width,u32 height)
 {
+  ModernGekkoTiming::Poll();
   auto& s=*m_state;
   if(!Requested() || !width || !height) {
     ModernGekkoTemporal::SetActive(false);s.Release();return nullptr;
@@ -347,8 +351,12 @@ const AbstractTexture* ModernGekkoDLSSPresenter::Render(const RcTcacheEntry& ent
   g_vertex_manager->UploadUtilityUniforms(sizes.data(),sizeof(sizes));
   s.Bind(0,packet->color.get());s.Bind(1,packet->depth.get());
   g_gfx->SetComputeImageTexture(0,color,false,true);g_gfx->SetComputeImageTexture(1,depth,false,true);
+  const auto resample_token=ModernGekkoTiming::Begin("resample_gpu");
   g_gfx->DispatchComputeShader(s.resample.get(),8,8,1,(s.input_width+7)/8,(s.input_height+7)/8,1);
+  ModernGekkoTiming::End(resample_token);
+  const auto cut_start=std::chrono::steady_clock::now();
   const bool cut=s.IsCut(color);
+  if(ModernGekkoTiming::Enabled()) ModernGekkoTiming::CPU("cut_cpu",std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-cut_start).count());
   const std::array<float,2> jitter={packet->jitter_x*input_per_native[0],
     packet->jitter_y*input_per_native[1]};
   bool reset=!s.history || cut || packet->history_reset;
@@ -358,7 +366,9 @@ const AbstractTexture* ModernGekkoDLSSPresenter::Render(const RcTcacheEntry& ent
   inputs.width=s.input_width;inputs.height=s.input_height;
   inputs.current_jitter=jitter;inputs.previous_jitter=s.previous_jitter;
   inputs.history_valid=!reset;inputs.uniform_jitter_coverage=packet->uniform_jitter_coverage;
+  const auto flow_start=std::chrono::steady_clock::now();
   const auto motion=s.flow->Run(inputs);
+  if(ModernGekkoTiming::Enabled()) ModernGekkoTiming::CPU("flow_record_cpu",std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-flow_start).count());
   if(!motion.motion || !motion.bias) return fallback("estimated motion pipeline failed");
   for(const AbstractTexture* texture:std::array<const AbstractTexture*,4>{color,depth,motion.motion,motion.bias})
     Barrier(texture,VK_IMAGE_LAYOUT_GENERAL,VK_ACCESS_SHADER_READ_BIT);
@@ -369,7 +379,11 @@ const AbstractTexture* ModernGekkoDLSSPresenter::Render(const RcTcacheEntry& ent
   frame.jitter_x=jitter[0];frame.jitter_y=jitter[1];frame.reset=reset;
   const auto now=std::chrono::steady_clock::now();
   frame.frame_time_ms=s.history ? std::clamp(float(std::chrono::duration<double,std::milli>(now-s.last_frame).count()),1.0f,100.0f) : 1000.0f/60.0f;
+  const auto ngx_token=ModernGekkoTiming::Begin("ngx_gpu");
+  const auto ngx_start=std::chrono::steady_clock::now();
   s.output_valid=NGX::Evaluate(Vulkan::g_command_buffer_mgr->GetCurrentCommandBuffer(),frame);
+  if(ModernGekkoTiming::Enabled()) ModernGekkoTiming::CPU("ngx_record_cpu",std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-ngx_start).count());
+  ModernGekkoTiming::End(ngx_token);
   Barrier(s.output.get(),VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_ACCESS_SHADER_READ_BIT);
   Vulkan::StateTracker::GetInstance()->InvalidateCachedState();
   s.content_id=packet->content_id;s.previous_jitter=jitter;s.last_frame=now;
