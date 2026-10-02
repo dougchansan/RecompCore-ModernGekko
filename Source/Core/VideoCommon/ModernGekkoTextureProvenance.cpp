@@ -9,25 +9,25 @@ namespace
 {
 struct Register
 {
-  bool rgb = false;
-  bool alpha = false;
+  u32 rgb = 0;
+  u32 alpha = 0;
 };
-bool ColorInput(TevColorArg arg, const std::array<Register, 4>& regs, bool texture)
+u32 ColorInput(TevColorArg arg, const std::array<Register, 4>& regs, u32 texture)
 {
   const u32 value = static_cast<u32>(arg);
   if (value < 8)
     return value % 2 == 0 ? regs[value / 2].rgb : regs[value / 2].alpha;
-  return arg == TevColorArg::TexColor || arg == TevColorArg::TexAlpha ? texture : false;
+  return arg == TevColorArg::TexColor || arg == TevColorArg::TexAlpha ? texture : 0u;
 }
-bool AlphaInput(TevAlphaArg arg, const std::array<Register, 4>& regs, bool texture)
+u32 AlphaInput(TevAlphaArg arg, const std::array<Register, 4>& regs, u32 texture)
 {
   const u32 value = static_cast<u32>(arg);
   if (value < 4)
     return regs[value].alpha;
-  return arg == TevAlphaArg::TexAlpha ? texture : false;
+  return arg == TevAlphaArg::TexAlpha ? texture : 0u;
 }
 template <typename Arg>
-bool LerpDependency(Arg a, Arg b, Arg c, Arg zero, bool da, bool db, bool dc)
+u32 LerpDependency(Arg a, Arg b, Arg c, Arg zero, u32 da, u32 db, u32 dc)
 {
   // TEV masks a/b/c to 8 bits and interpolates a + (b-a)*(c+(c>>7))/256.
   // Equality of operand selectors establishes equality before simultaneous writes.
@@ -36,52 +36,51 @@ bool LerpDependency(Arg a, Arg b, Arg c, Arg zero, bool da, bool db, bool dc)
   if (c == zero)
     return da;
   if (a == zero && b == zero)
-    return false;
-  return da || db || dc;
+    return 0;
+  return da | db | dc;
 }
-bool CompareDependency(bool da, bool db, bool dc, bool equal_operands,
+u32 CompareDependency(u32 da, u32 db, u32 dc, bool equal_operands,
                        bool zero_c, TevComparison comparison)
 {
   if (zero_c)
-    return false;
+    return 0;
   if (equal_operands)
-    return comparison == TevComparison::EQ ? dc : false;
-  return da || db || dc;
+    return comparison == TevComparison::EQ ? dc : 0u;
+  return da | db | dc;
 }
 }
-bool CanUseAsOpacityData(const BPMemory& bp, u32 auxiliary_slots)
+DependencyReport AnalyzeDependencies(const BPMemory& bp, u32 auxiliary_slots)
 {
-  if ((auxiliary_slots & ~0xffu) != 0)
-    return false;
-  if (auxiliary_slots == 0)
-    return true;
-  // last_texture can also replace/add depth outside the TEV combiner.
+  DependencyReport report;
+  report.invalid_slots = (auxiliary_slots & ~0xffu) != 0;
+  auxiliary_slots &= 0xffu;
+  // Preserve the existing conservative policy for the outside-combiner depth path.
   if (bp.ztex2.op != ZTexOp::Disabled)
-    return false;
+    report.z_slots = auxiliary_slots;
   std::array<Register, 4> registers{};
   const u32 stages = bp.genMode.numtevstages + 1u;
   for (u32 stage = 0; stage < stages; ++stage)
   {
     const auto& indirect = bp.tevind[stage];
-    if (indirect.IsActive() && indirect.bt < bp.genMode.numindstages &&
-        (auxiliary_slots & (1u << bp.tevindref.getTexMap(indirect.bt))))
-      return false;  // Includes indirect bump alpha; its raster channel needs separate proof.
+    if (indirect.IsActive() && indirect.bt < bp.genMode.numindstages)
+      report.indirect_slots |= auxiliary_slots & (1u << bp.tevindref.getTexMap(indirect.bt));
+    // Includes indirect bump alpha; no eligibility is inferred from its consumer role.
     const auto& order = bp.tevorders[stage / 2];
-    const bool texture = bp.genMode.numtexgens > 0 && order.getEnable(stage & 1) &&
-                         (auxiliary_slots & (1u << order.getTexMap(stage & 1)));
+    const u32 texture = bp.genMode.numtexgens > 0 && order.getEnable(stage & 1) ?
+                            auxiliary_slots & (1u << order.getTexMap(stage & 1)) : 0u;
     // Whole-texture dependency is conservative under every texture swap permutation.
     const auto& cc = bp.combiners[stage].colorC;
     const auto& ac = bp.combiners[stage].alphaC;
-    const bool ca = ColorInput(cc.a, registers, texture);
-    const bool cb = ColorInput(cc.b, registers, texture);
-    const bool cc_dep = ColorInput(cc.c, registers, texture);
-    const bool cd = ColorInput(cc.d, registers, texture);
-    const bool aa = AlphaInput(ac.a, registers, texture);
-    const bool ab = AlphaInput(ac.b, registers, texture);
-    const bool av = AlphaInput(ac.c, registers, texture);
-    const bool ad = AlphaInput(ac.d, registers, texture);
-    bool rgb = cd;
-    bool alpha = ad;
+    const u32 ca = ColorInput(cc.a, registers, texture);
+    const u32 cb = ColorInput(cc.b, registers, texture);
+    const u32 cc_dep = ColorInput(cc.c, registers, texture);
+    const u32 cd = ColorInput(cc.d, registers, texture);
+    const u32 aa = AlphaInput(ac.a, registers, texture);
+    const u32 ab = AlphaInput(ac.b, registers, texture);
+    const u32 av = AlphaInput(ac.c, registers, texture);
+    const u32 ad = AlphaInput(ac.d, registers, texture);
+    u32 rgb = cd;
+    u32 alpha = ad;
     if (cc.bias == TevBias::Compare)
       rgb |= CompareDependency(ca, cb, cc_dep, cc.a == cc.b, cc.c == TevColorArg::Zero,
                                cc.comparison);
@@ -106,7 +105,15 @@ bool CanUseAsOpacityData(const BPMemory& bp, u32 auxiliary_slots)
     registers[static_cast<u32>(ac.dest.Value())].alpha = alpha;
   }
   // The final stage's destination is displayed even if it is not PREV.
-  const auto last = bp.combiners[stages - 1].colorC.dest.Value();
-  return !registers[static_cast<u32>(last)].rgb;
+  const auto& last = bp.combiners[stages - 1];
+  report.rgb_slots = registers[static_cast<u32>(last.colorC.dest.Value())].rgb;
+  report.alpha_slots = registers[static_cast<u32>(last.alphaC.dest.Value())].alpha;
+  return report;
+}
+bool CanUseAsOpacityData(const BPMemory& bp, u32 auxiliary_slots)
+{
+  const auto report = AnalyzeDependencies(bp, auxiliary_slots);
+  return !report.invalid_slots && report.rgb_slots == 0 && report.indirect_slots == 0 &&
+         report.z_slots == 0;
 }
 }
