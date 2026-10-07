@@ -70,6 +70,8 @@ public:
 
   void FlushGpu();
   void RunGpu();
+  // Wakes the GPU thread's loop from any thread (frame interpolation slots).
+  void WakeGpuThread() { m_gpu_mainloop.Wakeup(); }
   void GpuMaySleep();
   void RunGpuLoop();
   void ExitGpuLoop();

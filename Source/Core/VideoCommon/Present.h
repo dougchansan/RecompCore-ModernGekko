@@ -13,8 +13,11 @@
 #include "VideoCommon/VideoEvents.h"
 
 #include <array>
+#include <atomic>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <tuple>
 
 class AbstractTexture;
@@ -192,13 +195,34 @@ private:
   // exceeds half a step the display cannot show every in-between frame (e.g.
   // a 60 Hz monitor) and waiting would slow the game, so in-between frames are
   // dropped until m_interp_retry, then tried again.
+  // Frame interpolation steps scheduled so far; a CoreTiming event carries the
+  // value it was scheduled with and is ignored once superseded.
+  u64 m_interp_generation = 0;
+  // Share (0..1) of the last second's presents that blocked over half a step.
   double m_interp_block_ms = 0;
   bool m_interp_dropping = false;
   TimePoint m_interp_retry{};
   bool InterpLayerAllowed();
   PresentInfo m_interp_pending_info{};
 
+  // Dual core: in-between presents follow the wall clock on the GPU thread.
+  // A waker thread raises m_interp_due at the next slot and wakes the GPU loop,
+  // which calls ServiceInterpPresents() between FIFO chunks - so pacing never
+  // sleeps through draw commands (the CPU thread waits on those at idle) and
+  // does not depend on emulated time, which stalls while a heavy frame runs.
+  void ArmInterpWaker(TimePoint when);
+  void InterpWakerLoop();
+  std::atomic<bool> m_interp_due{false};
+  std::mutex m_interp_waker_mutex;
+  std::condition_variable m_interp_waker_cv;
+  TimePoint m_interp_waker_deadline{};
+  bool m_interp_waker_stop = false;
+  std::thread m_interp_waker;
+
 public:
+  bool InterpPresentDue() const { return m_interp_due.load(std::memory_order_relaxed); }
+  void ServiceInterpPresents();
+  u64 InterpGeneration() const { return m_interp_generation; }
   void ScheduleInterpRealPresent(const PresentInfo& in_between);
   void PresentInterpReal();
   void ScheduleInterpStep(u64 delay_ticks);

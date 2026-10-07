@@ -23,7 +23,9 @@
 
 #include "Present.h"
 #include "VideoCommon/AbstractGfx.h"
+#include "VideoCommon/AsyncRequests.h"
 #include "VideoCommon/ColosseumProjection.h"
+#include "VideoCommon/Fifo.h"
 #include "VideoCommon/FrameDumper.h"
 #include "VideoCommon/FramebufferManager.h"
 #include "VideoCommon/OnScreenUI.h"
@@ -115,6 +117,14 @@ Presenter::Presenter()
 
 Presenter::~Presenter()
 {
+  {
+    std::lock_guard lock(m_interp_waker_mutex);
+    m_interp_waker_stop = true;
+  }
+  m_interp_waker_cv.notify_all();
+  if (m_interp_waker.joinable())
+    m_interp_waker.join();
+
   // Disable ControllerInterface's aspect ratio adjustments so mapping dialog behaves normally.
   g_controller_interface.SetAspectRatioAdjustment(1);
 }
@@ -238,7 +248,11 @@ void Presenter::ViSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height,
       // battles lose smoothness instead of game speed.
       const bool behind = m_interp_grid != TimePoint{} &&
                           Clock::now() > m_interp_frame_end + std::chrono::milliseconds(4);
-      if (order == "ba" && (behind || !InterpLayerAllowed()))
+      // Dual core: in-between presents cost the GPU thread, not emulation, so a
+      // late frame still gets them (spread over the time left) instead of a
+      // whole field with none.
+      const bool wall_clock = Core::System::GetInstance().IsDualCoreMode();
+      if (order == "ba" && ((behind && !wall_clock) || !InterpLayerAllowed()))
       {
         // Display or emulation cannot keep up: show only the real frame, and
         // expect the next one a field from now (if it is late again, keep
@@ -249,6 +263,16 @@ void Presenter::ViSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height,
         m_interp_frame_end = shown + std::chrono::microseconds(16683);
         m_interp_present_layer = 0;
         Present(&present_info);
+      }
+      else if (order == "ba" && wall_clock)
+      {
+        // Layers 1..n-1 then the real frame at wall-clock slots, presented by
+        // ServiceInterpPresents() between FIFO chunks on this (GPU) thread.
+        m_interp_pending = true;
+        m_interp_pending_xfb_id = m_last_xfb_id;
+        m_interp_pending_info = present_info;
+        m_interp_next_layer = 1;
+        ServiceInterpPresents();
       }
       else if (order == "ba")
       {
@@ -278,6 +302,88 @@ void Presenter::ViSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height,
     ProcessFrameDumping(ticks);
 
     video_events.after_present_event.Trigger(present_info);
+  }
+}
+
+void Presenter::ServiceInterpPresents()
+{
+  m_interp_due.store(false, std::memory_order_relaxed);
+  // Wake this long before a slot; WaitForInterpSlot sleeps the remainder
+  // precisely (the waker's own sleep is coarser).
+  constexpr auto early = std::chrono::microseconds(300);
+  auto& system = Core::System::GetInstance();
+  while (m_interp_pending)
+  {
+    if (!m_xfb_entry || m_last_xfb_id != m_interp_pending_xfb_id)
+    {
+      m_interp_pending = false;  // a newer frame (or blank screen) took over
+      return;
+    }
+    if (m_interp_grid != TimePoint{} && Clock::now() + early < m_interp_grid)
+    {
+      ArmInterpWaker(m_interp_grid - early);
+      return;
+    }
+    const u32 layer = m_interp_next_layer;
+    m_interp_present_layer = static_cast<int>(layer);
+    WaitForInterpSlot();
+    Present(&m_interp_pending_info);
+    m_interp_present_layer = 0;
+    if (layer == 0)
+    {
+      m_interp_pending = false;
+      return;
+    }
+    m_interp_next_layer = layer + 1 < m_interp_layers ? layer + 1 : 0;
+    const double step_seconds =
+        static_cast<double>(system.GetVideoInterface().GetTicksPerField()) /
+        system.GetSystemTimers().GetTicksPerSecond() / std::max<u32>(m_interp_layers, 2);
+    m_interp_pending_info.intended_present_time +=
+        std::chrono::duration_cast<DT>(std::chrono::duration<double>(step_seconds));
+  }
+}
+
+void Presenter::ArmInterpWaker(TimePoint when)
+{
+  {
+    std::lock_guard lock(m_interp_waker_mutex);
+    m_interp_waker_deadline = when;
+    if (!m_interp_waker.joinable())
+      m_interp_waker = std::thread([this] { InterpWakerLoop(); });
+  }
+  m_interp_waker_cv.notify_one();
+}
+
+void Presenter::InterpWakerLoop()
+{
+  Common::PrecisionTimer timer;
+  std::unique_lock lock(m_interp_waker_mutex);
+  while (true)
+  {
+    m_interp_waker_cv.wait(lock, [this] {
+      return m_interp_waker_stop || m_interp_waker_deadline != TimePoint{};
+    });
+    if (m_interp_waker_stop)
+      return;
+    // Sleep in short slices so a moved deadline is noticed.
+    while (!m_interp_waker_stop && m_interp_waker_deadline != TimePoint{} &&
+           Clock::now() < m_interp_waker_deadline)
+    {
+      const TimePoint until =
+          std::min(m_interp_waker_deadline, Clock::now() + std::chrono::milliseconds(1));
+      lock.unlock();
+      timer.SleepUntil(until);
+      lock.lock();
+    }
+    if (m_interp_waker_stop)
+      return;
+    if (m_interp_waker_deadline == TimePoint{})
+      continue;
+    m_interp_waker_deadline = {};
+    m_interp_due.store(true, std::memory_order_relaxed);
+    lock.unlock();
+    Core::System::GetInstance().GetFifo().WakeGpuThread();
+    lock.lock();
   }
 }
 
@@ -311,17 +417,24 @@ void Presenter::ScheduleInterpStep(u64 delay_ticks)
   if (!event)
   {
     event = core_timing.RegisterEvent(
-        "FrameInterpRealPresent", [](Core::System&, u64, s64) {
-          if (g_presenter)
-            g_presenter->PresentInterpReal();
+        "FrameInterpRealPresent", [](Core::System&, u64 generation, s64) {
+          // CoreTiming events fire on the CPU thread; presenting belongs to the
+          // GPU thread (dual core), queued behind the frame's draws like a
+          // ViSwap. In single core this runs immediately.
+          AsyncRequests::GetInstance()->PushEvent([generation] {
+            // A newer step was scheduled since (replacing this one).
+            if (g_presenter && generation == g_presenter->InterpGeneration())
+              g_presenter->PresentInterpReal();
+          });
         });
   }
   const double step_seconds = static_cast<double>(m_interp_step_ticks) /
                               system.GetSystemTimers().GetTicksPerSecond();
   m_interp_pending_info.intended_present_time +=
       std::chrono::duration_cast<DT>(std::chrono::duration<double>(step_seconds));
-  core_timing.RemoveEvent(event);
-  core_timing.ScheduleEvent(static_cast<s64>(delay_ticks), event, 0,
+  // RemoveEvent is only safe on the CPU thread and this can run on the GPU
+  // thread (dual core): supersede any pending step by generation instead.
+  core_timing.ScheduleEvent(static_cast<s64>(delay_ticks), event, ++m_interp_generation,
                             CoreTiming::FromThread::ANY);
 }
 
@@ -339,7 +452,6 @@ struct
 
 bool Presenter::InterpLayerAllowed()
 {
-  const double step_ms = 1000.0 / 60.0 / std::max<u32>(m_interp_layers, 2);
   const TimePoint now = Clock::now();
   if (m_interp_dropping)
   {
@@ -349,8 +461,10 @@ bool Presenter::InterpLayerAllowed()
     m_interp_block_ms = 0;
     g_frame_interp_dropping.store(false, std::memory_order_relaxed);
   }
-  else if (m_interp_block_ms > 0.5 * step_ms)
+  else if (m_interp_block_ms > 0.5)  // most presents held back for a second
   {
+    std::fprintf(stderr, "[interp] display holding frames back (%.0f%% of presents): showing real frames only\n",
+                 m_interp_block_ms * 100.0);
     m_interp_dropping = true;
     m_interp_retry = now + std::chrono::seconds(2);
     g_frame_interp_dropping.store(true, std::memory_order_relaxed);
@@ -1214,8 +1328,46 @@ void Presenter::Present(PresentInfo* present_info)
     g_gfx->PresentBackbuffer();
     if (g_ActiveConfig.stereo_mode == StereoMode::FrameInterp)
     {
-      m_interp_block_ms +=
-          (DT_ms(Clock::now() - before_present).count() - m_interp_block_ms) * 0.1;
+      // Share of the last second's presents that blocked for over half a
+      // step (the display or GPU holding frames back). A single hitch - a
+      // shader compile, a save - must not count as the display falling behind.
+      static u32 slow = 0, total = 0;
+      static TimePoint window_start = Clock::now();
+      const auto after_present = Clock::now();
+      const double step_ms = 1000.0 / 60.0 / std::max<u32>(m_interp_layers, 2);
+      ++total;
+      if (DT_ms(after_present - before_present).count() > 0.5 * step_ms)
+        ++slow;
+      if (after_present - window_start >= std::chrono::seconds(1))
+      {
+        m_interp_block_ms = total ? static_cast<double>(slow) / total : 0.0;
+        slow = total = 0;
+        window_start = after_present;
+      }
+    }
+    // MODERNGEKKO_HITCH_LOG=1: every gap between presents over two frame-interp
+    // steps, stamped with steady_clock seconds (QueryPerformanceCounter, the
+    // same clock as Python's time.perf_counter) for hitch_report.py.
+    static const bool hitch_log = [] {
+      const char* env = std::getenv("MODERNGEKKO_HITCH_LOG");
+      return env && env[0] == '1';
+    }();
+    if (hitch_log)
+    {
+      static TimePoint last_present{};
+      const TimePoint now = Clock::now();
+      const double step_ms = 1000.0 / 60.0 / std::max<u32>(m_interp_layers, 1);
+      if (last_present != TimePoint{})
+      {
+        const double gap = DT_ms(now - last_present).count();
+        if (gap > 2.0 * step_ms)
+        {
+          std::fprintf(stderr, "[hitch] t=%.6f gap=%.2f layer=%d\n",
+                       std::chrono::duration<double>(now.time_since_epoch()).count(), gap,
+                       m_interp_present_layer);
+        }
+      }
+      last_present = now;
     }
     // MODERNGEKKO_INTERP_STATS=1: present pacing - count, interval spread and
     // time spent blocked inside the swap chain's Present (VSync waits).
@@ -1337,6 +1489,18 @@ void Presenter::DoState(PointerWrap& p)
   p.Do(m_last_xfb_width);
   p.Do(m_last_xfb_stride);
   p.Do(m_last_xfb_height);
+
+  if (p.IsReadMode())
+  {
+    // Frame interpolation steps belong to the frame before the load: its XFB
+    // texture is gone with the texture cache's state. Drop them, and supersede
+    // any step already queued for the GPU thread (dual core) or restored with
+    // CoreTiming's events.
+    m_interp_pending = false;
+    ++m_interp_generation;
+    m_interp_grid = {};
+    m_interp_due.store(false, std::memory_order_relaxed);
+  }
 
   // If we're loading and there is a last XFB, re-display it.
   if (p.IsReadMode() && m_last_xfb_stride != 0)

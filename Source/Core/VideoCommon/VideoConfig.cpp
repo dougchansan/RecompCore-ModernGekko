@@ -4,6 +4,7 @@
 #include "VideoCommon/VideoConfig.h"
 
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 
 #include <algorithm>
@@ -445,6 +446,12 @@ void CheckForConfigChanges()
   // Reload shaders if host config has changed.
   if (changed_bits & (CONFIG_CHANGE_BIT_HOST_CONFIG | CONFIG_CHANGE_BIT_MULTISAMPLES))
   {
+    if (const char* env = std::getenv("MODERNGEKKO_HITCH_LOG"); env && env[0] == '1')
+    {
+      std::fprintf(stderr, "[config] shader reload: host config %08x -> %08x (changed %08x), bits %x\n",
+                   old_shader_host_config.bits, new_host_config.bits,
+                   old_shader_host_config.bits ^ new_host_config.bits, changed_bits);
+    }
     OSD::AddMessage("Video config changed, reloading shaders.", OSD::Duration::NORMAL);
     g_gfx->WaitForGPUIdle();
     g_vertex_manager->InvalidatePipelineObject();

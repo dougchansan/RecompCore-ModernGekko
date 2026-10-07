@@ -28,6 +28,7 @@
 #include "VideoCommon/DataReader.h"
 #include "VideoCommon/FramebufferManager.h"
 #include "VideoCommon/OpcodeDecoding.h"
+#include "VideoCommon/Present.h"
 #include "VideoCommon/VertexLoaderManager.h"
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/VideoBackendBase.h"
@@ -294,6 +295,12 @@ void FifoManager::RunGpuLoop()
         if (!m_emu_running_state.IsSet())
           return;
 
+        // Frame interpolation slots (dual core), never while paused: a paused
+        // emulator's video state belongs to the thread that paused it (state
+        // saves and loads).
+        if (g_presenter && g_presenter->InterpPresentDue())
+          g_presenter->ServiceInterpPresents();
+
         if (m_use_deterministic_gpu_thread)
         {
           // All the fifo/CP stuff is on the CPU.  We just need to run the opcode decoder.
@@ -369,6 +376,8 @@ void FifoManager::RunGpuLoop()
             // leading the CPU thread to wait in Video_OutputXFB or Video_AccessEFB thus slowing
             // things down.
             AsyncRequests::GetInstance()->PullEvents();
+            if (g_presenter && g_presenter->InterpPresentDue())
+              g_presenter->ServiceInterpPresents();
           }
 
           // fast skip remaining GPU time if fifo is empty
