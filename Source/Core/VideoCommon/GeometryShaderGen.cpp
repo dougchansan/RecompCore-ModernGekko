@@ -62,6 +62,9 @@ ShaderCode GenerateGeometryShaderCode(APIType api_type, const ShaderHostConfig& 
   const bool msaa = host_config.msaa;
   const bool ssaa = host_config.ssaa;
   const bool stereo = host_config.stereo;
+  // Layers each primitive is emitted to: 2 for stereoscopy / 120 FPS frame
+  // interpolation, 4 for 240 FPS frame interpolation.
+  const u32 layers = !stereo ? 1 : (host_config.frame_interp && host_config.frame_interp4) ? 4 : 2;
   const auto primitive_type = static_cast<PrimitiveType>(uid_data->primitive_type);
   const u32 vertex_in = vertex_in_map[primitive_type];
   u32 vertex_out = vertex_out_map[primitive_type];
@@ -75,7 +78,7 @@ ShaderCode GenerateGeometryShaderCode(APIType api_type, const ShaderHostConfig& 
     if (host_config.backend_gs_instancing)
     {
       out.Write("layout({}, invocations = {}) in;\n", primitives_ogl[primitive_type],
-                stereo ? 2 : 1);
+                layers);
       out.Write("layout({}_strip, max_vertices = {}) out;\n", wireframe ? "line" : "triangle",
                 vertex_out);
     }
@@ -83,7 +86,7 @@ ShaderCode GenerateGeometryShaderCode(APIType api_type, const ShaderHostConfig& 
     {
       out.Write("layout({}) in;\n", primitives_ogl[primitive_type]);
       out.Write("layout({}_strip, max_vertices = {}) out;\n", wireframe ? "line" : "triangle",
-                stereo ? vertex_out * 2 : vertex_out);
+                vertex_out * layers);
     }
   }
 
@@ -140,14 +143,14 @@ ShaderCode GenerateGeometryShaderCode(APIType api_type, const ShaderHostConfig& 
 
     if (host_config.backend_gs_instancing)
     {
-      out.Write("[maxvertexcount({})]\n[instance({})]\n", vertex_out, stereo ? 2 : 1);
+      out.Write("[maxvertexcount({})]\n[instance({})]\n", vertex_out, layers);
       out.Write("void main({} VS_OUTPUT o[{}], inout {}Stream<VertexData> output, in uint "
                 "InstanceID : SV_GSInstanceID)\n{{\n",
                 primitives_d3d[primitive_type], vertex_in, wireframe ? "Line" : "Triangle");
     }
     else
     {
-      out.Write("[maxvertexcount({})]\n", stereo ? vertex_out * 2 : vertex_out);
+      out.Write("[maxvertexcount({})]\n", vertex_out * layers);
       out.Write("void main({} VS_OUTPUT o[{}], inout {}Stream<VertexData> output)\n{{\n",
                 primitives_d3d[primitive_type], vertex_in, wireframe ? "Line" : "Triangle");
     }
@@ -196,7 +199,7 @@ ShaderCode GenerateGeometryShaderCode(APIType api_type, const ShaderHostConfig& 
     if (host_config.backend_gs_instancing)
       out.Write("\tint eye = InstanceID;\n");
     else
-      out.Write("\tfor (int eye = 0; eye < 2; ++eye) {{\n");
+      out.Write("\tfor (int eye = 0; eye < {}; ++eye) {{\n", layers);
   }
 
   if (wireframe)
@@ -227,7 +230,14 @@ ShaderCode GenerateGeometryShaderCode(APIType api_type, const ShaderHostConfig& 
     out.Write("\tVS_OUTPUT f = o[i];\n");
   }
 
-  if (stereo)
+  if (stereo && host_config.frame_interp)
+  {
+    // Frame interpolation: layer 0 is the real frame; layer k shows the same
+    // primitive k/layers of the way from its previous-frame position (pos_b,
+    // transformed with last frame's matrices) to its current one.
+    out.Write("\tif (eye != 0) f.pos = lerp(f.pos_b, f.pos, float(eye) / {}.0);\n", layers);
+  }
+  else if (stereo)
   {
     // For stereoscopy add a small horizontal offset in Normalized Device Coordinates proportional
     // to the depth of the vertex. We retrieve the depth value from the w-component of the projected

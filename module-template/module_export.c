@@ -7,9 +7,11 @@
 #include "generated.h"
 
 #include "StaticRecompABI.h"
+#include "native_call_guard.h"
 
 static int chassis_dispatch(CPUState* ctx, u32 address)
 {
+    staticrecomp_native_begin_dispatch();
     return dolrecomp_call(ctx, address);
 }
 
@@ -20,6 +22,9 @@ static void chassis_on_state_loaded(CPUState* ctx)
 }
 
 #include "module_tables.inc"
+#ifdef DOLRECOMP_CALL_GUARD_MANIFEST
+#include "native_call_nofallback.inc"
+#endif
 
 static const StaticRecompModuleDesc s_desc = {
     STATICRECOMP_ABI_VERSION,
@@ -49,4 +54,14 @@ static const StaticRecompModuleDesc s_desc = {
 RECOMP_MODULE_EXPORT const StaticRecompModuleDesc* staticrecomp_get_module(void)
 {
     return &s_desc;
+}
+
+RECOMP_MODULE_EXPORT int staticrecomp_is_nofallback_chunk_v2(u32 chunk_index)
+{
+#ifdef DOLRECOMP_CALL_GUARD_MANIFEST
+    return chunk_index < MODULE_CHUNK_RANGE_COUNT && s_native_chunk_nofallback[chunk_index];
+#else
+    (void)chunk_index;
+    return 0;
+#endif
 }

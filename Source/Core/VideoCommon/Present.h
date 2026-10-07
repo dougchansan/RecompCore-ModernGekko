@@ -10,6 +10,7 @@
 #include "VideoCommon/TextureCacheBase.h"
 #include "VideoCommon/TextureConfig.h"
 #include "VideoCommon/VideoCommon.h"
+#include "VideoCommon/VideoEvents.h"
 
 #include <array>
 #include <memory>
@@ -167,6 +168,41 @@ private:
 
   u64 m_frame_count = 0;
   u64 m_present_count = 0;
+
+  // StereoMode::FrameInterp: which EFB/XFB layer RenderXFBToScreen shows, and
+  // the real-frame present scheduled half a field after the in-between one.
+  int m_interp_present_layer = 0;
+  bool m_interp_pending = false;
+  u64 m_interp_pending_xfb_id = 0;
+  // Layer the next scheduled present shows (in-between layers 2..n-1, then 0
+  // for the real frame), and the CoreTiming ticks between presents.
+  u32 m_interp_next_layer = 0;
+  u32 m_interp_layers = 2;
+  u64 m_interp_step_ticks = 0;
+  // Wall-clock time of the next interpolated present: presents follow a steady
+  // field/n grid instead of emulated time, which advances in bursts.
+  TimePoint m_interp_grid{};
+  // Wall-clock slot of the next game frame's first present.
+  TimePoint m_interp_frame_end{};
+  // The on-screen UI has been rendered (Finalize) for the current ImGui frame;
+  // in-between presents redraw it instead of rebuilding it.
+  bool m_exclusive_fullscreen_applied = false;
+  bool m_ui_rendered = false;
+  // Time Present() spends blocked in the swap chain (VSync), averaged. When it
+  // exceeds half a step the display cannot show every in-between frame (e.g.
+  // a 60 Hz monitor) and waiting would slow the game, so in-between frames are
+  // dropped until m_interp_retry, then tried again.
+  double m_interp_block_ms = 0;
+  bool m_interp_dropping = false;
+  TimePoint m_interp_retry{};
+  bool InterpLayerAllowed();
+  PresentInfo m_interp_pending_info{};
+
+public:
+  void ScheduleInterpRealPresent(const PresentInfo& in_between);
+  void PresentInterpReal();
+  void ScheduleInterpStep(u64 delay_ticks);
+  void WaitForInterpSlot();
 
   // XFB tracking
   u64 m_last_xfb_ticks = 0;

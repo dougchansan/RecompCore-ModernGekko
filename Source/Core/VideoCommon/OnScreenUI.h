@@ -19,6 +19,12 @@ struct ImTextureData;
 
 namespace VideoCommon
 {
+using ExternalOverlayDrawCallback = void (*)();
+
+// Registers one lightweight overlay drawn on the video thread immediately
+// before ImGui finalizes the frame. Passing nullptr disables it.
+void SetExternalOverlayDrawCallback(ExternalOverlayDrawCallback callback);
+
 // OnScreenUI handles all the ImGui rendering.
 class OnScreenUI
 {

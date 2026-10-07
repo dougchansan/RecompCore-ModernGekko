@@ -45,6 +45,8 @@ ShaderHostConfig ShaderHostConfig::GetCurrent()
   bits.backend_dynamic_vertex_loader = g_backend_info.bSupportsDynamicVertexLoader;
   bits.backend_vs_point_line_expand = g_ActiveConfig.UseVSForLinePointExpand();
   bits.backend_gl_layer_in_fs = g_backend_info.bSupportsGLLayerInFS;
+  bits.frame_interp = g_ActiveConfig.stereo_mode == StereoMode::FrameInterp;
+  bits.frame_interp4 = bits.frame_interp && g_ActiveConfig.iFrameInterpLayers == 4;
   return bits;
 }
 
@@ -208,6 +210,13 @@ void GenerateVSOutputMembers(ShaderCode& object, APIType api_type, u32 texgens,
                          index_base + index_offset + 1);
       index_offset += 2;
     }
+
+    if (host_config.frame_interp)
+    {
+      DefineOutputMember(object, api_type, qualifier, "float4", "pos_b", -1, stage, "TEXCOORD",
+                         index_base + index_offset);
+      index_offset++;
+    }
   }
   else
   {
@@ -237,6 +246,10 @@ void GenerateVSOutputMembers(ShaderCode& object, APIType api_type, u32 texgens,
       DefineOutputMember(object, api_type, qualifier, "float3", "WorldPos", -1, stage, "TEXCOORD",
                          texgens + 2);
     }
+
+    if (host_config.frame_interp)
+      DefineOutputMember(object, api_type, qualifier, "float4", "pos_b", -1, stage, "TEXCOORD",
+                         texgens + 3);
   }
 }
 
@@ -264,6 +277,9 @@ void AssignVSOutputMembers(ShaderCode& object, std::string_view a, std::string_v
     object.Write("\t{}.clipDist0 = {}.clipDist0;\n", a, b);
     object.Write("\t{}.clipDist1 = {}.clipDist1;\n", a, b);
   }
+
+  if (host_config.frame_interp)
+    object.Write("\t{}.pos_b = {}.pos_b;\n", a, b);
 }
 
 void GenerateLineOffset(ShaderCode& object, std::string_view indent0, std::string_view indent1,

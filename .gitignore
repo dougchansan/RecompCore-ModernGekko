@@ -54,3 +54,7 @@ CMakeLists.txt.user
 StrikersRecomp/generated_smc.txt
 StrikersRecomp/generated.c
 StrikersRecomp/generated.h
+
+# Python-generated cache files
+__pycache__/
+*.pyc

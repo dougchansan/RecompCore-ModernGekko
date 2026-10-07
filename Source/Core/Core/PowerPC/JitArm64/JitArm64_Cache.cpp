@@ -116,6 +116,12 @@ void JitArm64::SetOptimizationEnabled(bool enabled)
     analyzer.SetOption(PPCAnalyst::PPCAnalyzer::OPTION_CONDITIONAL_CONTINUE);
     analyzer.SetOption(PPCAnalyst::PPCAnalyzer::OPTION_CARRY_MERGE);
     analyzer.SetOption(PPCAnalyst::PPCAnalyzer::OPTION_BRANCH_FOLLOW);
+    if (IsStaticRecompFallback())
+    {
+      // Mod entry/return hooks require dispatcher boundaries at calls/returns.
+      analyzer.ClearOption(PPCAnalyst::PPCAnalyzer::OPTION_BRANCH_FOLLOW);
+      analyzer.ClearOption(PPCAnalyst::PPCAnalyzer::OPTION_CONDITIONAL_CONTINUE);
+    }
   }
   else
   {

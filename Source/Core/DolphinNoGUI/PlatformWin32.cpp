@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "DolphinNoGUI/Platform.h"
+#include "pause_menu_host.hpp"
 
 #include "Core/Config/MainSettings.h"
 #include "Core/Config/ConfigManager.h"
@@ -21,12 +22,44 @@
 #include <string>
 #include <vector>
 #include <windows.h>
+#include <windowsx.h>
 #include <climits>
+#include <cstdio>
+#include <cstdlib>
 #include <dwmapi.h>
 #include <thread>
 
 #include "VideoCommon/Present.h"
+#include "VideoCommon/VideoConfig.h"
 #include "resource.h"
+
+void Host_RequestGameReset();
+bool Host_IsNavigationWidescreenEnabled();
+void Host_ToggleNavigationWidescreen();
+bool Host_IsNavigationOverlayVisible();
+void Host_ToggleNavigationOverlay();
+int Host_GetUltrawideEfbScale();
+void Host_SetUltrawideEfbScale(int scale);
+void Host_RequestNavigationMapFit();
+bool Host_IsTextUpscaleEnabled();
+void Host_ToggleTextUpscale();
+bool Host_IsHighResolutionTexturesEnabled();
+void Host_ToggleHighResolutionTextures();
+bool Host_IsCommunityHdTexturePackEnabled();
+void Host_ToggleCommunityHdTexturePack();
+bool Host_IsTextureDumpingEnabled();
+void Host_ToggleTextureDumping();
+bool Host_IsInputOverlayEnabled();
+void Host_ToggleInputOverlay();
+bool Host_IsMinimapHighContrastEnabled();
+void Host_ToggleMinimapHighContrast();
+bool Host_IsFastForwardEnabled();
+void Host_ToggleFastForwardEnabled();
+void Host_SetFastForwardActive(bool active);
+bool Host_IsSixtyFpsEnabled();
+void Host_ToggleSixtyFps();
+bool Host_IsAutosaveEnabled();
+void Host_ToggleAutosave();
 
 namespace
 {
@@ -36,12 +69,24 @@ constexpr UINT ID_SAVE_STATE = 41001;
 constexpr UINT ID_PAUSE = 41002;
 constexpr UINT ID_MUTE = 41003;
 constexpr UINT ID_FULLSCREEN = 41004;
+constexpr UINT ID_NAV_TOGGLE_MAP = 41005;
+constexpr UINT ID_NAV_FIT_MAP = 41006;
+constexpr UINT ID_NAV_WIDESCREEN = 41007;
+constexpr UINT ID_NAV_RESTART = 41009;
+constexpr UINT ID_NAV_ULTRAWIDE_SCALE_3X = 41013;
+constexpr UINT ID_NAV_ULTRAWIDE_SCALE_4X = 41014;
+constexpr UINT ID_NAV_ULTRAWIDE_SCALE_5X = 41015;
+constexpr UINT ID_NAV_ULTRAWIDE_SCALE_6X = 41016;
+constexpr UINT ID_NAV_TEXT_UPSCALE = 41017;
+constexpr UINT ID_NAV_INPUT_OVERLAY = 41020;
+constexpr UINT ID_NAV_MINIMAP_HIGH_CONTRAST = 41021;
+constexpr UINT ID_NAV_FAST_FORWARD = 41022;
+constexpr UINT ID_NAV_AUTOSAVE = 41023;
+constexpr UINT ID_NAV_SIXTY_FPS = 41024;
+constexpr UINT ID_NAV_COMMUNITY_HD_TEXTURE_PACK = 41025;
 constexpr UINT ID_LOAD_STATE_FIRST = 41100;
 constexpr UINT ID_LOAD_STATE_LAST = 41199;
 
-// Hold-to-fast-forward target. 2x is fast enough to skip a cutscene without
-// outrunning what most hosts can actually emulate.
-constexpr float FAST_FORWARD_SPEED = 2.0f;
 
 class PlatformWin32 final : public Platform
 {
@@ -51,11 +96,31 @@ public:
   bool Init() override;
   void SetTitle(const std::string& string) override;
   void MainLoop() override;
+  void ToggleFullscreenFromMenu() override { ToggleFullscreen(); }
+  void SetExclusiveFullscreen(bool exclusive) override
+  {
+    m_exclusive_fullscreen = exclusive;
+    UpdateExclusiveFullscreen();
+  }
+  void RequestGraphicsSwitchReveal() override
+  {
+    if (m_hwnd && m_switch_pending)
+      PostMessage(m_hwnd, WM_GRAPHICS_SWITCH_REVEAL, 0, 0);
+  }
 
   WindowSystemInfo GetWindowSystemInfo() const override;
 
 private:
   static constexpr TCHAR WINDOW_CLASS_NAME[] = _T("DolphinNoGUI");
+  static constexpr UINT WM_GRAPHICS_SWITCH_REVEAL = WM_APP + 0x47;
+
+  // Graphics API switch (MODERNGEKKO_SWITCH_EVENT): the window is created off
+  // screen and moved into the previous session's place once rendering.
+  void RevealAfterGraphicsSwitch();
+  bool m_switch_pending = false;
+  bool m_switch_fullscreen = false;
+  bool m_app_active = true;
+  int m_switch_x = 0, m_switch_y = 0, m_switch_width = 0, m_switch_height = 0;
 
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -65,6 +130,8 @@ private:
   void RefreshMenu(HMENU menu);
   void SaveStateToStatesDirectory();
   void ToggleFullscreen();
+  void SetFullscreen(bool fullscreen);
+  void UpdateExclusiveFullscreen();
   void UpdateWindowPosition();
   void ProcessEvents();
 
@@ -73,13 +140,15 @@ private:
   HMENU m_file_menu{};
   HMENU m_load_menu{};
   HMENU m_view_menu{};
+  HMENU m_ultrawide_quality_menu{};
   // Parallel to the Load State menu entries, rebuilt whenever it opens.
   std::vector<std::string> m_load_state_paths;
   std::time_t m_last_save_time{};
   std::size_t m_save_sequence{};
-  bool m_fullscreen = false;
-  LONG m_windowed_style = 0;
-  RECT m_windowed_rect{};
+  WINDOWPLACEMENT m_windowed_placement{sizeof(WINDOWPLACEMENT)};
+  LONG_PTR m_windowed_style = WS_OVERLAPPEDWINDOW;
+  LONG_PTR m_windowed_ex_style = WS_EX_CLIENTEDGE;
+  u32 m_mouse_buttons = 0;
 
   int m_window_x = Config::Get(Config::MAIN_RENDER_WINDOW_XPOS);
   int m_window_y = Config::Get(Config::MAIN_RENDER_WINDOW_YPOS);
@@ -120,6 +189,34 @@ bool PlatformWin32::RegisterRenderWindowClass()
 
 bool PlatformWin32::CreateRenderWindow()
 {
+  // MODERNGEKKO_START_RECT=x,y,w,h: set by the pause menu's Graphics API
+  // switch so the relaunched session opens exactly over the previous window
+  // (and, when fullscreen, on the same monitor).
+  if (const char* rect = std::getenv("MODERNGEKKO_START_RECT"); rect && *rect)
+  {
+    int x, y, w, h;
+    if (std::sscanf(rect, "%d,%d,%d,%d", &x, &y, &w, &h) == 4 && w > 0 && h > 0)
+    {
+      m_window_x = x;
+      m_window_y = y;
+      m_window_width = w;
+      m_window_height = h;
+    }
+  }
+  if (const char* event = std::getenv("MODERNGEKKO_SWITCH_EVENT"); event && *event)
+  {
+    // Keep the window off every monitor (but visible, so its swap chain
+    // presents normally) until the new session is drawing.
+    m_switch_pending = true;
+    m_switch_x = m_window_x;
+    m_switch_y = m_window_y;
+    m_switch_width = m_window_width;
+    m_switch_height = m_window_height;
+    // Right of every monitor: CreateRenderWindow treats a negative x as
+    // "default position", which would put the window on screen.
+    m_window_x = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + 64;
+    m_window_y = (std::max)(GetSystemMetrics(SM_YVIRTUALSCREEN), 0);
+  }
   m_hwnd = CreateWindowEx(WS_EX_CLIENTEDGE, WINDOW_CLASS_NAME, _T("Dolphin"), WS_OVERLAPPEDWINDOW,
                           m_window_x < 0 ? CW_USEDEFAULT : m_window_x,
                           m_window_y < 0 ? CW_USEDEFAULT : m_window_y, m_window_width,
@@ -141,19 +238,53 @@ bool PlatformWin32::CreateMenus()
   m_file_menu = CreatePopupMenu();
   m_load_menu = CreatePopupMenu();
   m_view_menu = CreatePopupMenu();
-  if (!m_menu || !m_file_menu || !m_load_menu || !m_view_menu)
+  m_ultrawide_quality_menu = CreatePopupMenu();
+  if (!m_menu || !m_file_menu || !m_load_menu || !m_view_menu ||
+      !m_ultrawide_quality_menu)
     return false;
 
   AppendMenuW(m_file_menu, MF_STRING, ID_SAVE_STATE, L"&Save State\tF1");
   AppendMenuW(m_file_menu, MF_POPUP, reinterpret_cast<UINT_PTR>(m_load_menu), L"&Load State");
   AppendMenuW(m_file_menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(m_file_menu, MF_STRING, ID_NAV_RESTART, L"&Restart Game");
+  AppendMenuW(m_file_menu, MF_SEPARATOR, 0, nullptr);
   // Checked state is refreshed from the core when the menu opens, so it cannot
   // drift out of step with an emulation that was paused some other way.
   AppendMenuW(m_file_menu, MF_STRING, ID_PAUSE, L"&Pause");
+  AppendMenuW(m_file_menu, MF_STRING, ID_NAV_AUTOSAVE, L"Rotating &Autosaves");
 
   AppendMenuW(m_view_menu, MF_STRING, ID_FULLSCREEN, L"&Fullscreen\tAlt+Enter");
   AppendMenuW(m_view_menu, MF_STRING, ID_MUTE, L"&Mute Audio");
-
+  AppendMenuW(m_view_menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(m_view_menu, MF_STRING, ID_NAV_TOGGLE_MAP, L"&Show Navigation Map");
+  AppendMenuW(m_view_menu, MF_STRING, ID_NAV_FIT_MAP, L"&Fit Map Bounds");
+  AppendMenuW(m_view_menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(m_view_menu, MF_STRING, ID_NAV_WIDESCREEN, L"Native &Ultrawide");
+  AppendMenuW(m_ultrawide_quality_menu, MF_STRING,
+              ID_NAV_ULTRAWIDE_SCALE_3X, L"3x Performance");
+  AppendMenuW(m_ultrawide_quality_menu, MF_STRING,
+              ID_NAV_ULTRAWIDE_SCALE_4X, L"4x Balanced");
+  AppendMenuW(m_ultrawide_quality_menu, MF_STRING,
+              ID_NAV_ULTRAWIDE_SCALE_5X, L"5x Quality");
+  AppendMenuW(m_ultrawide_quality_menu, MF_STRING,
+              ID_NAV_ULTRAWIDE_SCALE_6X, L"6x Ultra");
+  AppendMenuW(m_view_menu, MF_POPUP,
+              reinterpret_cast<UINT_PTR>(m_ultrawide_quality_menu),
+              L"Ultrawide Render &Quality");
+  AppendMenuW(m_view_menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(m_view_menu, MF_STRING, ID_NAV_TEXT_UPSCALE,
+              L"High-Resolution &Text");
+  AppendMenuW(m_view_menu, MF_STRING, ID_NAV_COMMUNITY_HD_TEXTURE_PACK,
+              L"Community HD Texture &Pack");
+  AppendMenuW(m_view_menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(m_view_menu, MF_STRING, ID_NAV_INPUT_OVERLAY,
+              L"Controller &Input Overlay");
+  AppendMenuW(m_view_menu, MF_STRING, ID_NAV_MINIMAP_HIGH_CONTRAST,
+              L"High-Contrast &Minimap");
+  AppendMenuW(m_view_menu, MF_STRING, ID_NAV_SIXTY_FPS,
+              L"60 &FPS Gameplay Patch (Relaunch Required)");
+  AppendMenuW(m_view_menu, MF_STRING, ID_NAV_FAST_FORWARD,
+              L"Hold Space to &Fast-Forward");
   AppendMenuW(m_menu, MF_POPUP, reinterpret_cast<UINT_PTR>(m_file_menu), L"&File");
   AppendMenuW(m_menu, MF_POPUP, reinterpret_cast<UINT_PTR>(m_view_menu), L"&View");
   return SetMenu(m_hwnd, m_menu) != FALSE;
@@ -168,6 +299,9 @@ void PlatformWin32::RefreshMenu(const HMENU menu)
     auto& system = Core::System::GetInstance();
     const bool paused = Core::GetState(system) == Core::State::Paused;
     CheckMenuItem(m_file_menu, ID_PAUSE, MF_BYCOMMAND | (paused ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(m_file_menu, ID_NAV_AUTOSAVE,
+                  MF_BYCOMMAND |
+                      (Host_IsAutosaveEnabled() ? MF_CHECKED : MF_UNCHECKED));
     return;
   }
 
@@ -176,8 +310,58 @@ void PlatformWin32::RefreshMenu(const HMENU menu)
     CheckMenuItem(m_view_menu, ID_MUTE,
                   MF_BYCOMMAND |
                       (Config::Get(Config::MAIN_AUDIO_MUTED) ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(m_view_menu, ID_NAV_TOGGLE_MAP,
+                  MF_BYCOMMAND |
+                      (Host_IsNavigationOverlayVisible() ? MF_CHECKED :
+                                                           MF_UNCHECKED));
+    CheckMenuItem(m_view_menu, ID_NAV_WIDESCREEN,
+                  MF_BYCOMMAND |
+                      (Host_IsNavigationWidescreenEnabled() ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(m_view_menu, ID_FULLSCREEN,
-                  MF_BYCOMMAND | (m_fullscreen ? MF_CHECKED : MF_UNCHECKED));
+                  MF_BYCOMMAND | (m_window_fullscreen ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(m_view_menu, ID_NAV_TEXT_UPSCALE,
+                  MF_BYCOMMAND |
+                      (Host_IsTextUpscaleEnabled() ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(m_view_menu, ID_NAV_COMMUNITY_HD_TEXTURE_PACK,
+                  MF_BYCOMMAND |
+                      (Host_IsCommunityHdTexturePackEnabled() ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(m_view_menu, ID_NAV_INPUT_OVERLAY,
+                  MF_BYCOMMAND |
+                      (Host_IsInputOverlayEnabled() ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(m_view_menu, ID_NAV_MINIMAP_HIGH_CONTRAST,
+                  MF_BYCOMMAND |
+                      (Host_IsMinimapHighContrastEnabled() ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(m_view_menu, ID_NAV_FAST_FORWARD,
+                  MF_BYCOMMAND |
+                      (Host_IsFastForwardEnabled() ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(m_view_menu, ID_NAV_SIXTY_FPS,
+                  MF_BYCOMMAND |
+                      (Host_IsSixtyFpsEnabled() ? MF_CHECKED : MF_UNCHECKED));
+    return;
+  }
+  if (menu == m_ultrawide_quality_menu)
+  {
+    UINT selected = ID_NAV_ULTRAWIDE_SCALE_5X;
+    switch (Host_GetUltrawideEfbScale())
+    {
+    case 3:
+      selected = ID_NAV_ULTRAWIDE_SCALE_3X;
+      break;
+    case 4:
+      selected = ID_NAV_ULTRAWIDE_SCALE_4X;
+      break;
+    case 5:
+      selected = ID_NAV_ULTRAWIDE_SCALE_5X;
+      break;
+    case 6:
+      selected = ID_NAV_ULTRAWIDE_SCALE_6X;
+      break;
+    default:
+      break;
+    }
+    CheckMenuRadioItem(m_ultrawide_quality_menu,
+                       ID_NAV_ULTRAWIDE_SCALE_3X,
+                       ID_NAV_ULTRAWIDE_SCALE_6X, selected, MF_BYCOMMAND);
     return;
   }
 
@@ -231,44 +415,81 @@ void PlatformWin32::SaveStateToStatesDirectory()
 
 void PlatformWin32::ToggleFullscreen()
 {
-  if (!m_fullscreen)
-  {
-    GetWindowRect(m_hwnd, &m_windowed_rect);
-    m_windowed_style = GetWindowLong(m_hwnd, GWL_STYLE);
+  SetFullscreen(!m_window_fullscreen);
+}
 
-    MONITORINFO monitor{};
-    monitor.cbSize = sizeof(monitor);
-    if (!GetMonitorInfo(MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTONEAREST), &monitor))
+void PlatformWin32::SetFullscreen(bool fullscreen)
+{
+  if (!m_hwnd || fullscreen == m_window_fullscreen)
+    return;
+
+  if (fullscreen)
+  {
+    m_windowed_style = GetWindowLongPtr(m_hwnd, GWL_STYLE);
+    m_windowed_ex_style = GetWindowLongPtr(m_hwnd, GWL_EXSTYLE);
+    m_windowed_placement.length = sizeof(WINDOWPLACEMENT);
+    GetWindowPlacement(m_hwnd, &m_windowed_placement);
+
+    const HMONITOR monitor = MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO monitor_info{sizeof(MONITORINFO)};
+    if (!GetMonitorInfo(monitor, &monitor_info))
       return;
 
     SetMenu(m_hwnd, nullptr);
-    SetWindowLong(m_hwnd, GWL_STYLE, m_windowed_style & ~WS_OVERLAPPEDWINDOW);
-    SetWindowPos(m_hwnd, HWND_TOP, monitor.rcMonitor.left, monitor.rcMonitor.top,
-                 monitor.rcMonitor.right - monitor.rcMonitor.left,
-                 monitor.rcMonitor.bottom - monitor.rcMonitor.top,
-                 SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
-    m_fullscreen = true;
-    return;
+    SetWindowLongPtr(m_hwnd, GWL_STYLE,
+                     m_windowed_style & ~static_cast<LONG_PTR>(WS_OVERLAPPEDWINDOW));
+    SetWindowLongPtr(m_hwnd, GWL_EXSTYLE,
+                     m_windowed_ex_style & ~static_cast<LONG_PTR>(WS_EX_CLIENTEDGE));
+    const RECT& bounds = monitor_info.rcMonitor;
+    SetWindowPos(m_hwnd, HWND_TOP, bounds.left, bounds.top,
+                 bounds.right - bounds.left, bounds.bottom - bounds.top,
+                 SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+    m_window_fullscreen = true;
+  }
+  else
+  {
+    SetWindowLongPtr(m_hwnd, GWL_STYLE, m_windowed_style);
+    SetWindowLongPtr(m_hwnd, GWL_EXSTYLE, m_windowed_ex_style);
+    SetMenu(m_hwnd, m_menu);
+    SetWindowPlacement(m_hwnd, &m_windowed_placement);
+    SetWindowPos(m_hwnd, nullptr, 0, 0, 0, 0,
+                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE |
+                     SWP_NOZORDER | SWP_NOOWNERZORDER);
+    m_window_fullscreen = false;
   }
 
-  SetWindowLong(m_hwnd, GWL_STYLE, m_windowed_style);
-  SetMenu(m_hwnd, m_menu);
-  SetWindowPos(m_hwnd, nullptr, m_windowed_rect.left, m_windowed_rect.top,
-               m_windowed_rect.right - m_windowed_rect.left,
-               m_windowed_rect.bottom - m_windowed_rect.top,
-               SWP_NOOWNERZORDER | SWP_FRAMECHANGED | SWP_NOZORDER);
-  m_fullscreen = false;
+  Config::SetCurrent(Config::MAIN_FULLSCREEN, fullscreen);
+  DrawMenuBar(m_hwnd);
+  if (g_presenter)
+    g_presenter->ResizeSurface();
+  UpdateExclusiveFullscreen();
+}
+
+// Exclusive mode only while fullscreen, focused and not mid graphics switch, so
+// Alt-Tab hands the display back and refocusing takes it again.
+void PlatformWin32::UpdateExclusiveFullscreen()
+{
+  const bool wanted = m_exclusive_fullscreen && m_window_fullscreen && !m_switch_pending &&
+                      m_hwnd && m_app_active;
+  g_exclusive_fullscreen_wanted.store(wanted, std::memory_order_relaxed);
 }
 
 bool PlatformWin32::Init()
 {
+  // Keep the HWND client area, Vulkan swapchain, ImGui overlay, and mouse
+  // coordinates on the same physical-pixel grid on scaled ultrawide displays.
+  SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+  SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
   if (!RegisterRenderWindowClass() || !CreateRenderWindow() || !CreateMenus())
     return false;
 
-  // TODO: Enter fullscreen if enabled.
   if (Config::Get(Config::MAIN_FULLSCREEN))
   {
-    ProcessEvents();
+    if (m_switch_pending)
+      m_switch_fullscreen = true;  // applied when revealed
+    else
+      SetFullscreen(true);
   }
 
   if (Config::Get(Config::MAIN_DISABLE_SCREENSAVER))
@@ -289,6 +510,7 @@ void PlatformWin32::MainLoop()
   {
     UpdateRunningFlag();
     Core::HostDispatchJobs(Core::System::GetInstance());
+    Host_PauseMenuTick();
     ProcessEvents();
     UpdateWindowPosition();
 
@@ -304,6 +526,29 @@ WindowSystemInfo PlatformWin32::GetWindowSystemInfo() const
   wsi.render_window = reinterpret_cast<void*>(m_hwnd);
   wsi.render_surface = reinterpret_cast<void*>(m_hwnd);
   return wsi;
+}
+
+void PlatformWin32::RevealAfterGraphicsSwitch()
+{
+  if (!m_switch_pending)
+    return;
+  m_switch_pending = false;
+  UpdateExclusiveFullscreen();
+  SetWindowPos(m_hwnd, HWND_TOP, m_switch_x, m_switch_y, m_switch_width, m_switch_height,
+               SWP_SHOWWINDOW);
+  if (m_switch_fullscreen)
+    SetFullscreen(true);
+  SetForegroundWindow(m_hwnd);
+  UpdateWindowPosition();
+  // Tell the previous session it can hide its window and exit.
+  if (const char* event = std::getenv("MODERNGEKKO_SWITCH_EVENT"); event && *event)
+  {
+    if (HANDLE ready = OpenEventA(EVENT_MODIFY_STATE, FALSE, event))
+    {
+      SetEvent(ready);
+      CloseHandle(ready);
+    }
+  }
 }
 
 void PlatformWin32::UpdateWindowPosition()
@@ -337,6 +582,11 @@ LRESULT PlatformWin32::WndProc(const HWND hwnd, const UINT msg, const WPARAM wPa
   PlatformWin32* platform = reinterpret_cast<PlatformWin32*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
   switch (msg)
   {
+  case WM_GRAPHICS_SWITCH_REVEAL:
+    if (platform)
+      platform->RevealAfterGraphicsSwitch();
+    return 0;
+
   case WM_NCCREATE:
   {
     platform = static_cast<PlatformWin32*>(reinterpret_cast<CREATESTRUCT*>(lParam)->lpCreateParams);
@@ -364,16 +614,19 @@ LRESULT PlatformWin32::WndProc(const HWND hwnd, const UINT msg, const WPARAM wPa
   break;
 
   case WM_KEYDOWN:
-    // Bit 30 of lParam is the previous key state: ignore auto-repeat, or holding
-    // F1 down would write a state every few milliseconds.
+    Host_PauseMenuKey(static_cast<int>(wParam), true);
+    if (wParam == VK_ESCAPE || Host_IsPauseMenuOpen())
+      return 0;
+    // Bit 30 is the previous key state. Ignore auto-repeat so holding F1 cannot
+    // queue a new savestate every few milliseconds.
     if (wParam == VK_F1 && (static_cast<ULONG_PTR>(lParam) & (1u << 30)) == 0)
     {
       platform->SaveStateToStatesDirectory();
       return 0;
     }
-    else if (wParam == VK_SPACE)
+    else if (wParam == VK_SPACE && Host_IsFastForwardEnabled())
     {
-      Config::SetCurrent(Config::MAIN_EMULATION_SPEED, FAST_FORWARD_SPEED);
+      Host_SetFastForwardActive(true);
       return 0;
     }
     else if (wParam == VK_F11)
@@ -381,31 +634,57 @@ LRESULT PlatformWin32::WndProc(const HWND hwnd, const UINT msg, const WPARAM wPa
       platform->ToggleFullscreen();
       return 0;
     }
-    else if (wParam == VK_ESCAPE && platform->m_fullscreen)
-    {
-      platform->ToggleFullscreen();
-      return 0;
-    }
-    else if (wParam == VK_ESCAPE)
-    {
-      platform->RequestShutdown();
-    }
     break;
 
   case WM_KEYUP:
+    Host_PauseMenuKey(static_cast<int>(wParam), false);
+    if (wParam == VK_ESCAPE || Host_IsPauseMenuOpen())
+      return 0;
     if (wParam == VK_SPACE)
     {
-      Config::SetCurrent(Config::MAIN_EMULATION_SPEED, 1.0f);
+      Host_SetFastForwardActive(false);
       return 0;
+    }
+    break;
+
+  case WM_ACTIVATEAPP:
+    if (platform)
+    {
+      platform->m_app_active = wParam != FALSE;
+      platform->UpdateExclusiveFullscreen();
     }
     break;
 
   case WM_KILLFOCUS:
-    // Never leave emulation running fast because Space was released while
-    // another window had focus and the key-up went elsewhere.
-    Config::SetCurrent(Config::MAIN_EMULATION_SPEED, 1.0f);
+    Host_PauseMenuFocusLost();
+    platform->m_mouse_buttons = 0;
+    if (g_presenter)
+      g_presenter->SetMousePress(0);
+    // Never leave emulation sped up if Space is released while another window has focus.
+    Host_SetFastForwardActive(false);
     break;
 
+  case WM_MOUSEMOVE:
+    if (Host_IsPauseMenuOpen() && g_presenter)
+      g_presenter->SetMousePos(static_cast<float>(GET_X_LPARAM(lParam)),
+                               static_cast<float>(GET_Y_LPARAM(lParam)));
+    break;
+  case WM_LBUTTONDOWN:
+  case WM_LBUTTONUP:
+  case WM_RBUTTONDOWN:
+  case WM_RBUTTONUP:
+    if (platform && g_presenter &&
+        (Host_IsPauseMenuOpen() || msg == WM_LBUTTONUP || msg == WM_RBUTTONUP))
+    {
+      const u32 bit = (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP) ? 1u : 2u;
+      if (msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN)
+        platform->m_mouse_buttons |= bit;
+      else
+        platform->m_mouse_buttons &= ~bit;
+      g_presenter->SetMousePress(platform->m_mouse_buttons);
+      return 0;
+    }
+    break;
   case WM_SYSKEYDOWN:
     if (wParam == VK_RETURN && (GetKeyState(VK_MENU) & 0x8000) != 0)
     {
@@ -441,6 +720,46 @@ LRESULT PlatformWin32::WndProc(const HWND hwnd, const UINT msg, const WPARAM wPa
     else if (command == ID_FULLSCREEN)
     {
       platform->ToggleFullscreen();
+    }
+    else if (command == ID_NAV_RESTART)
+    {
+      Host_RequestGameReset();
+    }
+    else if (command == ID_NAV_AUTOSAVE)
+    {
+      Host_ToggleAutosave();
+    }
+    else if (command == ID_NAV_TOGGLE_MAP)
+    {
+      Host_ToggleNavigationOverlay();
+    }
+    else if (command == ID_NAV_WIDESCREEN)
+    {
+      Host_ToggleNavigationWidescreen();
+    }
+    else if (command == ID_NAV_ULTRAWIDE_SCALE_3X)
+      Host_SetUltrawideEfbScale(3);
+    else if (command == ID_NAV_ULTRAWIDE_SCALE_4X)
+      Host_SetUltrawideEfbScale(4);
+    else if (command == ID_NAV_ULTRAWIDE_SCALE_5X)
+      Host_SetUltrawideEfbScale(5);
+    else if (command == ID_NAV_ULTRAWIDE_SCALE_6X)
+      Host_SetUltrawideEfbScale(6);
+    else if (command == ID_NAV_TEXT_UPSCALE)
+      Host_ToggleTextUpscale();
+    else if (command == ID_NAV_COMMUNITY_HD_TEXTURE_PACK)
+      Host_ToggleCommunityHdTexturePack();
+    else if (command == ID_NAV_INPUT_OVERLAY)
+      Host_ToggleInputOverlay();
+    else if (command == ID_NAV_MINIMAP_HIGH_CONTRAST)
+      Host_ToggleMinimapHighContrast();
+    else if (command == ID_NAV_FAST_FORWARD)
+      Host_ToggleFastForwardEnabled();
+    else if (command == ID_NAV_SIXTY_FPS)
+      Host_ToggleSixtyFps();
+    else if (command == ID_NAV_FIT_MAP)
+    {
+      Host_RequestNavigationMapFit();
     }
     else if (command >= ID_LOAD_STATE_FIRST && command <= ID_LOAD_STATE_LAST)
     {

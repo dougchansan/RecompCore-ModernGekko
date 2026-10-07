@@ -86,8 +86,11 @@ endif()
 
 add_library(${MODULE_NAME} SHARED
   module_export.c
+  sdk_leaf_guard.c
+  native_call_guard.c
   "${MODULE_TABLES}"
   "${GXRUNTIME_DIR}/src/core/cpu.c"
+  "${GXRUNTIME_DIR}/src/core/native_sdk.c"
   "${GXRUNTIME_DIR}/src/core/cpu_exception.c"
   "${GXRUNTIME_DIR}/src/core/cpu_interpreter.c"
   "${GXRUNTIME_DIR}/src/core/cpu_interpreter_table.c"
@@ -103,15 +106,36 @@ set_target_properties(${MODULE_NAME} PROPERTIES
 set_source_files_properties("${MODULE_TABLES}" PROPERTIES HEADER_FILE_ONLY TRUE GENERATED TRUE)
 
 target_compile_definitions(${MODULE_NAME} PRIVATE MODULE_GAME_ID="${GAME_ID}")
+if(EXISTS "${GENERATED_DIR}/native_call_nofallback.inc")
+  target_compile_definitions(${MODULE_NAME} PRIVATE DOLRECOMP_CALL_GUARD_MANIFEST=1)
+endif()
 
 target_include_directories(${MODULE_NAME} PRIVATE
   "${GENERATED_DIR}"
   "${GXRUNTIME_DIR}/include"
   "${CHASSIS_ABI_DIR}"
   "${CMAKE_CURRENT_BINARY_DIR}")
+target_include_directories(${MODULE_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 
 if(NOT WIN32)
   target_link_libraries(${MODULE_NAME} PRIVATE m)
+endif()
+
+# DOLRECOMP_LLVM_PGO=gen makes the llvm backend emit LLVM InstrProf counters
+# into the generated objects, and those need the profiling runtime. The module
+# links -nostdlib -nostartfiles, so nothing pulls it in and the link fails with
+# undefined __llvm_profile_instrument_target / __llvm_profile_runtime - which
+# is why the PGO path could not be run end to end before. Pass the runtime that
+# matches the clang whose LLVM did the instrumenting; a mismatched one is worse
+# than none, so this is explicit rather than searched for.
+set(RECOMPCORE_MODULE_PROFILE_RUNTIME "" CACHE FILEPATH
+    "clang_rt.profile library to link when building an instrumented (PGO gen) module")
+if(RECOMPCORE_MODULE_PROFILE_RUNTIME)
+  if(NOT EXISTS "${RECOMPCORE_MODULE_PROFILE_RUNTIME}")
+    message(FATAL_ERROR
+      "RECOMPCORE_MODULE_PROFILE_RUNTIME does not exist: ${RECOMPCORE_MODULE_PROFILE_RUNTIME}")
+  endif()
+  target_link_libraries(${MODULE_NAME} PRIVATE "${RECOMPCORE_MODULE_PROFILE_RUNTIME}")
 endif()
 if(UNIX AND NOT APPLE)
   target_link_options(${MODULE_NAME} PRIVATE
@@ -119,6 +143,27 @@ if(UNIX AND NOT APPLE)
   set_property(TARGET ${MODULE_NAME} APPEND PROPERTY LINK_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/module.exports")
 endif()
+
+# Extra target flags for the generated translation units, e.g. "-mfma".
+#
+# Empty by default, because it trades portability for speed and that is the
+# builder's call, not ours. It matters for native substitutions: those call
+# fmaf() to reproduce the Gekko's fused ps_madds exactly, and on a baseline
+# x86-64 target - which predates FMA3 - fmaf is not an instruction but a libm
+# call computing the fused result in software. PSMTXConcat alone ran 4.5M times
+# in one traced scene at twelve fmaf each, so the difference is not marginal.
+#
+# -mfma does not weaken the float contract: -ffp-contract=off still stops the
+# compiler fusing anything we did not write as fmaf. It does require FMA3
+# hardware (Haswell/Piledriver onward); a module built with it will fault with
+# an illegal instruction on older CPUs.
+set(RECOMPCORE_MODULE_ARCH_FLAGS "" CACHE STRING
+    "Extra architecture flags for generated module translation units (e.g. -mfma)")
+# Arrives as one space-separated string from moderngekko-port's --arch-flags, so
+# split it: passed through whole, "-mfma -mavx2" would reach the compiler as a
+# single unrecognised argument.
+separate_arguments(RECOMPCORE_MODULE_ARCH_FLAGS_LIST NATIVE_COMMAND
+                   "${RECOMPCORE_MODULE_ARCH_FLAGS}")
 
 option(RECOMPCORE_MODULE_ENABLE_IPO "Enable Clang module interprocedural optimization when supported" ON)
 set(RECOMPCORE_MODULE_OPT_LEVEL "2" CACHE STRING
@@ -161,8 +206,10 @@ if(MSVC)
   endif()
 elseif(CMAKE_C_COMPILER_ID MATCHES "Clang")
   target_compile_options(${MODULE_NAME} PRIVATE
-    -O${RECOMPCORE_MODULE_OPT_LEVEL} -ffp-contract=off -fno-fast-math)
+    -O${RECOMPCORE_MODULE_OPT_LEVEL} -ffp-contract=off -fno-fast-math
+    ${RECOMPCORE_MODULE_ARCH_FLAGS_LIST})
 elseif(CMAKE_C_COMPILER_ID STREQUAL "GNU")
   target_compile_options(${MODULE_NAME} PRIVATE
-    -O${RECOMPCORE_MODULE_OPT_LEVEL} -ffp-contract=off -fno-fast-math)
+    -O${RECOMPCORE_MODULE_OPT_LEVEL} -ffp-contract=off -fno-fast-math
+    ${RECOMPCORE_MODULE_ARCH_FLAGS_LIST})
 endif()

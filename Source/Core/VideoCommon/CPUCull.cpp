@@ -12,6 +12,7 @@
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/VertexShaderManager.h"
+#include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/XFMemory.h"
 
 // We really want things like c.w * a.x - a.w * c.x to stay symmetric, so they cancel to zero on
@@ -164,7 +165,14 @@ bool CPUCull::AreAllVerticesCulled(VertexLoaderBase* loader, OpcodeDecoder::Prim
   const TransformFunction transform = m_transform_table[posHas3Elems][perVertexPosMtx];
   transform(m_transform_buffer.get(), src, stride, count);
   const CullFunction cull = m_cull_table[primitive][cull_mode];
-  return cull(m_transform_buffer.get(), count);
+  // Native Hor+ can expose geometry outside the emulated projection that was
+  // current when a display list was prepared. Keep rejecting degenerate,
+  // back-facing, and vertically clipped batches, but leave horizontal clip
+  // rejection to the GPU while the native safe-area projection is active.
+  // Disabling CPU culling entirely is not viable for Colosseum because it
+  // submits large unused vertex batches in several rooms and cutscenes.
+  return cull(m_transform_buffer.get(), count,
+              g_ActiveConfig.bWidescreenHudSafeArea);
 }
 
 template <typename T>

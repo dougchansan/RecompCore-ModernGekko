@@ -21,7 +21,9 @@
 #include <cstring>
 #include <thread>
 
-@interface Application : NSApplication
+static Platform* s_application_platform = nullptr;
+
+@interface NSApplication (DolphinNoGUI)
 @property Platform* platform;
 - (void)shutdown;
 - (void)togglePause;
@@ -33,7 +35,17 @@
 - (void)saveState:(id)sender;
 @end
 
-@implementation Application
+@implementation NSApplication (DolphinNoGUI)
+- (Platform*)platform
+{
+  return s_application_platform;
+}
+
+- (void)setPlatform:(Platform*)platform
+{
+  s_application_platform = platform;
+}
+
 - (void)shutdown;
 {
   [self platform]->Stop();
@@ -202,14 +214,14 @@ PlatformMacOS::~PlatformMacOS()
 
 bool PlatformMacOS::Init()
 {
-  [Application sharedApplication];
+  [NSApplication sharedApplication];
 
   m_app_delegate = [[AppDelegate alloc] initWithPlatform:this];
   [NSApp setDelegate:m_app_delegate];
 
   [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
   [NSApp setPlatform:this];
-  [Application.sharedApplication finishLaunching];
+  [NSApp finishLaunching];
 
   unsigned long styleMask =
       NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable;

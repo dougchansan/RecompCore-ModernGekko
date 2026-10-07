@@ -218,7 +218,9 @@ void Jit64::bcx(UGeckoInstruction inst)
   if ((inst.BO & BO_DONT_DECREMENT_FLAG) == 0)
     SetJumpTarget(pCTRDontBranch);
 
-  if (!analyzer.HasOption(PPCAnalyst::PPCAnalyzer::OPTION_CONDITIONAL_CONTINUE))
+  if (analyzer.HasOption(PPCAnalyst::PPCAnalyzer::OPTION_PRESERVE_CALL_BOUNDARIES) ?
+          !js.op->conditionalContinue :
+          !analyzer.HasOption(PPCAnalyst::PPCAnalyzer::OPTION_CONDITIONAL_CONTINUE))
   {
     gpr.Flush();
     fpr.Flush();
@@ -278,7 +280,9 @@ void Jit64::bcctrx(UGeckoInstruction inst)
     }
     SetJumpTarget(b);
 
-    if (!analyzer.HasOption(PPCAnalyst::PPCAnalyzer::OPTION_CONDITIONAL_CONTINUE))
+    if (analyzer.HasOption(PPCAnalyst::PPCAnalyzer::OPTION_PRESERVE_CALL_BOUNDARIES) ?
+            !js.op->conditionalContinue :
+            !analyzer.HasOption(PPCAnalyst::PPCAnalyzer::OPTION_CONDITIONAL_CONTINUE))
     {
       gpr.Flush();
       fpr.Flush();
@@ -349,7 +353,9 @@ void Jit64::bclrx(UGeckoInstruction inst)
   if ((inst.BO & BO_DONT_DECREMENT_FLAG) == 0)
     SetJumpTarget(pCTRDontBranch);
 
-  if (!analyzer.HasOption(PPCAnalyst::PPCAnalyzer::OPTION_CONDITIONAL_CONTINUE))
+  if (analyzer.HasOption(PPCAnalyst::PPCAnalyzer::OPTION_PRESERVE_CALL_BOUNDARIES) ?
+          !js.op->conditionalContinue :
+          !analyzer.HasOption(PPCAnalyst::PPCAnalyzer::OPTION_CONDITIONAL_CONTINUE))
   {
     gpr.Flush();
     fpr.Flush();

@@ -3,6 +3,9 @@
 
 #include "VideoCommon/VideoConfig.h"
 
+#include <atomic>
+#include <cstdlib>
+
 #include <algorithm>
 #include <optional>
 
@@ -25,6 +28,7 @@
 #include "VideoCommon/Fifo.h"
 #include "VideoCommon/FramebufferManager.h"
 #include "VideoCommon/FreeLookCamera.h"
+#include "VideoCommon/GeometryShaderManager.h"
 #include "VideoCommon/GraphicsModSystem/Runtime/GraphicsModManager.h"
 #include "VideoCommon/OnScreenDisplay.h"
 #include "VideoCommon/PixelShaderManager.h"
@@ -32,7 +36,13 @@
 #include "VideoCommon/TextureCacheBase.h"
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/XFMemory.h"
+#include "VideoCommon/XFStateManager.h"
 
+std::atomic<int> g_frame_interp_choice{-1};
+std::atomic<int> g_frame_interp_layers{0};
+std::atomic<bool> g_frame_interp_dropping{false};
+std::atomic<int> g_depth_of_field_level{0};
+std::atomic<bool> g_exclusive_fullscreen_wanted{false};
 VideoConfig g_Config;
 VideoConfig g_ActiveConfig;
 BackendInfo g_backend_info;
@@ -86,6 +96,14 @@ void VideoConfig::Refresh()
   iUsePresentDrawable = Config::Get(Config::GFX_MTL_USE_PRESENT_DRAWABLE);
 
   bWidescreenHack = Config::Get(Config::GFX_WIDESCREEN_HACK);
+  bWidescreenHudSafeArea =
+      Config::Get(Config::GFX_WIDESCREEN_HUD_SAFE_AREA);
+  fWidescreenHudSafeAreaScale =
+      Config::Get(Config::GFX_WIDESCREEN_HUD_SAFE_AREA_SCALE);
+  bWidescreenAuthoredMenu =
+      Config::Get(Config::GFX_WIDESCREEN_AUTHORED_MENU);
+  bColosseumNamingPresentation =
+      Config::Get(Config::GFX_COLOSSEUM_NAMING_PRESENTATION);
   aspect_mode = Config::Get(Config::GFX_ASPECT_RATIO);
   custom_aspect_width = Config::Get(Config::GFX_CUSTOM_ASPECT_RATIO_WIDTH);
   custom_aspect_height = Config::Get(Config::GFX_CUSTOM_ASPECT_RATIO_HEIGHT);
@@ -167,6 +185,21 @@ void VideoConfig::Refresh()
   color_correction.fHDRPaperWhiteNits = Config::Get(Config::GFX_CC_HDR_PAPER_WHITE_NITS);
 
   stereo_mode = Config::Get(Config::GFX_STEREO_MODE);
+  // Frame interpolation is never written to the shared GFX.ini (older runners
+  // do not know the mode). It comes from the pause menu's frame-rate setting
+  // (g_frame_interp_choice, applied through a current-layer config change) or,
+  // until the menu has been used, from MODERNGEKKO_FRAME_INTERP=1.
+  const int choice = g_frame_interp_choice.load(std::memory_order_relaxed);
+  const char* interp_env = std::getenv("MODERNGEKKO_FRAME_INTERP");
+  if (choice == 1 || (choice < 0 && interp_env && interp_env[0] == '1'))
+    stereo_mode = StereoMode::FrameInterp;
+  else if (choice == 0 && stereo_mode == StereoMode::FrameInterp)
+    stereo_mode = StereoMode::Off;
+  // 0 = not chosen in the menu yet: MODERNGEKKO_FRAME_INTERP=4 asks for 240.
+  const int layers = g_frame_interp_layers.load(std::memory_order_relaxed);
+  iFrameInterpLayers = layers == 4 || (layers == 0 && interp_env && interp_env[0] == '4') ? 4 : 2;
+  if (choice < 0 && interp_env && interp_env[0] == '4')
+    stereo_mode = StereoMode::FrameInterp;
   stereo_per_eye_resolution_full = Config::Get(Config::GFX_STEREO_PER_EYE_RESOLUTION_FULL);
   stereo_depth = Config::Get(Config::GFX_STEREO_DEPTH) *
                  Config::Get(Config::GFX_STEREO_DEPTH_PERCENTAGE) * 0.00001f;
@@ -294,6 +327,7 @@ void CheckForConfigChanges()
 {
   const ShaderHostConfig old_shader_host_config = ShaderHostConfig::GetCurrent();
   const StereoMode old_stereo = g_ActiveConfig.stereo_mode;
+  const int old_interp_layers = g_ActiveConfig.iFrameInterpLayers;
   const u32 old_multisamples = g_ActiveConfig.iMultisamples;
   const auto old_anisotropy = g_ActiveConfig.iMaxAnisotropy;
   const int old_efb_access_tile_size = g_ActiveConfig.iEFBAccessTileSize;
@@ -307,6 +341,13 @@ void CheckForConfigChanges()
   const AspectMode old_aspect_mode = g_ActiveConfig.aspect_mode;
   const AspectMode old_suggested_aspect_mode = g_ActiveConfig.suggested_aspect_mode;
   const bool old_widescreen_hack = g_ActiveConfig.bWidescreenHack;
+  const bool old_widescreen_hud_safe_area = g_ActiveConfig.bWidescreenHudSafeArea;
+  const float old_widescreen_hud_safe_area_scale =
+      g_ActiveConfig.fWidescreenHudSafeAreaScale;
+  const bool old_widescreen_authored_menu =
+      g_ActiveConfig.bWidescreenAuthoredMenu;
+  const bool old_colosseum_naming_presentation =
+      g_ActiveConfig.bColosseumNamingPresentation;
   const auto old_post_processing_shader = g_ActiveConfig.sPostProcessingShader;
   const auto old_hdr = g_ActiveConfig.bHDR;
 
@@ -339,7 +380,9 @@ void CheckForConfigChanges()
   u32 changed_bits = 0;
   if (old_shader_host_config.bits != new_host_config.bits)
     changed_bits |= CONFIG_CHANGE_BIT_HOST_CONFIG;
-  if (old_stereo != g_ActiveConfig.stereo_mode)
+  if (old_stereo != g_ActiveConfig.stereo_mode ||
+      (g_ActiveConfig.stereo_mode == StereoMode::FrameInterp &&
+       old_interp_layers != g_ActiveConfig.iFrameInterpLayers))
     changed_bits |= CONFIG_CHANGE_BIT_STEREO_MODE;
   if (old_multisamples != g_ActiveConfig.iMultisamples)
     changed_bits |= CONFIG_CHANGE_BIT_MULTISAMPLES;
@@ -358,6 +401,14 @@ void CheckForConfigChanges()
   if (old_suggested_aspect_mode != g_ActiveConfig.suggested_aspect_mode)
     changed_bits |= CONFIG_CHANGE_BIT_ASPECT_RATIO;
   if (old_widescreen_hack != g_ActiveConfig.bWidescreenHack)
+    changed_bits |= CONFIG_CHANGE_BIT_ASPECT_RATIO;
+  const bool widescreen_hud_safe_area_changed =
+      old_widescreen_hud_safe_area != g_ActiveConfig.bWidescreenHudSafeArea ||
+      old_widescreen_hud_safe_area_scale != g_ActiveConfig.fWidescreenHudSafeAreaScale ||
+      old_widescreen_authored_menu != g_ActiveConfig.bWidescreenAuthoredMenu ||
+      old_colosseum_naming_presentation !=
+          g_ActiveConfig.bColosseumNamingPresentation;
+  if (widescreen_hud_safe_area_changed)
     changed_bits |= CONFIG_CHANGE_BIT_ASPECT_RATIO;
   if (old_post_processing_shader != g_ActiveConfig.sPostProcessingShader)
     changed_bits |= CONFIG_CHANGE_BIT_POST_PROCESSING_SHADER;
@@ -382,6 +433,13 @@ void CheckForConfigChanges()
     auto& system = Core::System::GetInstance();
     auto& pixel_shader_manager = system.GetPixelShaderManager();
     pixel_shader_manager.Dirty();
+  }
+
+  if (widescreen_hud_safe_area_changed)
+  {
+    auto& system = Core::System::GetInstance();
+    system.GetXFStateManager().SetProjectionChanged();
+    system.GetGeometryShaderManager().SetProjectionChanged();
   }
 
   // Reload shaders if host config has changed.

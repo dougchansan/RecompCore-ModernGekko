@@ -19,6 +19,14 @@ const Info<int> GFX_ADAPTER{{System::GFX, "Hardware", "Adapter"}, 0};
 // Graphics.Settings
 
 const Info<bool> GFX_WIDESCREEN_HACK{{System::GFX, "Settings", "wideScreenHack"}, false};
+const Info<bool> GFX_WIDESCREEN_HUD_SAFE_AREA{
+    {System::GFX, "Settings", "WidescreenHudSafeArea"}, false};
+const Info<float> GFX_WIDESCREEN_HUD_SAFE_AREA_SCALE{
+    {System::GFX, "Settings", "WidescreenHudSafeAreaScale"}, 1.0f};
+const Info<bool> GFX_WIDESCREEN_AUTHORED_MENU{
+    {System::GFX, "Settings", "WidescreenAuthoredMenu"}, false};
+const Info<bool> GFX_COLOSSEUM_NAMING_PRESENTATION{
+    {System::GFX, "Settings", "ColosseumNamingPresentation"}, false};
 const Info<AspectMode> GFX_ASPECT_RATIO{{System::GFX, "Settings", "AspectRatio"}, AspectMode::Auto};
 const Info<int> GFX_CUSTOM_ASPECT_RATIO_WIDTH{{System::GFX, "Settings", "CustomAspectRatioWidth"},
                                               1};

@@ -84,4 +84,11 @@ private:
   bool m_projection_graphics_mod_change = false;
 
   Common::Matrix44 LoadProjectionMatrix();
+  // Builds the host projection from a raw XF projection (the live one or the
+  // frame-interpolation copy) into projection_matrix.
+  Common::Matrix44 LoadProjectionMatrix(const std::array<float, 6>& rawProjection,
+                                        std::array<float, 16>* projection_matrix,
+                                        bool update_stats);
+  void SetInterpConstants();
+  alignas(16) std::array<float, 16> m_projection_matrix_b{};
 };

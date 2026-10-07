@@ -31,6 +31,10 @@ extern const Info<int> GFX_ADAPTER;
 // Graphics.Settings
 
 extern const Info<bool> GFX_WIDESCREEN_HACK;
+extern const Info<bool> GFX_WIDESCREEN_HUD_SAFE_AREA;
+extern const Info<float> GFX_WIDESCREEN_HUD_SAFE_AREA_SCALE;
+extern const Info<bool> GFX_WIDESCREEN_AUTHORED_MENU;
+extern const Info<bool> GFX_COLOSSEUM_NAMING_PRESENTATION;
 extern const Info<AspectMode> GFX_ASPECT_RATIO;
 extern const Info<int> GFX_CUSTOM_ASPECT_RATIO_WIDTH;
 extern const Info<int> GFX_CUSTOM_ASPECT_RATIO_HEIGHT;

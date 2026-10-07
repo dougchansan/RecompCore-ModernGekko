@@ -3,7 +3,15 @@
 
 #include "VideoCommon/XFStructs.h"
 
+#include <algorithm>
 #include <bit>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <vector>
+#include <cstdlib>
+#include <string>
+#include <fmt/format.h>
 
 #include "Common/CommonTypes.h"
 #include "Common/Logging/Log.h"
@@ -15,12 +23,14 @@
 
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/Fifo.h"
+#include "VideoCommon/FramebufferManager.h"
 #include "VideoCommon/GeometryShaderManager.h"
 #include "VideoCommon/PixelShaderManager.h"
 #include "VideoCommon/VertexLoaderManager.h"
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/XFMemory.h"
 #include "VideoCommon/XFStateManager.h"
+#include "VideoCommon/VideoConfig.h"
 
 static void XFMemWritten(XFStateManager& xf_state_manager, u32 transferSize, u32 baseAddress)
 {
@@ -134,6 +144,19 @@ static void XFRegWritten(Core::System& system, XFStateManager& xf_state_manager,
     case XFMEM_SETPROJECTION + 5:
     case XFMEM_SETPROJECTION + 6:
       g_vertex_manager->Flush();
+      // First-person depth of field: the world's depth is only intact until the
+      // game switches from the main perspective camera to its orthographic
+      // overlay/composite pass (which overwrites depth). Blur at that moment,
+      // once per frame; the full-size viewport excludes the 384x384 shadow-map
+      // passes. (Handlers run before xfmem is updated: type is still the old one.)
+      if (address == XFMEM_SETPROJECTION + 6 &&
+          xfmem.projection.type == ProjectionType::Perspective &&
+          static_cast<ProjectionType>(value) == ProjectionType::Orthographic &&
+          std::abs(xfmem.viewport.wd) * 2.0f >= 560.0f)
+      {
+        if (const int dof = g_depth_of_field_level.load(std::memory_order_relaxed); dof > 0)
+          g_framebuffer_manager->ApplyDepthOfFieldOnce(dof);
+      }
       xf_state_manager.SetProjectionChanged();
       system.GetGeometryShaderManager().SetProjectionChanged();
       break;
@@ -198,8 +221,195 @@ static void XFRegWritten(Core::System& system, XFStateManager& xf_state_manager,
   }
 }
 
+// Frame-interpolation research trace. MODERNGEKKO_XF_TRACE=<file> writes one
+// line per XFB copy listing, in order, every load into XF matrix memory
+// (< 0x0600) plus the viewport (0x101A) and projection (0x1020) registers as
+// "kind addr:size:fnv" tokens, so consecutive frames can be compared for a
+// stable draw/matrix order. Off (one getenv) unless the variable is set.
+namespace XFTrace
+{
+static FILE* s_file;
+static bool s_init;
+static int s_frames;
+static std::string s_line;
+
+static bool On()
+{
+  if (!s_init)
+  {
+    s_init = true;
+    if (const char* path = std::getenv("MODERNGEKKO_XF_TRACE"))
+      s_file = std::fopen(path, "w");
+  }
+  return s_file && s_frames < 3000;
+}
+
+void Load(char kind, u32 address, u32 words, const u8* be_data)
+{
+  if (!On() || (address >= 0x0600 && address != 0x101A && address != 0x1020))
+    return;
+  u32 hash = 2166136261u;
+  for (u32 i = 0; i < words * 4; ++i)
+    hash = (hash ^ be_data[i]) * 16777619u;
+  s_line += fmt::format(" {}{:x}:{}:{:08x}", kind, address, words, hash);
+}
+
+void Frame()
+{
+  if (!On())
+    return;
+  std::fprintf(s_file, "%d%s\n", s_frames++, s_line.c_str());
+  std::fflush(s_file);
+  s_line.clear();
+}
+}  // namespace XFTrace
+
+// Frame interpolation (StereoMode::FrameInterp). Every XF load that touches
+// the position matrices (0x000-0x0FF) or the projection (0x1020-0x1025) is
+// recorded in order. A load is paired with the load at the same position in
+// the previous frame's sequence when the address and size match (consecutive
+// frames issue the same sequence ~99% of the time); the shadow copies below
+// then hold its previous-frame words, giving the vertex shader's pos_b, which the
+// geometry shader blends toward pos for the in-between layers. Once a frame
+// diverges, the rest of that frame uses its real values (no motion).
+namespace FrameInterp
+{
+float g_pos[256];
+float g_proj[6];
+bool g_pos_dirty = true;
+
+namespace
+{
+struct LoadRec
+{
+  u16 address;
+  u16 words;
+  u32 data;  // index into the data pool
+};
+std::vector<LoadRec> s_prev, s_cur;
+std::vector<u32> s_prev_data, s_cur_data;
+size_t s_cursor;
+bool s_paired = true;
+u32 s_stat_frames, s_stat_loads, s_stat_moved, s_stat_static, s_stat_unpaired, s_stat_cut;
+
+float AsFloat(u32 bits)
+{
+  float f;
+  std::memcpy(&f, &bits, sizeof(f));
+  return f;
+}
+}  // namespace
+
+bool Enabled()
+{
+  return g_ActiveConfig.stereo_mode == StereoMode::FrameInterp;
+}
+
+void Load(u32 address, u32 words, const u8* be_data)
+{
+  if (!Enabled())
+    return;
+  const bool touches_pos = address < 0x100;
+  const bool touches_proj = address <= 0x1025 && address + words > 0x1020;
+  if (!touches_pos && !touches_proj)
+    return;
+
+  const u32 data_index = static_cast<u32>(s_cur_data.size());
+  s_cur.push_back({static_cast<u16>(address), static_cast<u16>(words), data_index});
+
+  const LoadRec* prev = nullptr;
+  if (s_paired && s_cursor < s_prev.size() && s_prev[s_cursor].address == address &&
+      s_prev[s_cursor].words == words)
+    prev = &s_prev[s_cursor];
+  else
+    s_paired = false;
+  ++s_cursor;
+
+  // Camera cuts: a paired load whose values jump far between frames is a new
+  // view, not motion - blending it would show a bogus halfway frame, so it is
+  // taken as-is. Matrix entries are rotation/scale (|x| ~ 1) or translations;
+  // per-frame motion moves them a small fraction of that.
+  ++s_stat_loads;
+  if (!prev)
+    ++s_stat_unpaired;
+  if (prev)
+  {
+    bool moved = false;
+    for (u32 i = 0; i < words; ++i)
+    {
+      const float now = AsFloat(Common::swap32(be_data + 4 * i));
+      const float old_value = AsFloat(s_prev_data[prev->data + i]);
+      const float limit = std::max(1.0f, 0.5f * std::max(std::fabs(now), std::fabs(old_value)));
+      if (!(std::fabs(now - old_value) <= limit))
+      {
+        prev = nullptr;
+        ++s_stat_cut;
+        break;
+      }
+      moved |= now != old_value;
+    }
+    if (prev)
+      ++(moved ? s_stat_moved : s_stat_static);
+  }
+
+  bool flushed = false;
+  for (u32 i = 0; i < words; ++i)
+  {
+    const u32 bits = Common::swap32(be_data + 4 * i);
+    s_cur_data.push_back(bits);
+    float value = AsFloat(bits);
+    if (prev)
+    {
+      const float old_value = AsFloat(s_prev_data[prev->data + i]);
+      value = old_value;
+    }
+    const u32 a = address + i;
+    float* slot = a < 0x100 ? &g_pos[a] : (a >= 0x1020 && a <= 0x1025) ? &g_proj[a - 0x1020] : nullptr;
+    if (!slot || std::memcmp(slot, &value, sizeof(value)) == 0)
+      continue;
+    // The batch the vertex manager is still accumulating was issued under
+    // the old matrices; draw it before its layer-1 copies change (the real
+    // XF write below does the same for layer 0).
+    if (!flushed)
+    {
+      g_vertex_manager->Flush();
+      flushed = true;
+    }
+    *slot = value;
+    if (a < 0x100)
+      g_pos_dirty = true;
+  }
+}
+
+void Frame()
+{
+  if (!Enabled())
+    return;
+  // MODERNGEKKO_INTERP_STATS=1: every 120 frames, how many matrix loads were
+  // paired and moved (interpolated), paired but unchanged, unpaired, or cut.
+  static const bool stats = [] {
+    const char* v = std::getenv("MODERNGEKKO_INTERP_STATS");
+    return v && v[0] == '1';
+  }();
+  if (stats && ++s_stat_frames >= 120)
+  {
+    std::fprintf(stderr, "[interp] loads=%u moved=%u static=%u unpaired=%u cut=%u\n",
+                 s_stat_loads, s_stat_moved, s_stat_static, s_stat_unpaired, s_stat_cut);
+    s_stat_frames = s_stat_loads = s_stat_moved = s_stat_static = s_stat_unpaired = s_stat_cut = 0;
+  }
+  std::swap(s_prev, s_cur);
+  std::swap(s_prev_data, s_cur_data);
+  s_cur.clear();
+  s_cur_data.clear();
+  s_cursor = 0;
+  s_paired = true;
+}
+}  // namespace FrameInterp
+
 void LoadXFReg(u16 base_address, u8 transfer_size, const u8* data)
 {
+  XFTrace::Load('x', base_address, transfer_size, data);
+  FrameInterp::Load(base_address, transfer_size, data);
   if (base_address > XFMEM_REGISTERS_END)
   {
     WARN_LOG_FMT(VIDEO, "XF load base address past end of address space: {:x} {} bytes",
@@ -277,6 +487,8 @@ void LoadIndexedXF(CPArray array, u32 index, u16 address, u8 size)
         buf_size));
   }
 
+  XFTrace::Load('i', address, size, reinterpret_cast<const u8*>(newData));
+  FrameInterp::Load(address, size, reinterpret_cast<const u8*>(newData));
   auto& xf_state_manager = system.GetXFStateManager();
   bool changed = false;
   for (u32 i = 0; i < size; ++i)

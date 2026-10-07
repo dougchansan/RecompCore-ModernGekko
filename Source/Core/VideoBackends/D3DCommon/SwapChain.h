@@ -41,6 +41,7 @@ public:
 
   // Checks for loss of exclusive fullscreen.
   bool CheckForFullscreenChange();
+  bool EnterExclusiveFullscreen();
 
   // Presents the swap chain to the screen.
   virtual bool Present();

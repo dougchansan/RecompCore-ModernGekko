@@ -22,6 +22,14 @@ public:
   virtual void SetTitle(const std::string& title);
   virtual void MainLoop() = 0;
   virtual void SaveWindowGeometry() {}
+  virtual void ToggleFullscreenFromMenu() {}
+  // Display mode: fullscreen uses true exclusive mode (native refresh rate)
+  // instead of a borderless window while focused.
+  virtual void SetExclusiveFullscreen(bool exclusive) { m_exclusive_fullscreen = exclusive; }
+  bool IsExclusiveFullscreenPreferred() const { return m_exclusive_fullscreen; }
+  // Graphics API switch: move the off-screen window into place (once drawing)
+  // and signal the previous session.
+  virtual void RequestGraphicsSwitchReveal() {}
 
   virtual WindowSystemInfo GetWindowSystemInfo() const = 0;
 
@@ -67,4 +75,5 @@ protected:
 
   bool m_window_focus = true;  // Should be made atomic if actually implemented
   bool m_window_fullscreen = false;
+  bool m_exclusive_fullscreen = false;
 };

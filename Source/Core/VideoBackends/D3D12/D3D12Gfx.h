@@ -51,12 +51,16 @@ public:
 
   void Flush() override;
   void WaitForGPUIdle() override;
+  void SetFullscreen(bool enable_fullscreen) override;
+  bool IsFullscreen() const override;
 
   void ClearRegion(const MathUtil::Rectangle<int>& target_rc, bool color_enable, bool alpha_enable,
                    bool z_enable, u32 color, u32 z) override;
 
   void SetPipeline(const AbstractPipeline* pipeline) override;
   void SetFramebuffer(AbstractFramebuffer* framebuffer) override;
+  // Called by DXFramebuffer's destructor; clears the binding if it is current.
+  void OnFramebufferDestroyed(const AbstractFramebuffer* framebuffer);
   void SetAndDiscardFramebuffer(AbstractFramebuffer* framebuffer) override;
   void SetAndClearFramebuffer(AbstractFramebuffer* framebuffer, const ClearColor& color_value = {},
                               float depth_value = 0.0f) override;

@@ -3,6 +3,8 @@
 
 #include "VideoCommon/FrameDumper.h"
 
+#include <cstdlib>
+
 #include "Common/Assert.h"
 #include "Common/FileUtil.h"
 #include "Common/Image.h"
@@ -64,7 +66,15 @@ void FrameDumper::DumpCurrentFrame(const AbstractTexture* src_texture,
   if (!CheckFrameDumpReadbackTexture(target_width, target_height))
     return;
 
-  m_frame_dump_readback_texture->CopyFromTexture(src_texture, copy_rect, 0, 0,
+  // MODERNGEKKO_DUMP_LAYER=n: dump EFB/XFB layer n instead of 0 (frame
+  // interpolation diagnostics: layers 1..3 are the in-between frames). Only
+  // applies to unscaled dumps.
+  static const u32 dump_layer = [] {
+    const char* v = std::getenv("MODERNGEKKO_DUMP_LAYER");
+    return v && *v ? static_cast<u32>(std::atoi(v)) : 0u;
+  }();
+  const u32 layer = src_texture->GetLayers() > dump_layer ? dump_layer : 0;
+  m_frame_dump_readback_texture->CopyFromTexture(src_texture, copy_rect, layer, 0,
                                                  m_frame_dump_readback_texture->GetRect());
   m_last_frame_state = m_ffmpeg_dump.FetchState(ticks, frame_number);
   m_frame_dump_needs_flush = true;

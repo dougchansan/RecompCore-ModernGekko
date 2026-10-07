@@ -487,6 +487,10 @@ float3 load_input_float3_rawtex(uint vtx_offset, uint attr_offset) {{
               "}}\n");
   }
 
+  // Ubershaders do not interpolate: layer 1 repeats the real position.
+  if (host_config.frame_interp)
+    out.Write("o.pos_b = o.pos;\n");
+
   if (host_config.backend_geometry_shaders)
   {
     AssignVSOutputMembers(out, "vs", "o", num_texgen, host_config);

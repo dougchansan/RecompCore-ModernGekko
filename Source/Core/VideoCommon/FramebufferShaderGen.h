@@ -15,6 +15,8 @@ std::string GenerateScreenQuadVertexShader();
 std::string GeneratePassthroughGeometryShader(u32 num_tex, u32 num_colors);
 std::string GenerateTextureCopyVertexShader();
 std::string GenerateTextureCopyPixelShader();
+std::string GenerateTextSharpenPixelShader();
+std::string GenerateColorTextSharpenPixelShader();
 std::string GenerateResolveColorPixelShader(u32 samples);
 std::string GenerateResolveDepthPixelShader(u32 samples);
 std::string GenerateClearVertexShader();
@@ -23,6 +25,8 @@ std::string GenerateColorPixelShader();
 std::string GenerateFormatConversionShader(EFBReinterpretType convtype, u32 samples);
 std::string GenerateTextureReinterpretShader(TextureFormat from_format, TextureFormat to_format);
 std::string GenerateEFBRestorePixelShader();
+std::string GenerateDepthOfFieldPixelShader();
+std::string GenerateDepthOfFieldFocusPixelShader();
 std::string GenerateImGuiVertexShader();
 std::string GenerateImGuiPixelShader(bool linear_space_output = false);
 

@@ -24,6 +24,14 @@ static u32   g_num_entries;  // total entries; equals root entry's "next" field
 static const char* g_strings;  // string table, inside g_fst
 static bool  g_ready;
 
+static int seek_to(FILE* file, u64 offset) {
+#if defined(_WIN32)
+    return _fseeki64(file, (__int64)offset, SEEK_SET);
+#else
+    return fseeko(file, (off_t)offset, SEEK_SET);
+#endif
+}
+
 static u32 be32(const u8* p) {
     return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | (u32)p[3];
 }
@@ -81,7 +89,7 @@ static bool load_from(const char* path) {
         fclose(f);
         return false;
     }
-    if (fseeko(f, (off_t)fst_off, SEEK_SET) != 0 ||
+    if (seek_to(f, fst_off) != 0 ||
         fread(fst, 1, fst_size, f) != fst_size) {
         free(fst);
         fclose(f);
@@ -221,7 +229,7 @@ void dvd_read_to_guest(CPUState* cpu, u32 guest_addr, u32 disc_off, u32 length) 
 
     if (dst) {
         size_t got = 0;
-        if (fseeko(g_iso, (off_t)disc_off, SEEK_SET) == 0)
+        if (seek_to(g_iso, disc_off) == 0)
             got = fread(dst, 1, length, g_iso);
         if (got < length)
             memset(dst + got, 0, length - got);  // zero-fill past image end
@@ -232,7 +240,7 @@ void dvd_read_to_guest(CPUState* cpu, u32 guest_addr, u32 disc_off, u32 length) 
     // external region (VM window, etc.) is honored. Not expected in practice.
     for (u32 k = 0; k < length; k++) {
         u8 b = 0;
-        if (fseeko(g_iso, (off_t)(disc_off + k), SEEK_SET) == 0)
+        if (seek_to(g_iso, (u64)disc_off + k) == 0)
             (void)(fread(&b, 1, 1, g_iso) == 1);
         mem_write8(cpu, guest_addr + k, b);
     }

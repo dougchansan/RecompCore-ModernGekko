@@ -3,6 +3,8 @@
 
 #include "VideoBackends/D3D12/D3D12Gfx.h"
 
+#include <cstdio>
+
 #include "Common/Logging/Log.h"
 
 #include "VideoBackends/D3D12/Common.h"
@@ -193,6 +195,20 @@ void Gfx::BindFramebuffer(DXFramebuffer* fb)
   m_dirty_bits &= ~DirtyState_Framebuffer;
 }
 
+void Gfx::OnFramebufferDestroyed(const AbstractFramebuffer* framebuffer)
+{
+  // Never keep a dangling framebuffer: ApplyState re-binds the current one at
+  // the start of every command list, and a stale pointer would bind freed
+  // render-target descriptors. A draw without a framebuffer is skipped instead.
+  if (m_current_framebuffer == framebuffer)
+  {
+    std::fprintf(stderr, "[dx12] destroyed the bound framebuffer %p\n",
+                 static_cast<const void*>(framebuffer));
+    m_current_framebuffer = nullptr;
+    m_dirty_bits |= DirtyState_Framebuffer;
+  }
+}
+
 void Gfx::SetFramebuffer(AbstractFramebuffer* framebuffer)
 {
   if (m_current_framebuffer == framebuffer)
@@ -365,6 +381,17 @@ void Gfx::DispatchComputeShader(const AbstractShader* shader, u32 groupsize_x, u
   m_dirty_bits |= DirtyState_Pipeline;
 }
 
+void Gfx::SetFullscreen(bool enable_fullscreen)
+{
+  if (m_swap_chain)
+    m_swap_chain->SetFullscreen(enable_fullscreen);
+}
+
+bool Gfx::IsFullscreen() const
+{
+  return m_swap_chain && m_swap_chain->GetFullscreen();
+}
+
 bool Gfx::BindBackbuffer(const ClearColor& clear_color)
 {
   CheckForSwapChainChanges();
@@ -525,7 +552,12 @@ bool Gfx::ApplyState()
         DirtyState_ScissorRect | DirtyState_PS_UAV | DirtyState_PS_CBV | DirtyState_VS_CBV |
         DirtyState_GS_CBV | DirtyState_SRV_Descriptor | DirtyState_Sampler_Descriptor |
         DirtyState_UAV_Descriptor | DirtyState_VertexBuffer | DirtyState_IndexBuffer |
-        DirtyState_PrimitiveTopology | DirtyState_VS_SRV_Descriptor | DirtyState_CUS_CBV);
+        DirtyState_PrimitiveTopology | DirtyState_CUS_CBV);
+  // DirtyState_VS_SRV_Descriptor is cleared only once the table is actually
+  // bound below. Clearing it for a draw whose pipeline does not use the
+  // dynamic vertex loader left ROOT_PARAMETER_VS_SRV unset for the next
+  // dynamic-vertex-loader draw in the same command list (GPU-based validation:
+  // "Uninitialized root argument accessed", root parameter 7 -> device removed).
 
   auto* const cmdlist = g_dx_context->GetCommandList();
   auto* const pipeline = static_cast<const DXPipeline*>(m_current_pipeline);
@@ -588,6 +620,7 @@ bool Gfx::ApplyState()
     {
       cmdlist->SetGraphicsRootDescriptorTable(ROOT_PARAMETER_VS_SRV,
                                               m_state.vertex_srv_descriptor_base);
+      m_dirty_bits &= ~DirtyState_VS_SRV_Descriptor;
     }
 
     if (dirty_bits & DirtyState_GS_CBV)

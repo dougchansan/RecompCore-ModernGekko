@@ -32,6 +32,9 @@
 #include "VideoCommon/VideoConfig.h"
 
 #include <inttypes.h>
+#include <algorithm>
+#include <atomic>
+#include <cmath>
 #include <mutex>
 
 #include <imgui.h>
@@ -39,6 +42,25 @@
 
 namespace VideoCommon
 {
+namespace
+{
+std::atomic<ExternalOverlayDrawCallback> s_external_overlay_draw_callback{
+    nullptr};
+
+float GetOverlayScale(float dpi_scale, u32 viewport_height)
+{
+  // DisplaySize is already in physical pixels. Multiplying its scale by DPI would count
+  // a high-DPI backbuffer twice; use DPI as the minimum readable size instead.
+  return std::clamp(std::max(dpi_scale, static_cast<float>(viewport_height) / 1080.0f),
+                    0.5f, 4.0f);
+}
+}
+
+void SetExternalOverlayDrawCallback(ExternalOverlayDrawCallback callback)
+{
+  s_external_overlay_draw_callback.store(callback, std::memory_order_release);
+}
+
 bool OnScreenUI::Initialize(u32 width, u32 height, float scale)
 {
   std::unique_lock<std::mutex> imgui_lock(m_imgui_mutex);
@@ -113,9 +135,12 @@ OnScreenUI::~OnScreenUI()
 {
   std::unique_lock<std::mutex> imgui_lock(m_imgui_mutex);
 
-  ImGui::EndFrame();
-  ImPlot::DestroyContext();
-  ImGui::DestroyContext();
+  if (ImGui::GetCurrentContext() && m_ready)
+    ImGui::EndFrame();
+  if (ImPlot::GetCurrentContext())
+    ImPlot::DestroyContext();
+  if (ImGui::GetCurrentContext())
+    ImGui::DestroyContext();
   m_imgui_textures.clear();
 }
 
@@ -206,6 +231,10 @@ void OnScreenUI::BeginImGuiFrameUnlocked(u32 width, u32 height)
   io.DisplaySize =
       ImVec2(static_cast<float>(m_backbuffer_width), static_cast<float>(m_backbuffer_height));
   io.DeltaTime = time_diff_secs;
+
+  // Resize and monitor changes can happen without recreating the UI or changing DPI.
+  if (ImGui::GetStyle().FontScaleMain != GetOverlayScale(m_backbuffer_scale, height))
+    SetScale(m_backbuffer_scale);
 
   ImGui::NewFrame();
 }
@@ -418,10 +447,15 @@ void OnScreenUI::Finalize()
   auto lock = GetImGuiLock();
 
   auto& perf_metrics = Core::System::GetInstance().GetPerfMetrics();
-  perf_metrics.DrawImGuiStats(m_backbuffer_scale);
+  perf_metrics.DrawImGuiStats(ImGui::GetStyle().FontScaleMain);
   DrawDebugText();
   OSD::DrawMessages();
   DrawChallengesAndLeaderboards();
+  if (const auto callback =
+          s_external_overlay_draw_callback.load(std::memory_order_acquire))
+  {
+    callback();
+  }
   ImGui::Render();
 
   // Check for font changes
@@ -529,6 +563,8 @@ std::unique_lock<std::mutex> OnScreenUI::GetImGuiLock()
 
 void OnScreenUI::SetScale(float backbuffer_scale)
 {
+  if (!std::isfinite(backbuffer_scale) || backbuffer_scale <= 0.0f)
+    backbuffer_scale = 1.0f;
   ImGui::GetIO().DisplayFramebufferScale.x = backbuffer_scale;
   ImGui::GetIO().DisplayFramebufferScale.y = backbuffer_scale;
 
@@ -536,9 +572,11 @@ void OnScreenUI::SetScale(float backbuffer_scale)
   // Reset the style first so that the scale is applied to the base style, not an already-scaled one
   ImGuiStyle& style = ImGui::GetStyle();
   style = {};
-  style.FontScaleMain = backbuffer_scale;
+  const float overlay_scale = GetOverlayScale(backbuffer_scale, m_backbuffer_height);
+  style.FontSizeBase = static_cast<float>(Config::Get(Config::MAIN_OSD_FONT_SIZE));
+  style.FontScaleMain = overlay_scale;
   style.WindowRounding = 7.0f;
-  style.ScaleAllSizes(backbuffer_scale);
+  style.ScaleAllSizes(overlay_scale);
 
   m_backbuffer_scale = backbuffer_scale;
 }
@@ -573,6 +611,8 @@ void OnScreenUI::SetKeyMap(const DolphinKeyMap& key_map)
 void OnScreenUI::SetKey(u32 key, bool is_down, const char* chars)
 {
   auto lock = GetImGuiLock();
+  if (!ImGui::GetCurrentContext())
+    return;
   if (auto iter = m_dolphin_to_imgui_map.find(key); iter != m_dolphin_to_imgui_map.end())
     ImGui::GetIO().AddKeyEvent((ImGuiKey)iter->second, is_down);
 
@@ -583,6 +623,8 @@ void OnScreenUI::SetKey(u32 key, bool is_down, const char* chars)
 void OnScreenUI::SetMousePos(float x, float y)
 {
   auto lock = GetImGuiLock();
+  if (!ImGui::GetCurrentContext())
+    return;
 
   ImGui::GetIO().AddMousePosEvent(x, y);
 }
@@ -590,6 +632,8 @@ void OnScreenUI::SetMousePos(float x, float y)
 void OnScreenUI::SetMousePress(u32 button_mask)
 {
   auto lock = GetImGuiLock();
+  if (!ImGui::GetCurrentContext())
+    return;
 
   for (size_t i = 0; i < std::size(ImGui::GetIO().MouseDown); i++)
   {

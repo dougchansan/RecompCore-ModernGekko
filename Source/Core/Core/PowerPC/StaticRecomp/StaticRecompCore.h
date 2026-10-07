@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -55,12 +57,30 @@ public:
   bool FastDispatchableAt(u32 address);
   bool IsHostCallAddress(u32 address) const;
   bool ShouldYieldAt(u32 address);
+  bool TryRecoverZeroCallback(PowerPC::PowerPCState& ppc);
 
   void ClearCache() override;
   void Jit(u32 em_address) override {}
   bool HandleFault(uintptr_t access_address, SContext* ctx) override { return false; }
 
   JitBaseBlockCache* GetBlockCache() override { return &m_block_cache; }
+  // The static core cannot fold the check into prebuilt module code, so
+  // registering against it is pure cost (measured 11.2M calls/s on Colosseum).
+  bool UsesCompiledExceptionChecks() const override { return false; }
+
+  // ...but the hook does not only fire from module code. Anything the module
+  // does not cover runs on m_fallback_jit, which is a real Jit64/JitArm64: it
+  // does read fifoWriteAddresses at compile time, and it is the only core that
+  // can retire the call site by recompiling the block with the check folded in.
+  // Answering "this" for those blocks suppressed the registration they depend
+  // on, so the gather-pipe check was never compiled in and the hook fired
+  // forever - which on aarch64 wedged Colosseum on a black screen with 62% of
+  // CPU inside a hook that is supposed to retire itself.
+  JitBase* GetExceptionCheckTarget() override
+  {
+    return m_fallback_jit ? m_fallback_jit.get() : this;
+  }
+
   void EraseSingleBlock(const JitBlock& block) override {}
   std::vector<MemoryStats> GetMemoryStats() const override { return {}; }
   std::size_t DisassembleNearCode(const JitBlock& block, std::ostream& stream) const override
@@ -114,6 +134,8 @@ private:
   int ChunkIndexOf(u32 address);
   bool IsForcedFallbackAddress(u32 address) const;
   bool ChunkContainsHostCall(u32 index) const;
+  bool RegionNeedsInterception(u32 start, u32 end) const;
+  void HandleCacheRange(CPUState* cpu, u8 operation, u32 start, u32 bytes);
   void VerifyChunk(u32 index);
   bool ResolveNativeAddress(u32 runtime_address, u32* linked_address, u32* rel_section_index);
   bool ResolveRuntimeAddress(u32 linked_address, u32* runtime_address) const;
@@ -156,20 +178,40 @@ private:
   bool m_module_active = false;
   u32 m_host_call_passthrough_pc = 0;
   bool m_host_call_passthrough = false;
+  // Set when the module exports dolrecomp_hook_aware_calls: its generated code
+  // returns to the chassis at every mod-hooked address and at every return out
+  // of a return-hooked function, and its chassis_dispatch runs the host call,
+  // so chunks containing hooks may run natively.
+  bool m_hook_aware_module = false;
   std::unique_ptr<JitBase> m_fallback_jit;
 
   u64 m_native_dispatches = 0;
   u64 m_fallback_steps = 0;
   u64 m_native_exceptions = 0;
   u64 m_hook_fallback_instructions = 0;
+  u64 m_recovered_zero_callbacks = 0;
   u64 m_timebase_cycle_remainder = 0;
+  u64 m_idle_hits = 0;
   std::unordered_map<u32, u64> m_dispatch_samples;
+  // Which addresses are costing host-call round trips. Each one exits the
+  // module, copies the CPU state out and back, and re-enters, and profiling
+  // put that boundary at ~23% of frame time on aarch64 - more than the
+  // recompiled guest code itself. Knowing the hot addresses is what makes it
+  // actionable: a hot HLE entry point can be substituted inside the module
+  // instead, which removes the round trip entirely.
+  std::unordered_map<u32, u64> m_host_call_sites;
   u64 m_bursts = 0;          // SyncIn..SyncOut native runs (diagnostic)
   u64 m_charged_cycles = 0;  // cycles flushed from module charges (diagnostic)
 
   // D4 guard state: parallel to m_module->chunk_ranges.
   std::vector<u8> m_chunk_state;
   mutable std::vector<u8> m_chunk_host_call_state;
+  // Answers to the LLVM backend's native-region interception query, keyed by
+  // the region's [start, end). Generated code asks once per function entry, so
+  // the scan behind it has to be paid once per region, not once per call.
+  // Cleared wherever m_chunk_host_call_state is, since it answers the same
+  // question over a different granularity.
+  mutable std::unordered_map<u64, bool> m_native_region_blocked;
   std::vector<StaticRecompRange> m_forced_fallback_ranges;
   struct ActiveRelSection
   {
@@ -199,8 +241,18 @@ private:
   mutable u32 m_last_chunk_index = 0;
 
   bool m_collect_dispatch_samples = false;
+  std::atomic<bool> m_pc_sampling{false};
   bool m_has_rel_modules = false;
   u32 m_idle_pc = 0;
+  u32 m_idle_loop_end_pc = 0;
+
+  // Task-list-aware idle. See TaskIdleIterationIsEmpty().
+  u32 m_task_idle_pc = 0;
+  u32 m_task_list_head = 0;
+  u32 m_task_pending_head = 0;
+  u64 m_task_idle_hits = 0;
+
+  bool TaskIdleIterationIsEmpty() const;
 };
 
 extern StaticRecompCore* g_static_recomp_core;

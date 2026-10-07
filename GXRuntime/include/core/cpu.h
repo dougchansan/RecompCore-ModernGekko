@@ -30,7 +30,7 @@ extern "C" {
 //   consumes and resets it (Dolphin chassis: per-dispatch flush into
 //   ppc_state.downcount). Hosts that do not meter guest time may ignore it
 //   (s64: it cannot wrap in any realistic session).
-#define GXRUNTIME_CPU_ABI_VERSION 3u
+#define GXRUNTIME_CPU_ABI_VERSION 4u
 #define GXRUNTIME_CPU_ABI_DOLRECOMP_PREFIX 1u
 #define GXRUNTIME_CPU_ABI_EXTERNAL_POINTER_EXTENSION 1u
 
@@ -96,6 +96,25 @@ typedef void (*PPCExternalWrite32)(CPUState* cpu, u32 ea, u32 value, u8 rid);
 typedef void* (*PPCExternalPointer)(CPUState* cpu, u32 ea, u32 size);
 typedef void (*PPCInstructionFallback)(CPUState* cpu, u32 raw, u32 cia);
 typedef bool (*PPCHostCall)(CPUState* cpu, u32 address);
+
+/* Native-region interception query, asked by LLVM-backend generated code at the
+   entry of every recompiled function. The generated region runs without the
+   per-instruction host-call dispatch, so before entering it the module asks the
+   host whether anything in [start, end) has to be intercepted. The address is a
+   reserved host-call number rather than a guest address; the range travels in
+   external_addr/external_value and external_rid carries the acknowledgement, so
+   no new CPUState field and no ABI change is involved. A host that does not
+   recognise the query leaves external_rid alone, which reads as "unhandled" and
+   keeps the module on the safe path. */
+/* Whole-range cache operation, issued by a native substitution for the SDK's
+   DCFlushRange family instead of one host call per 32-byte line. The range
+   travels in external_addr/external_value and the operation in external_rid.
+   Dolphin's JitInterface already collapses a line count into a single
+   InvalidateICache; going line by line is what made a range flush expensive. */
+#define PPC_HOST_CALL_CACHE_RANGE 0xFFFFFFFBu
+#define PPC_HOST_CALL_NATIVE_REGION_QUERY 0xFFFFFFFCu
+#define PPC_NATIVE_REGION_QUERY_PENDING 0xFEu
+#define PPC_NATIVE_REGION_QUERY_HANDLED 0xFFu
 typedef u32 (*PPCSPRRead)(CPUState* cpu, u16 spr, u32 cia);
 typedef void (*PPCSPRWrite)(CPUState* cpu, u16 spr, u32 value, u32 cia);
 typedef void (*PPCCacheControl)(CPUState* cpu, u8 operation, u32 ea, u32 cia);
@@ -153,6 +172,14 @@ struct CPUState {
     u32 ram_size;
     PPCExternalPointer external_pointer;
     s64 downcount;
+    // ABI v4 mirrors DolRecomp's `cycle_budget`, which sits between `downcount`
+    // and `exram` in its CPUState. The field is currently reserved and unread by
+    // either side, but the LLVM backend bakes offsetof() values from DolRecomp's
+    // header straight into generated code, so omitting it shifts `exram` and
+    // everything after it by 8 bytes and an LLVM module loads garbage as the
+    // MEM2 base pointer. The C backend refers to these fields by name and never
+    // noticed. Keep this struct byte-identical to DolRecomp's cpu.h.
+    s64 cycle_budget;
     u8* exram;
     u32 exram_size;
     PPCSPRRead spr_read;
@@ -315,6 +342,121 @@ bool ppc_fctiw(CPUState* cpu, f64 value, bool toward_zero, u64* result);
 void ppc_fadds(CPUState* cpu, u8 d, u8 a, u8 b);
 void ppc_fsubs(CPUState* cpu, u8 d, u8 a, u8 b);
 void ppc_fmuls(CPUState* cpu, u8 d, u8 a, u8 c);
+
+// These fast paths use __builtin_memcpy/__builtin_fma, which MSVC does not
+// provide, and only generated module code (built with clang) ever calls them --
+// the MSVC-built runtime merely includes this header. Guarding the block keeps
+// it out of MSVC translation units without pulling <math.h>/<string.h> in here,
+// which the bit-pattern approach below deliberately avoids.
+#if defined(__clang__) || defined(__GNUC__)
+/* --- Inline floating-point fast paths -------------------------------------
+ *
+ * Every guest FP instruction currently costs two or three out-of-line calls:
+ * the instruction helper, an ni_* arithmetic wrapper that returns a struct by
+ * value, and fp_write_single, plus a set_fprf/classify_f32 pair. The arithmetic
+ * underneath is already hardware FP - it is the wrapper that dominates, and the
+ * profile counts roughly 1.1e9 of these per seven-scene capture.
+ *
+ * These inline variants do the ordinary case in-line and defer to the existing
+ * helper for anything else. The guard is "result is neither NaN nor infinity",
+ * which is deliberately stronger than a NaN test: ni_add/ni_sub also clear
+ * FI/FR when an *operand* is infinite, and a finite result rules that out, so
+ * the fast path cannot skip an FPSCR side effect the helper would have applied.
+ * Denormal and NI-mode handling stays exact because force_single is still used.
+ *
+ * The _nf variants additionally skip the FPRF update. On this title that field
+ * is architecturally dead: GC6E01 contains no mcrfs and no Rc=1 FP instruction,
+ * so nothing can branch on FPCC/FPRF, and its four mffs sites each store the
+ * whole register straight to an OS context slot to be restored by mtfsf rather
+ * than inspecting fields. Skipping it therefore changes no observable guest
+ * behaviour, but it *is* an architectural divergence, which is why it is a
+ * separate opt-in level rather than folded into the above. */
+u32 classify_f32(f32 value);
+void set_fprf(CPUState* cpu, u32 value);
+f32 force_single(const CPUState* cpu, f64 value);
+f64 force_25bit_c(f64 d);
+f64 force_25_bit(f64 value);
+
+static inline bool dolrecomp_fp_ordinary(f64 value) {
+    /* True unless the value is a NaN or an infinity. Done on the bit pattern so
+     * this header does not have to pull in <math.h> or depend on the compiler's
+     * fast-math settings agreeing with the runtime's. */
+    u64 bits;
+    __builtin_memcpy(&bits, &value, sizeof(bits));
+    return (bits & 0x7FF0000000000000ull) != 0x7FF0000000000000ull;
+}
+
+#define DOLRECOMP_FP_WRITE_SINGLE(cpu, d, value)                               \
+    do {                                                                       \
+        const f32 dolrecomp_rounded = force_single((cpu), (value));            \
+        (cpu)->fpr[(d)] = dolrecomp_rounded;                                   \
+        (cpu)->ps1[(d)] = dolrecomp_rounded;                                   \
+        set_fprf((cpu), classify_f32(dolrecomp_rounded));                      \
+    } while (0)
+
+#define DOLRECOMP_FP_WRITE_SINGLE_NF(cpu, d, value)                            \
+    do {                                                                       \
+        const f32 dolrecomp_rounded = force_single((cpu), (value));            \
+        (cpu)->fpr[(d)] = dolrecomp_rounded;                                   \
+        (cpu)->ps1[(d)] = dolrecomp_rounded;                                   \
+    } while (0)
+
+#define DOLRECOMP_DEFINE_FP_FAST(suffix, WRITE_SINGLE)                         \
+    static inline void ppc_fadds##suffix(CPUState* cpu, u8 d, u8 a, u8 b) {    \
+        const f64 result = cpu->fpr[a] + cpu->fpr[b];                          \
+        if (dolrecomp_fp_ordinary(result)) {                                   \
+            WRITE_SINGLE(cpu, d, result);                                      \
+            return;                                                            \
+        }                                                                      \
+        ppc_fadds(cpu, d, a, b);                                               \
+    }                                                                          \
+    static inline void ppc_fsubs##suffix(CPUState* cpu, u8 d, u8 a, u8 b) {    \
+        const f64 result = cpu->fpr[a] - cpu->fpr[b];                          \
+        if (dolrecomp_fp_ordinary(result)) {                                   \
+            WRITE_SINGLE(cpu, d, result);                                      \
+            return;                                                            \
+        }                                                                      \
+        ppc_fsubs(cpu, d, a, b);                                               \
+    }                                                                          \
+    static inline void ppc_fmuls##suffix(CPUState* cpu, u8 d, u8 a, u8 c) {    \
+        const f64 result = cpu->fpr[a] * force_25bit_c(cpu->fpr[c]);           \
+        if (dolrecomp_fp_ordinary(result)) {                                   \
+            WRITE_SINGLE(cpu, d, result);                                      \
+            return;                                                            \
+        }                                                                      \
+        ppc_fmuls(cpu, d, a, c);                                               \
+    }                                                                          \
+    static inline bool ppc_fma##suffix(CPUState* cpu, f64 a, f64 c, f64 b,     \
+                                       bool single, bool subtract,             \
+                                       bool negative, f64* output) {           \
+        if (!single)                                                           \
+            return ppc_fma(cpu, a, c, b, single, subtract, negative, output);  \
+        const f64 addend = subtract ? -b : b;                                  \
+        const f64 wide = __builtin_fma(a, force_25_bit(c), addend);            \
+        u64 bits;                                                              \
+        __builtin_memcpy(&bits, &wide, sizeof(bits));                          \
+        /* The even-tie correction needs the helper's exact fixup sequence. */ \
+        if ((bits & 0x000000001FFFFFFFull) == 0x0000000010000000ull)           \
+            return ppc_fma(cpu, a, c, b, single, subtract, negative, output);  \
+        if (!dolrecomp_fp_ordinary(wide))                                      \
+            return ppc_fma(cpu, a, c, b, single, subtract, negative, output);  \
+        f64 result = (f64)(f32)wide;                                           \
+        if (negative)                                                          \
+            result = -result;                                                  \
+        *output = result;                                                      \
+        DOLRECOMP_FP_FMA_FPRF(cpu, result);                                    \
+        return true;                                                           \
+    }
+
+#define DOLRECOMP_FP_FMA_FPRF(cpu, result) set_fprf((cpu), classify_f32((f32)(result)))
+DOLRECOMP_DEFINE_FP_FAST(_fast, DOLRECOMP_FP_WRITE_SINGLE)
+#undef DOLRECOMP_FP_FMA_FPRF
+
+#define DOLRECOMP_FP_FMA_FPRF(cpu, result) ((void)(cpu), (void)(result))
+DOLRECOMP_DEFINE_FP_FAST(_fastnf, DOLRECOMP_FP_WRITE_SINGLE_NF)
+#undef DOLRECOMP_FP_FMA_FPRF
+#endif  // __clang__ || __GNUC__
+
 void ppc_fdivs(CPUState* cpu, u8 d, u8 a, u8 b);
 void ppc_fadd(CPUState* cpu, u8 d, u8 a, u8 b);
 void ppc_fsub(CPUState* cpu, u8 d, u8 a, u8 b);
@@ -399,6 +541,8 @@ static inline bool ppc_fp_available_inline(CPUState* cpu, u32 cia) {
 }
 void ppc_fallback_instruction(CPUState* cpu, u32 raw, u32 cia);
 bool ppc_host_call(CPUState* cpu, u32 address);
+bool ppc_native_region_available(CPUState* cpu, u32 start, u32 end);
+void ppc_cache_range(CPUState* cpu, u8 operation, u32 start, u32 bytes);
 void ppc_system_call_exception(CPUState* cpu, u32 cia);
 void ppc_dsi_exception(CPUState* cpu, u32 ea, u32 cia, u32 dsisr);
 void ppc_alignment_exception(CPUState* cpu, u32 ea, u32 cia);

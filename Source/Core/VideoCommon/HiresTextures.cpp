@@ -85,8 +85,8 @@ void HiresTexture::Update()
   }
 
   const std::string& game_id = SConfig::GetInstance().GetGameID();
-  const std::set<std::string> texture_directories =
-      GetTextureDirectoriesWithGameId(File::GetUserPath(D_HIRESTEXTURES_IDX), game_id);
+  const std::vector<std::string> texture_directories =
+      GetHiresTextureDirectoriesWithGameId(File::GetUserPath(D_HIRESTEXTURES_IDX), game_id);
   constexpr auto extensions = std::to_array<std::string_view>({".png", ".dds"});
 
   for (const auto& texture_directory : texture_directories)
@@ -205,13 +205,9 @@ std::set<std::string> GetTextureDirectoriesWithGameId(const std::string& root_di
   }
   else
   {
-    // If there's no directory with the region-specific ID, look for a 3-character region-free one
     const std::string region_free_directory = root_directory + game_id.substr(0, 3);
-
     if (File::Exists(region_free_directory))
-    {
       result.insert(region_free_directory);
-    }
   }
 
   const auto match_gameid_or_all = [game_id](const std::string& filename) {
@@ -235,6 +231,31 @@ std::set<std::string> GetTextureDirectoriesWithGameId(const std::string& root_di
       result.insert(root_directory + directory_path.substr(0, first_path_separator_position));
     }
   }
+
+  return result;
+}
+
+std::vector<std::string> GetHiresTextureDirectoriesWithGameId(const std::string& root_directory,
+                                                              const std::string& game_id)
+{
+  std::vector<std::string> result;
+  const auto append_unique = [&result](const std::string& directory) {
+    if (std::ranges::find(result, directory) == result.end())
+      result.push_back(directory);
+  };
+
+  const std::string region_specific_directory = root_directory + game_id;
+  if (File::Exists(region_specific_directory))
+    append_unique(region_specific_directory);
+
+  // A broad region-free pack fills gaps left by the smaller region-specific
+  // override set. HiresTexture::Update keeps the first file for a texture hash.
+  const std::string region_free_directory = root_directory + game_id.substr(0, 3);
+  if (File::Exists(region_free_directory))
+    append_unique(region_free_directory);
+
+  for (const std::string& directory : GetTextureDirectoriesWithGameId(root_directory, game_id))
+    append_unique(directory);
 
   return result;
 }

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/HW/GCPad.h"
+#include <atomic>
 
 #include "Common/Common.h"
 #include "Core/HW/GCPadEmu.h"
@@ -11,6 +12,11 @@
 
 namespace Pad
 {
+static std::atomic<StatusFilter> s_status_filter{nullptr};
+void SetStatusFilter(StatusFilter filter)
+{
+  s_status_filter.store(filter, std::memory_order_release);
+}
 static InputConfig s_config("GCPadNew", _trans("Pad"), "GCPad", "Pad");
 InputConfig* GetConfig()
 {
@@ -55,7 +61,10 @@ bool IsInitialized()
 
 GCPadStatus GetStatus(int pad_num)
 {
-  return static_cast<GCPad*>(s_config.GetController(pad_num))->GetInput();
+  auto status = static_cast<GCPad*>(s_config.GetController(pad_num))->GetInput();
+  if (const auto filter = s_status_filter.load(std::memory_order_acquire))
+    filter(pad_num, status);
+  return status;
 }
 
 ControllerEmu::ControlGroup* GetGroup(int pad_num, PadGroup group)

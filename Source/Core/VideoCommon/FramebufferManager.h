@@ -192,6 +192,39 @@ protected:
   std::tuple<u32, u32> CalculateTargetSize(int efb_scale);
 
   void DoLoadState(PointerWrap& p);
+
+public:
+  // Blurs the EFB by depth around the screen-centre focus (first-person depth
+  // of field), in place; called before XFB copies. level 1-3.
+  void ApplyDepthOfField(int level);
+  void ApplyDepthOfFieldOnce(int level)
+  {
+    if (!m_dof_applied_this_frame)
+    {
+      m_dof_applied_this_frame = true;
+      ApplyDepthOfField(level);
+    }
+  }
+  void ResetDepthOfFieldFrame()
+  {
+    m_dof_applied_this_frame = false;
+    if (m_dof_frames_idle < 1000)
+      m_dof_frames_idle++;
+  }
+
+private:
+  std::unique_ptr<AbstractPipeline> m_dof_pipeline;
+  std::unique_ptr<AbstractTexture> m_dof_texture;
+  std::unique_ptr<AbstractFramebuffer> m_dof_framebuffer;
+  AbstractTextureFormat m_dof_format = AbstractTextureFormat::Undefined;
+  bool m_dof_applied_this_frame = false;
+  std::unique_ptr<AbstractPipeline> m_dof_focus_pipeline;
+  std::unique_ptr<AbstractTexture> m_dof_focus[2];
+  std::unique_ptr<AbstractFramebuffer> m_dof_focus_framebuffer[2];
+  u32 m_dof_focus_index = 0;
+  u32 m_dof_frames_idle = 1000;  // frames since the last pass (restarts smoothing)
+
+protected:
   void DoSaveState(PointerWrap& p);
 
   float m_efb_scale = 1.0f;

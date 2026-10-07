@@ -3,6 +3,11 @@
 
 #include "Core/PowerPC/StaticRecomp/StaticRecompCore.h"
 
+#include <atomic>
+#include <chrono>
+#include <map>
+#include <thread>
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -16,6 +21,7 @@
 #include "Core/Config/MainSettings.h"
 #include "Core/Config/StaticRecompSettings.h"
 #include "Core/Config/ConfigManager.h"
+#include "Core/PowerPC/PowerPC.h"
 #include "Core/PowerPC/StaticRecomp/StaticRecompLockstep.h"
 #include "Core/System.h"
 
@@ -136,6 +142,27 @@ bool StaticRecompCore::ShouldYieldAt(u32 address)
   return IsHostCallAddress(address);
 }
 
+bool StaticRecompCore::TryRecoverZeroCallback(PowerPC::PowerPCState& ppc)
+{
+  if (!m_module_active || ChunkIndexOf(ppc.pc) >= 0)
+    return false;
+
+  const u32 return_address = LR(ppc) & ~3u;
+  const int return_chunk = ChunkIndexOf(return_address);
+  if (return_chunk < 0)
+    return false;
+
+  ++m_recovered_zero_callbacks;
+  std::fprintf(stderr,
+               "[staticrecomp] recovered zeroed dynamic callback pc=0x%08x lr=0x%08x "
+               "return_chunk=%d ctr=0x%08x r31=0x%08x\n",
+               ppc.pc, return_address, return_chunk, ppc.spr[SPR_CTR], ppc.gpr[31]);
+  std::fflush(stderr);
+  ppc.pc = return_address;
+  ppc.npc = return_address + 4u;
+  return true;
+}
+
 StaticRecompCore::StaticRecompCore(Core::System& system, StaticRecompModuleSource module_source)
     : JitBase(system), m_module_source(std::move(module_source))
 {
@@ -148,6 +175,46 @@ void StaticRecompCore::Init()
   g_static_recomp_core = this;
   RefreshConfig();
   m_collect_dispatch_samples = std::getenv("STATICRECOMP_DISPATCH_SAMPLES") != nullptr;
+  // STATICRECOMP_PC_SAMPLES samples the guest PC from a separate thread and
+  // prints the hottest addresses every couple of seconds. The dispatch-site
+  // sampler cannot see a guest that never returns to the dispatcher, and when
+  // that happens the CPU thread also cannot be joined, so nothing is printed at
+  // shutdown either. This reports as it goes, which is the only way to locate a
+  // spin inside a single generated chunk.
+  if (std::getenv("STATICRECOMP_PC_SAMPLES"))
+  {
+    m_pc_sampling.store(true, std::memory_order_relaxed);
+    std::thread([this] {
+      std::map<u32, u64> hits;
+      int since_report = 0;
+      // The value is the sample interval in milliseconds. Each report covers
+      // only the window since the last one: accumulating from process start
+      // folds boot into every report and makes a steady-state scene profile
+      // impossible to read.
+      const char* setting = std::getenv("STATICRECOMP_PC_SAMPLES");
+      int interval_ms = setting ? std::atoi(setting) : 0;
+      if (interval_ms <= 0)
+        interval_ms = 5;
+      const int per_report = std::max(1, 2000 / interval_ms);
+      while (m_pc_sampling.load(std::memory_order_relaxed))
+      {
+        ++hits[m_guest.pc];
+        std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+        if (++since_report < per_report)
+          continue;
+        since_report = 0;
+        std::vector<std::pair<u32, u64>> top(hits.begin(), hits.end());
+        std::sort(top.begin(), top.end(),
+                  [](const auto& l, const auto& r) { return l.second > r.second; });
+        for (std::size_t i = 0; i < std::min<std::size_t>(top.size(), 8); ++i)
+          std::fprintf(stderr, "[staticrecomp] pc-sample pc=%08x hits=%llu\n",
+                       top[i].first, (unsigned long long)top[i].second);
+        std::fprintf(stderr, "[staticrecomp] pc-sample --- distinct=%zu ---\n", hits.size());
+        hits.clear();
+        std::fflush(stderr);
+      }
+    }).detach();
+  }
   const char* fallback_override = std::getenv("STATICRECOMP_FALLBACK_RANGES");
   std::istringstream fallback_ranges(fallback_override ? fallback_override :
                                                          Config::Get(Config::MAIN_STATICRECOMP_FALLBACK_RANGES));
@@ -182,6 +249,19 @@ void StaticRecompCore::Init()
 
   LoadModule();
   m_idle_pc = Config::Get(Config::MAIN_STATICRECOMP_IDLE_PC);
+  m_idle_loop_end_pc = Config::Get(Config::MAIN_STATICRECOMP_IDLE_LOOP_END_PC);
+  m_task_idle_pc = Config::Get(Config::MAIN_STATICRECOMP_TASK_IDLE_PC);
+  m_task_list_head = Config::Get(Config::MAIN_STATICRECOMP_TASK_LIST_HEAD);
+  m_task_pending_head = Config::Get(Config::MAIN_STATICRECOMP_TASK_PENDING_HEAD);
+  std::fprintf(stderr, "[staticrecomp] task idle: pc=0x%08x list=0x%08x pending=0x%08x\n",
+               m_task_idle_pc, m_task_list_head, m_task_pending_head);
+  std::fflush(stderr);
+  if (m_idle_pc != 0)
+  {
+    std::fprintf(stderr, "[staticrecomp] idle loop: [0x%08x,0x%08x)\n", m_idle_pc,
+                 m_idle_loop_end_pc);
+    std::fflush(stderr);
+  }
   m_lockstep_verifier = std::make_unique<StaticRecompLockstep::StaticRecompLockstepVerifier>(*this);
   m_lockstep_verifier->Init();
 
@@ -198,17 +278,42 @@ void StaticRecompCore::Init()
   }
 }
 
+extern u64 g_static_recomp_ext_counts[2][16];
+
 void StaticRecompCore::Shutdown()
 {
   g_static_recomp_core = nullptr;
+  for (int rw = 0; rw < 2; ++rw)
+    for (int n = 0; n < 16; ++n)
+      if (g_static_recomp_ext_counts[rw][n])
+        std::fprintf(stderr, "[staticrecomp] external %s 0x%X0000000: %llu\n", rw ? "write" : "read",
+                     n, (unsigned long long)g_static_recomp_ext_counts[rw][n]);
   std::fprintf(stderr,
                "[staticrecomp] shutdown: native=%llu fallback=%llu native_exc=%llu hook_fb=%llu "
-               "smc_failed=%u verifications=%llu reverify_events=%llu bursts=%llu cycles=%llu\n",
+               "zero_cb=%llu smc_failed=%u verifications=%llu reverify_events=%llu bursts=%llu "
+               "cycles=%llu\n",
                (unsigned long long)m_native_dispatches, (unsigned long long)m_fallback_steps,
                (unsigned long long)m_native_exceptions,
-               (unsigned long long)m_hook_fallback_instructions, m_failed_chunks,
+               (unsigned long long)m_hook_fallback_instructions,
+               (unsigned long long)m_recovered_zero_callbacks, m_failed_chunks,
                (unsigned long long)m_verifications, (unsigned long long)m_reverify_events,
                (unsigned long long)m_bursts, (unsigned long long)m_charged_cycles);
+  std::vector<std::pair<u32, u64>> host_call_sites(m_host_call_sites.begin(),
+                                                   m_host_call_sites.end());
+  std::sort(host_call_sites.begin(), host_call_sites.end(),
+            [](const auto& left, const auto& right) { return left.second > right.second; });
+  u64 host_call_total = 0;
+  for (const auto& entry : host_call_sites)
+    host_call_total += entry.second;
+  for (std::size_t i = 0; i < std::min<std::size_t>(host_call_sites.size(), 16); ++i)
+  {
+    std::fprintf(stderr, "[staticrecomp] host-call pc=%08x count=%llu (%.1f%% of %llu)\n",
+                 host_call_sites[i].first, (unsigned long long)host_call_sites[i].second,
+                 host_call_total ? 100.0 * static_cast<double>(host_call_sites[i].second) /
+                                       static_cast<double>(host_call_total)
+                                 : 0.0,
+                 (unsigned long long)host_call_total);
+  }
   std::vector<std::pair<u32, u64>> dispatch_samples(m_dispatch_samples.begin(),
                                                     m_dispatch_samples.end());
   std::sort(dispatch_samples.begin(), dispatch_samples.end(),
@@ -221,11 +326,11 @@ void StaticRecompCore::Shutdown()
   }
   NOTICE_LOG_FMT(POWERPC,
                  "StaticRecomp: shutdown. native_dispatches={} fallback_steps={} "
-                 "native_exceptions={} hook_fallback_instructions={} smc_failed_chunks={} "
-                 "verifications={} reverify_events={}",
+                 "native_exceptions={} hook_fallback_instructions={} recovered_zero_callbacks={} "
+                 "smc_failed_chunks={} verifications={} reverify_events={}",
                  m_native_dispatches, m_fallback_steps, m_native_exceptions,
-                 m_hook_fallback_instructions, m_failed_chunks, m_verifications,
-                 m_reverify_events);
+                 m_hook_fallback_instructions, m_recovered_zero_callbacks, m_failed_chunks,
+                 m_verifications, m_reverify_events);
   m_lockstep_verifier.reset();
   m_block_cache.Shutdown();
   m_module = nullptr;
@@ -264,6 +369,9 @@ void StaticRecompCore::LoadModule()
     const auto get_module = reinterpret_cast<StaticRecompGetModuleFn>(
         m_library.GetSymbolAddress(STATICRECOMP_GET_MODULE_SYMBOL));
     desc = get_module ? get_module() : nullptr;
+    m_hook_aware_module = m_library.GetSymbolAddress("dolrecomp_hook_aware_calls") != nullptr;
+    if (m_hook_aware_module)
+      std::fprintf(stderr, "[staticrecomp] hook-aware module: hooked chunks run natively\n");
   }
 
   const auto reject = [&](const std::string& why) {
@@ -307,6 +415,7 @@ void StaticRecompCore::LoadModule()
   m_has_rel_modules = desc->num_rel_modules != 0;
   m_chunk_state.assign(desc->num_chunk_ranges, CHUNK_UNVERIFIED);
   m_chunk_host_call_state.assign(desc->num_chunk_ranges, 0);
+  m_native_region_blocked.clear();
   m_effective_chunk_hashes.assign(desc->chunk_hashes,
                                   desc->chunk_hashes + desc->num_chunk_ranges);
   m_chunk_rel_sections.assign(desc->num_chunk_ranges, -1);

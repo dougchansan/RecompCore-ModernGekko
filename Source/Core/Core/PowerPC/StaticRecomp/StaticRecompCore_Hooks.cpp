@@ -13,6 +13,7 @@
 #include "Common/Logging/Log.h"
 
 #include <cstdio>
+#include <cstdlib>
 
 namespace
 {
@@ -22,13 +23,50 @@ constexpr u32 LOCKED_CACHE_BASE = 0xE0000000u;
 bool StaticRecompCore::HookHostCall(CPUState* cpu, u32 address)
 {
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
+  // The LLVM backend's generated regions run without per-instruction host-call
+  // dispatch, so each one asks at entry whether the host has to intercept
+  // anything inside it. Acknowledging the query is what distinguishes "nothing
+  // to intercept here" from "this host does not implement the query": leaving
+  // external_rid alone makes the module take the safe path instead.
+  // A whole-range cache operation from a native substitution. Doing this line
+  // by line is what made DCFlushRange the single largest consumer of guest CPU
+  // time in a battle scene: JitInterface::InvalidateICacheLines folds a line
+  // count into one InvalidateICache, and its own comment describes exactly the
+  // dcbf loop this replaces.
+  if (address == PPC_HOST_CALL_CACHE_RANGE)
+  {
+    core->HandleCacheRange(cpu, cpu->external_rid, cpu->external_addr, cpu->external_value);
+    return false;
+  }
+
+  if (address == PPC_HOST_CALL_NATIVE_REGION_QUERY)
+  {
+    // STATICRECOMP_NATIVE_REGION=0 declines the query instead of answering it,
+    // which is exactly what a host without native-region support does: the
+    // module then takes the safe path at every region entry. Keeping the two
+    // behaviours on one binary is what makes "is the fast path at fault?" a
+    // one-variable question.
+    static const bool answer_query = [] {
+      const char* setting = std::getenv("STATICRECOMP_NATIVE_REGION");
+      return !setting || std::atoi(setting) != 0;
+    }();
+    if (!answer_query)
+      return true;
+    const bool blocked = core->RegionNeedsInterception(cpu->external_addr, cpu->external_value);
+    cpu->external_rid = PPC_NATIVE_REGION_QUERY_HANDLED;
+    return blocked;
+  }
   return core->m_module_source.host_call &&
          core->m_module_source.host_call(cpu, address, core->m_module_source.host_call_user);
 }
 
+// Profiling: external (non-RAM) accesses bucketed by the top address nibble.
+u64 g_static_recomp_ext_counts[2][16];
+
 u64 StaticRecompCore::HookExternalRead(CPUState* cpu, u32 ea, u8 size)
 {
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
+  ++g_static_recomp_ext_counts[0][ea >> 28];
   ea = core->TranslateRelAddress(ea);
   if (ea == 0)
     std::fprintf(stderr, "[zero-access] read size=%u guest_pc=%08x ppc_pc=%08x lr=%08x\n", size,
@@ -65,6 +103,7 @@ u64 StaticRecompCore::HookExternalRead(CPUState* cpu, u32 ea, u8 size)
 void StaticRecompCore::HookExternalWrite(CPUState* cpu, u32 ea, u64 value, u8 size)
 {
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
+  ++g_static_recomp_ext_counts[1][ea >> 28];
   ea = core->TranslateRelAddress(ea);
   if (ea == 0)
     std::fprintf(stderr, "[zero-access] write size=%u guest_pc=%08x ppc_pc=%08x lr=%08x\n", size,
@@ -164,6 +203,17 @@ void StaticRecompCore::HookExternalWrite32(CPUState* cpu, u32 ea, u32 value, u8 
 void* StaticRecompCore::HookExternalPointer(CPUState* cpu, u32 ea, u32 size)
 {
   auto* core = static_cast<StaticRecompCore*>(cpu->external_user_data);
+  // Gather-pipe query (size 0 on the WGPIPE page): hand the module
+  // &ppc_state.gather_pipe_ptr, which is immediately followed by
+  // gather_pipe_base_ptr (the JITs rely on the same layout), so generated
+  // stores can do GPFifo::FastWrite themselves and only call out to flush.
+  if (ea == 0xCC008000u && size == 0)
+  {
+    auto& ppc = core->m_system.GetPPCState();
+    static_assert(offsetof(PowerPC::PowerPCState, gather_pipe_base_ptr) ==
+                  offsetof(PowerPC::PowerPCState, gather_pipe_ptr) + sizeof(u8*));
+    return &ppc.gather_pipe_ptr;
+  }
   auto& memory = core->m_system.GetMemory();
   if (ea >= LOCKED_CACHE_BASE && size != 0 &&
       (ea - LOCKED_CACHE_BASE) + size <= memory.GetL1CacheSize())
@@ -323,6 +373,55 @@ void StaticRecompCore::HookSPRWrite(CPUState* cpu, u16 spr, u32 value, u32 cia)
     system.GetMMU().IBATUpdated();
   else if (old_value != value && dbat)
     system.GetMMU().DBATUpdated();
+}
+
+
+void StaticRecompCore::HandleCacheRange(CPUState* cpu, u8 operation, u32 start, u32 bytes)
+{
+  if (!bytes)
+    return;
+  start = TranslateRelAddress(start);
+  PropagateGuestMSR();
+  auto& ppc = m_system.GetPPCState();
+  const u32 count = (bytes + 31u) / 32u;
+
+  if (operation == PPC_CACHE_ICBI)
+  {
+    auto& memory = m_system.GetMemory();
+    auto& jit = m_system.GetJitInterface();
+    for (u32 i = 0; i < count; ++i)
+      ppc.iCache.Invalidate(memory, jit, start + i * 32u);
+    return;
+  }
+
+  if (!ppc.m_enable_dcache)
+  {
+    // The batched form. This is the whole point of the range hook.
+    m_system.GetJitInterface().InvalidateICacheLines(start, count);
+    return;
+  }
+
+  // With dcache emulation on there is no range form, so fall back to per line,
+  // which is still no worse than the guest loop would have been.
+  auto& mmu = m_system.GetMMU();
+  for (u32 i = 0; i < count; ++i)
+  {
+    const u32 ea = start + i * 32u;
+    switch (operation)
+    {
+    case PPC_CACHE_DCBST:
+      mmu.StoreDCacheLine(ea);
+      break;
+    case PPC_CACHE_DCBF:
+      mmu.FlushDCacheLine(ea);
+      break;
+    case PPC_CACHE_DCBI:
+      mmu.InvalidateDCacheLine(ea);
+      break;
+    default:
+      break;
+    }
+  }
 }
 
 void StaticRecompCore::HookCacheControl(CPUState* cpu, u8 operation, u32 ea, u32 cia)

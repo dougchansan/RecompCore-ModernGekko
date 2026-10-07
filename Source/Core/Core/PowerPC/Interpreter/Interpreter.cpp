@@ -289,6 +289,13 @@ void Interpreter::unknown_instruction(Interpreter& interpreter, UGeckoInstructio
 {
   ASSERT(Core::IsCPUThread());
   auto& ppc_state = interpreter.m_ppc_state;
+  if (inst.hex == 0 && g_static_recomp_core &&
+      g_static_recomp_core->TryRecoverZeroCallback(ppc_state))
+  {
+    interpreter.m_end_block = true;
+    return;
+  }
+
   auto& system = interpreter.m_system;
   Core::CPUThreadGuard guard(system);
 

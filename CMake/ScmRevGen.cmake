@@ -18,10 +18,32 @@ if(GIT_FOUND)
   execute_process(WORKING_DIRECTORY ${PROJECT_SOURCE_DIR} COMMAND ${GIT_EXECUTABLE} rev-parse --abbrev-ref HEAD
       OUTPUT_VARIABLE DOLPHIN_WC_BRANCH
       OUTPUT_STRIP_TRAILING_WHITESPACE)
-  # defines DOLPHIN_WC_COMMITS_AHEAD_MASTER
-  execute_process(WORKING_DIRECTORY ${PROJECT_SOURCE_DIR} COMMAND ${GIT_EXECUTABLE} rev-list --count HEAD ^master
+  # defines DOLPHIN_WC_COMMITS_AHEAD_MASTER. RecompCore uses main, while
+  # upstream Dolphin and older clones may still expose master. Submodule
+  # checkouts are normally detached, so accept the remote-tracking forms too.
+  unset(_dolphin_base_ref)
+  foreach(_candidate master main origin/master origin/main)
+    if(NOT _dolphin_base_ref)
+      execute_process(
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${GIT_EXECUTABLE} rev-parse --verify --quiet ${_candidate}
+        RESULT_VARIABLE _candidate_result
+        OUTPUT_QUIET
+        ERROR_QUIET)
+      if(_candidate_result EQUAL 0)
+        set(_dolphin_base_ref ${_candidate})
+      endif()
+    endif()
+  endforeach()
+  if(_dolphin_base_ref)
+    execute_process(
+      WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+      COMMAND ${GIT_EXECUTABLE} rev-list --count ${_dolphin_base_ref}..HEAD
       OUTPUT_VARIABLE DOLPHIN_WC_COMMITS_AHEAD_MASTER
       OUTPUT_STRIP_TRAILING_WHITESPACE)
+  else()
+    set(DOLPHIN_WC_COMMITS_AHEAD_MASTER 0)
+  endif()
 
   # defines DOLPHIN_WC_TAG
   execute_process(WORKING_DIRECTORY ${PROJECT_SOURCE_DIR} COMMAND ${GIT_EXECUTABLE} describe --exact-match HEAD

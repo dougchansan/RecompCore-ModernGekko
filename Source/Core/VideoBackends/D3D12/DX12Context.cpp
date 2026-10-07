@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
+#include <cstdlib>
 #include <dxgi1_6.h>
 #include <queue>
 #include <vector>
@@ -161,6 +163,12 @@ bool DXContext::CreateDevice(u32 adapter_index, bool enable_debug_layer)
     ERROR_LOG_FMT(VIDEO, "Adapter {} not found, using default: {}", adapter_index, DX12HRWrap(hr));
     adapter = nullptr;
   }
+  if (adapter)
+  {
+    DXGI_ADAPTER_DESC desc = {};
+    if (SUCCEEDED(adapter->GetDesc(&desc)))
+      std::fprintf(stderr, "[dx12] adapter %u: %ls\n", adapter_index, desc.Description);
+  }
 
   // Enabling the debug layer will fail if the Graphics Tools feature is not installed.
   if (enable_debug_layer)
@@ -169,11 +177,36 @@ bool DXContext::CreateDevice(u32 adapter_index, bool enable_debug_layer)
     if (SUCCEEDED(hr))
     {
       m_debug_interface->EnableDebugLayer();
+      // MODERNGEKKO_GBV=1: GPU-based validation (invalid descriptors / null
+      // GPU addresses at execution time). Very slow; diagnostics only.
+      if (const char* gbv = std::getenv("MODERNGEKKO_GBV"); gbv && gbv[0] == '1')
+      {
+        ComPtr<ID3D12Debug1> debug1;
+        if (SUCCEEDED(m_debug_interface.As(&debug1)))
+        {
+          debug1->SetEnableGPUBasedValidation(TRUE);
+          std::fprintf(stderr, "[d3d12] GPU-based validation enabled\n");
+        }
+      }
+      std::fprintf(stderr, "[d3d12] debug layer enabled\n");
     }
     else
     {
       ERROR_LOG_FMT(VIDEO, "Debug layer requested but not available: {}", DX12HRWrap(hr));
       enable_debug_layer = false;
+    }
+  }
+
+  // MODERNGEKKO_DRED=1: Device Removed Extended Data (GPU breadcrumbs + page
+  // fault tracking), reported by ReportDeviceRemoved() when the device is lost.
+  if (const char* dred = std::getenv("MODERNGEKKO_DRED"); dred && dred[0] == '1')
+  {
+    ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred_settings;
+    if (SUCCEEDED(s_d3d12_get_debug_interface(IID_PPV_ARGS(&dred_settings))))
+    {
+      dred_settings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+      dred_settings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+      std::fprintf(stderr, "[dred] enabled\n");
     }
   }
 
@@ -188,8 +221,28 @@ bool DXContext::CreateDevice(u32 adapter_index, bool enable_debug_layer)
     ComPtr<ID3D12InfoQueue> info_queue;
     if (SUCCEEDED(m_device.As(&info_queue)))
     {
-      info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
-      info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, TRUE);
+      // MODERNGEKKO_D3D12_LOG=1: print debug-layer messages instead of
+      // breaking into the (absent) debugger, which just kills the process.
+      const char* log_env = std::getenv("MODERNGEKKO_D3D12_LOG");
+      const bool log_messages = log_env && log_env[0] == '1';
+      ComPtr<ID3D12InfoQueue1> info_queue1;
+      DWORD cookie = 0;
+      if (log_messages && SUCCEEDED(m_device.As(&info_queue1)))
+      {
+        info_queue1->RegisterMessageCallback(
+            [](D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY severity, D3D12_MESSAGE_ID id,
+               LPCSTR description, void*) {
+              if (severity > D3D12_MESSAGE_SEVERITY_WARNING)
+                return;
+              static unsigned count = 0;
+              if (count++ < 200)
+                std::fprintf(stderr, "[d3d12] sev%d id%d %s\n", static_cast<int>(severity),
+                             static_cast<int>(id), description);
+            },
+            D3D12_MESSAGE_CALLBACK_FLAG_NONE, nullptr, &cookie);
+      }
+      info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, !log_messages);
+      info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, !log_messages);
 
       D3D12_INFO_QUEUE_FILTER filter = {};
       std::array<D3D12_MESSAGE_ID, 5> id_list{
@@ -555,6 +608,63 @@ void DXContext::DestroyPendingResources(CommandListResources& cmdlist)
   cmdlist.pending_resources.clear();
 }
 
+void DXContext::ReportDeviceRemoved()
+{
+  static bool reported = false;
+  if (reported || !m_device)
+    return;
+  reported = true;
+
+  const HRESULT reason = m_device->GetDeviceRemovedReason();
+  std::fprintf(stderr, "[dred] device removed reason 0x%08lx\n", static_cast<unsigned long>(reason));
+
+  ComPtr<ID3D12DeviceRemovedExtendedData> dred;
+  if (FAILED(m_device.As(&dred)))
+  {
+    std::fprintf(stderr, "[dred] no DRED data (run with MODERNGEKKO_DRED=1)\n");
+    std::fflush(stderr);
+    return;
+  }
+
+  D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT breadcrumbs = {};
+  if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&breadcrumbs)))
+  {
+    for (const D3D12_AUTO_BREADCRUMB_NODE* node = breadcrumbs.pHeadAutoBreadcrumbNode; node;
+         node = node->pNext)
+    {
+      const UINT completed = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
+      if (completed >= node->BreadcrumbCount)
+        continue;  // fully executed
+      std::fprintf(stderr, "[dred] list %p queue %p: %u/%u ops completed\n",
+                   static_cast<const void*>(node->pCommandList),
+                   static_cast<const void*>(node->pCommandQueue), completed,
+                   node->BreadcrumbCount);
+      const UINT first = completed > 12 ? completed - 12 : 0;
+      const UINT last = std::min<UINT>(node->BreadcrumbCount, completed + 6);
+      for (UINT i = first; i < last; i++)
+      {
+        std::fprintf(stderr, "[dred]   %s op %u: %d\n", i == completed ? ">>" : "  ", i,
+                     static_cast<int>(node->pCommandHistory[i]));
+      }
+    }
+  }
+
+  D3D12_DRED_PAGE_FAULT_OUTPUT fault = {};
+  if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&fault)))
+  {
+    std::fprintf(stderr, "[dred] page fault VA 0x%llx\n",
+                 static_cast<unsigned long long>(fault.PageFaultVA));
+    for (const D3D12_DRED_ALLOCATION_NODE* n = fault.pHeadExistingAllocationNode; n; n = n->pNext)
+      std::fprintf(stderr, "[dred]   existing alloc type %d %ls\n",
+                   static_cast<int>(n->AllocationType), n->ObjectNameW ? n->ObjectNameW : L"");
+    for (const D3D12_DRED_ALLOCATION_NODE* n = fault.pHeadRecentFreedAllocationNode; n;
+         n = n->pNext)
+      std::fprintf(stderr, "[dred]   recently freed type %d %ls\n",
+                   static_cast<int>(n->AllocationType), n->ObjectNameW ? n->ObjectNameW : L"");
+  }
+  std::fflush(stderr);
+}
+
 void DXContext::WaitForFence(u64 fence)
 {
   if (m_completed_fence_value >= fence)
@@ -570,6 +680,9 @@ void DXContext::WaitForFence(u64 fence)
     WaitForSingleObject(m_fence_event, INFINITE);
     m_completed_fence_value = m_fence->GetCompletedValue();
   }
+  // A removed device reports UINT64_MAX for every fence.
+  if (m_completed_fence_value == UINT64_MAX)
+    ReportDeviceRemoved();
 
   // Release resources for as many command lists which have completed.
   u32 index = (m_current_command_list + 1) % NUM_COMMAND_LISTS;

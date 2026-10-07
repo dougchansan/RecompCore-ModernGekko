@@ -40,8 +40,14 @@
 #include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/VideoEvents.h"
 #include "VideoCommon/XFStateManager.h"
+#include "VideoCommon/XFStructs.h"
 
 using namespace BPFunctions;
+
+namespace XFTrace
+{
+void Frame();  // XFStructs.cpp
+}
 
 static constexpr Common::EnumMap<float, GammaCorrection::Invalid2_2> s_gammaLUT = {1.0f, 1.7f, 2.2f,
                                                                                    2.2f};
@@ -342,6 +348,8 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
             bpmem.triggerEFBCopy.clamp_bottom, bpmem.copyfilter.GetCoefficients());
 
         auto& system = Core::System::GetInstance();
+        XFTrace::Frame();
+        FrameInterp::Frame();
 
         // This is as closest as we have to an "end of the frame"
         // It works 99% of the time.

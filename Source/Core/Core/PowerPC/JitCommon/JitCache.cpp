@@ -324,13 +324,30 @@ void JitBaseBlockCache::InvalidateICacheInternal(u32 physical_address, u32 addre
   }
   else if (length > 32)
   {
+    // The single-line shortcut above, over every line the range touches: if
+    // none of them ever held JIT code (FinalizeBlock sets a bit for every line
+    // of every block) there is nothing to erase. StaticRecomp games dcbf large
+    // vertex/display-list buffers every frame, and without this each flush
+    // walked the block map and did three std::set erases per 4 bytes of data
+    // the JIT never compiled.
+    const u32 touched_start = physical_address / 32;
+    const u32 touched_end = (physical_address + length + 0x1f) / 32;
+    bool any_valid = false;
+    for (u32 i = touched_start; i < touched_end && !any_valid; ++i)
+      any_valid = valid_block.Test(i);
+    if (!any_valid)
+      destroy_block = false;
+
     // Even if we can't check the set for optimization, we still want to remove all fully covered
     // cache lines from the valid_block set so that later calls don't try to invalidate already
     // cleared regions.
     const u32 covered_block_start = (physical_address + 0x1f) / 32;
     const u32 covered_block_end = (physical_address + length) / 32;
-    for (u32 i = covered_block_start; i < covered_block_end; ++i)
-      valid_block.Clear(i);
+    if (any_valid)
+    {
+      for (u32 i = covered_block_start; i < covered_block_end; ++i)
+        valid_block.Clear(i);
+    }
   }
 
   if (destroy_block)
@@ -342,7 +359,9 @@ void JitBaseBlockCache::InvalidateICacheInternal(u32 physical_address, u32 addre
     // FIFO write address cache, so we don't end up with FIFO checks in places they shouldn't
     // be (this can clobber flags, and thus break any optimization that relies on flags
     // being in the right place between instructions).
-    if (!forced)
+    if (!forced && !(m_jit.js.fifoWriteAddresses.empty() &&
+                     m_jit.js.pairedQuantizeAddresses.empty() &&
+                     m_jit.js.noSpeculativeConstantsAddresses.empty()))
     {
       for (u32 i = address; i < address + length; i += 4)
       {

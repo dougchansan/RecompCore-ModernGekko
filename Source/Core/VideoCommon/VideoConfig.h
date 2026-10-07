@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <optional>
 #include <string>
 #include <vector>
@@ -37,7 +38,11 @@ enum class StereoMode : int
   TopAndBottom,
   Anaglyph,
   QuadBuffer,
-  Passive
+  Passive,
+  // Not stereoscopy: reuses the two-layer EFB so layer 1 holds a frame rendered
+  // with matrices blended halfway to the previous game frame, presented
+  // between game frames for 2x output frame rate.
+  FrameInterp
 };
 
 enum class ShaderCompilationMode : int
@@ -198,6 +203,10 @@ struct VideoConfig final
   bool bVSync = false;
   bool bVSyncActive = false;
   bool bWidescreenHack = false;
+  bool bWidescreenHudSafeArea = false;
+  float fWidescreenHudSafeAreaScale = 1.0f;
+  bool bWidescreenAuthoredMenu = false;
+  bool bColosseumNamingPresentation = false;
   AspectMode aspect_mode{};
   int custom_aspect_width = 1;
   int custom_aspect_height = 1;
@@ -315,6 +324,9 @@ struct VideoConfig final
 
   // Stereoscopy
   StereoMode stereo_mode{};
+  // StereoMode::FrameInterp: EFB layers per game frame (2 = one in-between
+  // frame, 120 images/s; 4 = three, 240 images/s).
+  int iFrameInterpLayers = 2;
   bool stereo_per_eye_resolution_full = false;
   float stereo_depth = 0;
   float stereo_convergence = 0;
@@ -403,6 +415,20 @@ struct VideoConfig final
 
 extern VideoConfig g_Config;
 extern VideoConfig g_ActiveConfig;
+
+// Frame interpolation choice from the pause menu: -1 unset (use the
+// MODERNGEKKO_FRAME_INTERP env var), 0 off, 1 on. See VideoConfig::Refresh.
+extern std::atomic<int> g_frame_interp_choice;
+extern std::atomic<int> g_frame_interp_layers;
+// Set while the presenter drops in-between frames because the display cannot
+// show them (Present blocking); read by the pause menu.
+extern std::atomic<bool> g_frame_interp_dropping;
+// First-person depth of field (0 = off, 1-3 = low/medium/high); set by the
+// pause menu only while the camera mod's first-person view is active.
+extern std::atomic<int> g_depth_of_field_level;
+// Exclusive fullscreen wanted right now (display mode Exclusive, fullscreen and
+// focused); the presenter applies changes on the GPU thread.
+extern std::atomic<bool> g_exclusive_fullscreen_wanted;
 
 // Called every frame.
 void UpdateActiveConfig();

@@ -147,6 +147,52 @@ void AbstractGfx::ScaleTexture(AbstractFramebuffer* dst_framebuffer,
     dst_framebuffer->GetColorAttachment()->FinishedRendering();
 }
 
+void AbstractGfx::SharpenAndScaleTextTexture(AbstractFramebuffer* dst_framebuffer,
+                                             const MathUtil::Rectangle<int>& dst_rect,
+                                             const AbstractTexture* src_texture,
+                                             const MathUtil::Rectangle<int>& src_rect,
+                                             bool preserve_color)
+{
+  if (g_backend_info.api_type == APIType::Nothing)
+  {
+    ScaleTexture(dst_framebuffer, dst_rect, src_texture, src_rect);
+    return;
+  }
+
+  ASSERT(dst_framebuffer->GetColorFormat() == AbstractTextureFormat::RGBA8);
+  BeginUtilityDrawing();
+
+  const auto converted_src_rect =
+      ConvertFramebufferRectangle(src_rect, src_texture->GetWidth(), src_texture->GetHeight());
+  const float rcp_src_width = 1.0f / src_texture->GetWidth();
+  const float rcp_src_height = 1.0f / src_texture->GetHeight();
+  const std::array<float, 4> uniforms = {{converted_src_rect.left * rcp_src_width,
+                                          converted_src_rect.top * rcp_src_height,
+                                          converted_src_rect.GetWidth() * rcp_src_width,
+                                          converted_src_rect.GetHeight() * rcp_src_height}};
+  g_vertex_manager->UploadUtilityUniforms(&uniforms, sizeof(uniforms));
+
+  if (static_cast<u32>(dst_rect.GetWidth()) == dst_framebuffer->GetWidth() &&
+      static_cast<u32>(dst_rect.GetHeight()) == dst_framebuffer->GetHeight())
+  {
+    SetAndDiscardFramebuffer(dst_framebuffer);
+  }
+  else
+  {
+    SetFramebuffer(dst_framebuffer);
+  }
+
+  SetViewportAndScissor(ConvertFramebufferRectangle(dst_rect, dst_framebuffer));
+  SetPipeline(preserve_color ? g_shader_cache->GetRGBA8ColorTextSharpenPipeline() :
+                               g_shader_cache->GetRGBA8TextSharpenPipeline());
+  SetTexture(0, src_texture);
+  SetSamplerState(0, RenderState::GetLinearSamplerState());
+  Draw(0, 3);
+  EndUtilityDrawing();
+  if (dst_framebuffer->GetColorAttachment())
+    dst_framebuffer->GetColorAttachment()->FinishedRendering();
+}
+
 MathUtil::Rectangle<int>
 AbstractGfx::ConvertFramebufferRectangle(const MathUtil::Rectangle<int>& rect,
                                          const AbstractFramebuffer* framebuffer) const

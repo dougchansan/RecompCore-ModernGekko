@@ -103,6 +103,12 @@ struct alignas(16) VertexShaderConstants
   u32 vertex_offset_posmtx;
   std::array<u32, 2> vertex_offset_colors;
   std::array<u32, 8> vertex_offset_texcoords;
+
+  // Frame interpolation: position matrices blended between the previous and
+  // current game frame, used for EFB layer 1 (see XFStructs.cpp FrameInterp).
+  std::array<float4, 64> transformmatrices_b;
+  std::array<float4, 3> posnormalmatrix_b;
+  std::array<float4, 4> projection_b;
 };
 
 enum class VSExpand : u32

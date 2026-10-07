@@ -554,7 +554,8 @@ ATTR_TARGET static void TransformVertices(void* output, const void* vertices, u3
 template <CullMode Mode>
 ATTR_TARGET DOLPHIN_FORCE_INLINE static bool CullTriangle(const CPUCull::TransformedVertex& a,
                                                           const CPUCull::TransformedVertex& b,
-                                                          const CPUCull::TransformedVertex& c)
+                                                          const CPUCull::TransformedVertex& c,
+                                                          bool skip_horizontal_clip)
 {
   if (Mode == CullMode::All)
     return true;
@@ -625,6 +626,11 @@ ATTR_TARGET DOLPHIN_FORCE_INLINE static bool CullTriangle(const CPUCull::Transfo
   __m128i y_gt_pw = _mm_castps_si128(_mm_cmple_ps(allpw, ally));
   __m128i x_lt_nw = _mm_castps_si128(_mm_cmplt_ps(allx, allnw));
   __m128i y_lt_nw = _mm_castps_si128(_mm_cmplt_ps(ally, allnw));
+  if (skip_horizontal_clip)
+  {
+    x_gt_pw = _mm_setzero_si128();
+    x_lt_nw = _mm_setzero_si128();
+  }
   __m128i any_out_of_bounds = _mm_packs_epi16(_mm_packs_epi32(x_lt_nw, y_lt_nw),  //
                                               _mm_packs_epi32(x_gt_pw, y_gt_pw));
   cull |= 0 != _mm_movemask_epi8(_mm_cmpeq_epi32(_mm_set1_epi32(~0), any_out_of_bounds));
@@ -639,14 +645,21 @@ ATTR_TARGET DOLPHIN_FORCE_INLINE static bool CullTriangle(const CPUCull::Transfo
   uint16x8_t y_gt_pw = vreinterpretq_u16_u32(vcgtq_f32(ally, allpw));
   uint16x8_t x_lt_nw = vreinterpretq_u16_u32(vcltq_f32(allx, allnw));
   uint16x8_t y_lt_nw = vreinterpretq_u16_u32(vcltq_f32(ally, allnw));
+  if (skip_horizontal_clip)
+  {
+    x_gt_pw = vdupq_n_u16(0);
+    x_lt_nw = vdupq_n_u16(0);
+  }
   uint8x16_t lt_nw = vreinterpretq_u8_u16(vuzp1q_u16(x_lt_nw, y_lt_nw));
   uint8x16_t gt_pw = vreinterpretq_u8_u16(vuzp1q_u16(x_gt_pw, y_gt_pw));
   uint32x4_t any_out_of_bounds = vreinterpretq_u32_u8(vuzp1q_u8(lt_nw, gt_pw));
   cull |= 0xFFFFFFFF == vmaxvq_u32(any_out_of_bounds);
 #else
-  cull |= a.x < -a.w && b.x < -b.w && c.x < -c.w;
+  if (!skip_horizontal_clip)
+    cull |= a.x < -a.w && b.x < -b.w && c.x < -c.w;
   cull |= a.y < -a.w && b.y < -b.w && c.y < -c.w;
-  cull |= a.x > a.w && b.x > b.w && c.x > c.w;
+  if (!skip_horizontal_clip)
+    cull |= a.x > a.w && b.x > b.w && c.x > c.w;
   cull |= a.y > a.w && b.y > b.w && c.y > c.w;
 #endif
 
@@ -655,7 +668,7 @@ ATTR_TARGET DOLPHIN_FORCE_INLINE static bool CullTriangle(const CPUCull::Transfo
 
 template <OpcodeDecoder::Primitive Primitive, CullMode Mode>
 ATTR_TARGET static bool AreAllVerticesCulled(const CPUCull::TransformedVertex* transformed,
-                                             int count)
+                                             int count, bool skip_horizontal_clip)
 {
   switch (Primitive)
   {
@@ -665,15 +678,18 @@ ATTR_TARGET static bool AreAllVerticesCulled(const CPUCull::TransformedVertex* t
     int i = 3;
     for (; i < count; i += 4)
     {
-      if (!CullTriangle<Mode>(transformed[i - 3], transformed[i - 2], transformed[i - 1]))
+      if (!CullTriangle<Mode>(transformed[i - 3], transformed[i - 2], transformed[i - 1],
+                              skip_horizontal_clip))
         return false;
-      if (!CullTriangle<Mode>(transformed[i - 3], transformed[i - 1], transformed[i - 0]))
+      if (!CullTriangle<Mode>(transformed[i - 3], transformed[i - 1], transformed[i - 0],
+                              skip_horizontal_clip))
         return false;
     }
     // three vertices remaining, so render a triangle
     if (i == count)
     {
-      if (!CullTriangle<Mode>(transformed[i - 3], transformed[i - 2], transformed[i - 1]))
+      if (!CullTriangle<Mode>(transformed[i - 3], transformed[i - 2], transformed[i - 1],
+                              skip_horizontal_clip))
         return false;
     }
     break;
@@ -681,7 +697,8 @@ ATTR_TARGET static bool AreAllVerticesCulled(const CPUCull::TransformedVertex* t
   case OpcodeDecoder::Primitive::GX_DRAW_TRIANGLES:
     for (int i = 2; i < count; i += 3)
     {
-      if (!CullTriangle<Mode>(transformed[i - 2], transformed[i - 1], transformed[i - 0]))
+      if (!CullTriangle<Mode>(transformed[i - 2], transformed[i - 1], transformed[i - 0],
+                              skip_horizontal_clip))
         return false;
     }
     break;
@@ -690,7 +707,8 @@ ATTR_TARGET static bool AreAllVerticesCulled(const CPUCull::TransformedVertex* t
     bool wind = false;
     for (int i = 2; i < count; ++i)
     {
-      if (!CullTriangle<Mode>(transformed[i - 2], transformed[i - !wind], transformed[i - wind]))
+      if (!CullTriangle<Mode>(transformed[i - 2], transformed[i - !wind], transformed[i - wind],
+                              skip_horizontal_clip))
         return false;
       wind = !wind;
     }
@@ -699,7 +717,8 @@ ATTR_TARGET static bool AreAllVerticesCulled(const CPUCull::TransformedVertex* t
   case OpcodeDecoder::Primitive::GX_DRAW_TRIANGLE_FAN:
     for (int i = 2; i < count; ++i)
     {
-      if (!CullTriangle<Mode>(transformed[0], transformed[i - 1], transformed[i]))
+      if (!CullTriangle<Mode>(transformed[0], transformed[i - 1], transformed[i],
+                              skip_horizontal_clip))
         return false;
     }
     break;

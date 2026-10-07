@@ -3,11 +3,14 @@
 
 #include "VideoCommon/FramebufferShaderGen.h"
 
+#include <array>
+#include <cstdlib>
 #include <string_view>
 
 #include "Common/Logging/Log.h"
 
 #include "VideoCommon/FramebufferManager.h"
+#include "VideoCommon/ColosseumTextUpscale.h"
 #include "VideoCommon/ShaderGenCommon.h"
 #include "VideoCommon/TextureDecoder.h"
 #include "VideoCommon/VertexShaderGen.h"
@@ -199,6 +202,11 @@ std::string GenerateScreenQuadVertexShader()
 
 std::string GeneratePassthroughGeometryShader(u32 num_tex, u32 num_colors)
 {
+  // Layered EFB copies/clears: 2 layers for stereoscopy, up to 4 for frame
+  // interpolation.
+  const u32 layers = g_ActiveConfig.stereo_mode == StereoMode::FrameInterp ?
+                         static_cast<u32>(g_ActiveConfig.iFrameInterpLayers) :
+                         2;
   ShaderCode code;
   if (GetAPIType() == APIType::D3D)
   {
@@ -221,11 +229,12 @@ std::string GeneratePassthroughGeometryShader(u32 num_tex, u32 num_colors)
                "  uint slice : SV_RenderTargetArrayIndex;\n"
                "}};\n\n");
 
-    code.Write("[maxvertexcount(6)]\n"
+    code.Write("[maxvertexcount({})]\n"
                "void main(triangle VS_OUTPUT vso[3], inout TriangleStream<GS_OUTPUT> output)\n"
                "{{\n"
-               "  for (uint slice = 0; slice < 2u; slice++)\n"
-               "  {{\n"
+               "  for (uint slice = 0; slice < {}u; slice++)\n",
+               3 * layers, layers);
+    code.Write("  {{\n"
                "    for (int i = 0; i < 3; i++)\n"
                "    {{\n"
                "      GS_OUTPUT gso;\n"
@@ -244,7 +253,8 @@ std::string GeneratePassthroughGeometryShader(u32 num_tex, u32 num_colors)
   else if (GetAPIType() == APIType::OpenGL || GetAPIType() == APIType::Vulkan)
   {
     code.Write("layout(triangles) in;\n"
-               "layout(triangle_strip, max_vertices = 6) out;\n");
+               "layout(triangle_strip, max_vertices = {}) out;\n",
+               3 * layers);
 
     if (num_tex > 0 || num_colors > 0)
     {
@@ -265,9 +275,10 @@ std::string GeneratePassthroughGeometryShader(u32 num_tex, u32 num_colors)
     code.Write("\n"
                "void main()\n"
                "{{\n"
-               "  for (int j = 0; j < 2; j++)\n"
+               "  for (int j = 0; j < {}; j++)\n"
                "  {{\n"
-               "    gl_Layer = j;\n");
+               "    gl_Layer = j;\n",
+               layers);
 
     // We have to explicitly unroll this loop otherwise the GL compiler gets cranky.
     for (u32 v = 0; v < 3; v++)
@@ -325,6 +336,72 @@ std::string GenerateTextureCopyPixelShader()
   EmitSampleTexture(code, 0, "v_tex0");
   code.Write(";\n"
              "}}\n");
+  return code.GetBuffer();
+}
+
+std::string GenerateTextSharpenPixelShader()
+{
+  ShaderCode code;
+  EmitSamplerDeclarations(code, 0, 1, false);
+  EmitPixelMainDeclaration(code, 1, 0);
+  code.Write("{{\n"
+             // Reconstruct a rounded silhouette from a compact, center-weighted footprint in
+             // native texel space. The small radius smooths curved shoulders while preserving
+             // the one-pixel counters in lowercase e and other narrow Colosseum glyphs.
+             "  float2 texel = float2(1.0f / 512.0f, 1.0f / 512.0f);\n"
+             "  float2 radius = texel * {:.3f}f;\n"
+             "  float center = ",
+             ColosseumTextUpscale::RECONSTRUCTION_RADIUS);
+  EmitSampleTexture(code, 0, "v_tex0");
+  code.Write(".a;\n"
+             "  float axial = ");
+  EmitSampleTexture(code, 0, "float3(v_tex0.xy + float2(radius.x, 0.0f), v_tex0.z)");
+  code.Write(".a + ");
+  EmitSampleTexture(code, 0, "float3(v_tex0.xy - float2(radius.x, 0.0f), v_tex0.z)");
+  code.Write(".a + ");
+  EmitSampleTexture(code, 0, "float3(v_tex0.xy + float2(0.0f, radius.y), v_tex0.z)");
+  code.Write(".a + ");
+  EmitSampleTexture(code, 0, "float3(v_tex0.xy - float2(0.0f, radius.y), v_tex0.z)");
+  code.Write(".a;\n"
+             "  float diagonal = ");
+  EmitSampleTexture(code, 0, "float3(v_tex0.xy + radius, v_tex0.z)");
+  code.Write(".a + ");
+  EmitSampleTexture(code, 0, "float3(v_tex0.xy - radius, v_tex0.z)");
+  code.Write(".a + ");
+  EmitSampleTexture(code, 0, "float3(v_tex0.xy + float2(radius.x, -radius.y), v_tex0.z)");
+  code.Write(".a + ");
+  EmitSampleTexture(code, 0, "float3(v_tex0.xy + float2(-radius.x, radius.y), v_tex0.z)");
+  code.Write(".a;\n"
+             "  float reconstructed = center * {:.3f}f + axial * {:.3f}f + "
+             "diagonal * {:.3f}f;\n"
+             "  float coverage = smoothstep({:.2f}f, {:.2f}f, reconstructed);\n"
+             "  ocol0 = float4(coverage, coverage, coverage, coverage);\n"
+             "}}\n",
+             ColosseumTextUpscale::CENTER_WEIGHT, ColosseumTextUpscale::AXIAL_WEIGHT,
+             ColosseumTextUpscale::DIAGONAL_WEIGHT, ColosseumTextUpscale::COVERAGE_LOW,
+             ColosseumTextUpscale::COVERAGE_HIGH);
+  return code.GetBuffer();
+}
+
+std::string GenerateColorTextSharpenPixelShader()
+{
+  ShaderCode code;
+  EmitSamplerDeclarations(code, 0, 1, false);
+  EmitPixelMainDeclaration(code, 1, 0);
+  code.Write("{{\n"
+             "  float4 source = ");
+  EmitSampleTexture(code, 0, "v_tex0");
+  code.Write(";\n"
+             // The battle-status atlas stores colored labels and icons on transparent black.
+             // Linear enlargement blends their RGB toward black, so recover straight color
+             // before applying the broad antialiased coverage transition.
+             "  float3 straight_color = source.a > 0.001f ? "
+             "clamp(source.rgb / source.a, 0.0f, 1.0f) : float3(0.0f, 0.0f, 0.0f);\n"
+             "  float coverage = smoothstep({:.2f}f, {:.2f}f, source.a);\n"
+             "  ocol0 = float4(straight_color, coverage);\n"
+             "}}\n",
+             ColosseumTextUpscale::COLOR_COVERAGE_LOW,
+             ColosseumTextUpscale::COLOR_COVERAGE_HIGH);
   return code.GetBuffer();
 }
 
@@ -628,6 +705,96 @@ std::string GenerateTextureReinterpretShader(TextureFormat from_format, TextureF
   }
 
   code.Write("}}\n");
+  return code.GetBuffer();
+}
+
+// Depth of field over the EFB (first-person view). samp0 = EFB color,
+// samp1 = EFB depth. Raw EFB depth is affine in 1/distance, and so is a thin
+// lens's circle of confusion, so the blur radius is simply proportional to the
+// raw depth difference from the focus (the depth at the screen centre).
+// params: xy = texel size, z = circle-of-confusion scale, w = max radius (texels).
+std::string GenerateDepthOfFieldPixelShader()
+{
+  // 16-point Vogel disc, radius normalized to 1.
+  static constexpr std::array<std::array<float, 2>, 16> kTaps{{
+      {0.177f, 0.000f},  {-0.226f, 0.207f}, {0.033f, -0.395f}, {0.287f, 0.359f},
+      {-0.513f, -0.108f}, {0.500f, -0.299f}, {-0.191f, 0.622f}, {-0.330f, -0.592f},
+      {0.701f, 0.207f},  {-0.701f, 0.330f}, {0.264f, -0.758f}, {0.398f, 0.746f},
+      {-0.865f, -0.243f}, {0.876f, -0.395f}, {-0.330f, 0.907f}, {-0.360f, -0.933f},
+  }};
+  ShaderCode code;
+  EmitUniformBufferDeclaration(code);
+  code.Write("{{\n"
+             "  float4 params;\n"
+             "  float4 params2;\n"
+             "}};\n\n");
+  EmitSamplerDeclarations(code, 0, 3, false);
+  EmitPixelMainDeclaration(code, 1, 0);
+  // q = inverse distance (up to a constant): the raw depth measured from the
+  // far end (params2.x = 1 when far is stored as 1). Blur grows with the
+  // relative difference |q - q_focus| / q_focus, independent of the projection,
+  // minus an in-focus band (params2.y) so small depth changes stay sharp. The
+  // focus comes from the smoothed 1x1 focus texture (samp2).
+  code.Write("{{\n"
+             "#define INVDEPTH(uv) abs(params2.x - texture(samp1, uv).r)\n"
+             "  float focus = texture(samp2, float3(0.5, 0.5, 0.0)).r;\n"
+             "  float rcp_focus = 1.0 / max(focus, 1e-6);\n"
+             "#define COC(q) clamp((abs((q) - focus) * rcp_focus - params2.y) * params.z, 0.0, 1.0)\n"
+             "  float coc = COC(INVDEPTH(v_tex0));\n"
+             "  float4 sum = texture(samp0, v_tex0);\n"
+             "  float weight = 1.0;\n"
+             "  if (coc > 0.02)\n"
+             "  {{\n"
+             "    float2 radius = params.xy * (params.w * coc);\n");
+  for (const auto& tap : kTaps)
+  {
+    code.Write("    {{\n"
+               "      float3 uv = float3(v_tex0.xy + float2({:.3f}, {:.3f}) * radius, v_tex0.z);\n"
+               "      float w = 0.25 + COC(INVDEPTH(uv));\n"
+               "      sum += texture(samp0, uv) * w;\n"
+               "      weight += w;\n"
+               "    }}\n",
+               tap[0], tap[1]);
+  }
+  code.Write("  }}\n"
+             "  ocol0 = sum / weight;\n");
+  // MODERNGEKKO_DOF_DEBUG=1: show the circle of confusion (white = most blur).
+  if (const char* debug = std::getenv("MODERNGEKKO_DOF_DEBUG"); debug && debug[0] == '1')
+    code.Write("  ocol0 = float4(coc, texture(samp1, v_tex0).r, clamp(params.z * 0.25, 0.0, 1.0), 1.0);\n");
+  code.Write("}}\n");
+  return code.GetBuffer();
+}
+
+// Depth-of-field focus, rendered into a 1x1 texture: the mean inverse depth of a
+// 5x5 grid over a window around the screen centre (the first-person dot),
+// eased toward from the previous frame's focus (samp0) so characters passing
+// the centre don't snap the focus. samp1 = EFB depth.
+// params: x = blend toward the new focus (1 = no smoothing), y = 1 when far is
+// stored as 1, zw = window half-size (UV).
+std::string GenerateDepthOfFieldFocusPixelShader()
+{
+  ShaderCode code;
+  EmitUniformBufferDeclaration(code);
+  code.Write("{{\n"
+             "  float4 params;\n"
+             "}};\n\n");
+  EmitSamplerDeclarations(code, 0, 2, false);
+  EmitPixelMainDeclaration(code, 1, 0);
+  code.Write("{{\n"
+             "  float sum = 0.0;\n");
+  for (int y = -2; y <= 2; y++)
+  {
+    for (int x = -2; x <= 2; x++)
+    {
+      code.Write("  sum += abs(params.y - texture(samp1, float3(0.5 + {:.1f} * params.z, "
+                 "0.5 + {:.1f} * params.w, 0.0)).r);\n",
+                 x * 0.5f, y * 0.5f);
+    }
+  }
+  code.Write("  float current = sum / 25.0;\n"
+             "  float previous = texture(samp0, float3(0.5, 0.5, 0.0)).r;\n"
+             "  ocol0 = float4(previous > 0.0 ? lerp(previous, current, params.x) : current, 0.0, 0.0, 1.0);\n"
+             "}}\n");
   return code.GetBuffer();
 }
 

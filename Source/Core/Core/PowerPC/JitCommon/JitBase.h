@@ -237,6 +237,19 @@ public:
 
   virtual const CommonAsmRoutinesBase* GetAsmRoutines() = 0;
 
+  // Whether this core can fold the gather-pipe / quantize check inline when a
+  // block is recompiled. A core that cannot gains nothing from the exception
+  // registration and would pay for it on every gather-pipe store, forever.
+  virtual bool UsesCompiledExceptionChecks() const { return true; }
+
+  // The core that actually compiles the block the hook fired from, and so the
+  // one whose fifoWriteAddresses set and block cache the registration belongs
+  // in. Normally that is this core. A core that executes prebuilt code but
+  // keeps a JIT for whatever the module does not cover must point at that JIT
+  // instead: the fallback compiles the block, reads the set at compile time,
+  // and is the only thing that can retire the call site by recompiling.
+  virtual JitBase* GetExceptionCheckTarget() { return this; }
+
   virtual bool WantsPageTableMappings() const;
 
   virtual bool HandleFault(uintptr_t access_address, SContext* ctx) = 0;

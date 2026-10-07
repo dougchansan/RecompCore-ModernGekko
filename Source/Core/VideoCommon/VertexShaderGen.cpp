@@ -125,6 +125,34 @@ static void WriteTransformMatrices(APIType api_type, const ShaderHostConfig& hos
   out.Write("\treturn result;\n");
   out.Write("}}\n\n");
 
+  if (host_config.frame_interp)
+  {
+    // Same as dolphin_position_matrix, from the frame-interpolation copies.
+    out.Write("mat3x4 dolphin_position_matrix_b()\n");
+    out.Write("{{\n");
+    out.Write("\tmat3x4 result;\n");
+    if ((uid_data->components & VB_HAS_POSMTXIDX) != 0)
+    {
+      if (uid_data->vs_expand != VSExpand::None)
+      {
+        out.Write("\tInputData i = dolphin_primitive_expand_data(0);\n");
+        out.Write("\tuvec4 posmtx = unpack_ubyte4(i.posmtx);\n");
+      }
+      out.Write("\tint posidx = int(posmtx.r);\n"
+                "\tresult[0] = " I_TRANSFORMMATRICES_B "[posidx];\n"
+                "\tresult[1] = " I_TRANSFORMMATRICES_B "[posidx + 1];\n"
+                "\tresult[2] = " I_TRANSFORMMATRICES_B "[posidx + 2];\n");
+    }
+    else
+    {
+      out.Write("\tresult[0] = " I_POSNORMALMATRIX_B "[0];\n"
+                "\tresult[1] = " I_POSNORMALMATRIX_B "[1];\n"
+                "\tresult[2] = " I_POSNORMALMATRIX_B "[2];\n");
+    }
+    out.Write("\treturn result;\n");
+    out.Write("}}\n\n");
+  }
+
   // The scale of the transform matrix is used to control the size of the emboss map effect, by
   // changing the scale of the transformed binormals (which only get used by emboss map texgens).
   // By normalising the first transformed normal (which is used by lighting calculations and needs
@@ -700,6 +728,14 @@ ShaderCode GenerateVertexShaderCode(APIType api_type, const ShaderHostConfig& ho
   out.Write("\to.pos = vec4(dot(" I_PROJECTION "[0], vertex_output.position), dot(" I_PROJECTION
             "[1], vertex_output.position), dot(" I_PROJECTION
             "[2], vertex_output.position), dot(" I_PROJECTION "[3], vertex_output.position));\n");
+  if (host_config.frame_interp)
+  {
+    out.Write("\tfloat4 view_pos_b = float4(vertex_input.position * dolphin_position_matrix_b(), "
+              "1.0);\n");
+    out.Write("\to.pos_b = vec4(dot(" I_PROJECTION_B "[0], view_pos_b), dot(" I_PROJECTION_B
+              "[1], view_pos_b), dot(" I_PROJECTION_B "[2], view_pos_b), dot(" I_PROJECTION_B
+              "[3], view_pos_b));\n");
+  }
   for (u32 i = 0; i < uid_data->numTexGens; ++i)
   {
     out.Write("\to.tex{0} = vertex_output.texture_coord_{0};\n", i);
@@ -842,6 +878,30 @@ ShaderCode GenerateVertexShaderCode(APIType api_type, const ShaderHostConfig& ho
               "\to.pos.x = ((ss_pixel_x / (" I_VIEWPORT_SIZE ".x * 0.5f)) - 1.0f);\n"
               "\to.pos.y = ((ss_pixel_y / (" I_VIEWPORT_SIZE ".y * 0.5f)) - 1.0f);\n"
               "}}\n");
+  }
+
+  if (host_config.frame_interp)
+  {
+    // The interpolated position gets exactly the post-projection steps o.pos
+    // received above (clip distances stay derived from the real position).
+    if (!host_config.backend_depth_clamp)
+      out.Write("o.pos_b.z = o.pos_b.z * (1.0 - 1e-7);\n");
+    out.Write("o.pos_b.z = o.pos_b.w * " I_PIXELCENTERCORRECTION ".w - "
+              "o.pos_b.z * " I_PIXELCENTERCORRECTION ".z;\n");
+    if (!host_config.backend_clip_control)
+      out.Write("o.pos_b.z = o.pos_b.z * 2.0 - o.pos_b.w;\n");
+    out.Write("o.pos_b.xy *= sign(" I_PIXELCENTERCORRECTION ".xy * float2(1.0, -1.0));\n");
+    out.Write("o.pos_b.xy = o.pos_b.xy - o.pos_b.w * " I_PIXELCENTERCORRECTION ".xy;\n");
+    if (vertex_rounding)
+    {
+      out.Write("if (o.pos_b.w == 1.0f)\n"
+                "{{\n"
+                "\tfloat ssb_x = round((o.pos_b.x + 1.0f) * (" I_VIEWPORT_SIZE ".x * 0.5f));\n"
+                "\tfloat ssb_y = round((o.pos_b.y + 1.0f) * (" I_VIEWPORT_SIZE ".y * 0.5f));\n"
+                "\to.pos_b.x = ((ssb_x / (" I_VIEWPORT_SIZE ".x * 0.5f)) - 1.0f);\n"
+                "\to.pos_b.y = ((ssb_y / (" I_VIEWPORT_SIZE ".y * 0.5f)) - 1.0f);\n"
+                "}}\n");
+    }
   }
 
   if (host_config.backend_geometry_shaders)

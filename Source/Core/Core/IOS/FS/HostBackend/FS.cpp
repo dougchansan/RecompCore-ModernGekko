@@ -227,7 +227,7 @@ void HostFileSystem::SaveFst()
       return;
     }
   }
-  if (!File::Rename(temp_path, dest_path))
+  if (!File::MoveWithOverwrite(temp_path, dest_path))
     PanicAlertFmt("IOS_FS: Failed to rename temporary FST file");
 }
 

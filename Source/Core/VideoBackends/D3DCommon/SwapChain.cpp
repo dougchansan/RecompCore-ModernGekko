@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 
 #include "Common/Assert.h"
 #include "Common/CommonFuncs.h"
@@ -267,19 +268,67 @@ bool SwapChain::GetFullscreen() const
 
 void SwapChain::SetFullscreen(bool request)
 {
-  m_swap_chain->SetFullscreenState(request, nullptr);
+  // Applied by CheckForFullscreenChange() when the backbuffer is next bound.
+  m_fullscreen_request = request;
+}
+
+// Enters exclusive fullscreen on the window's monitor in its current desktop
+// mode (resolution and refresh rate). Plain SetFullscreenState(TRUE) picks the
+// mode from the buffer description, which can drop a 240 Hz display to 60 Hz.
+bool SwapChain::EnterExclusiveFullscreen()
+{
+  Microsoft::WRL::ComPtr<IDXGIOutput> output;
+  if (FAILED(m_swap_chain->GetContainingOutput(&output)))
+    return SUCCEEDED(m_swap_chain->SetFullscreenState(TRUE, nullptr));
+
+  DXGI_OUTPUT_DESC output_desc;
+  MONITORINFOEXW monitor_info{};
+  monitor_info.cbSize = sizeof(monitor_info);
+  DEVMODEW desktop{};
+  desktop.dmSize = sizeof(desktop);
+  DXGI_SWAP_CHAIN_DESC swap_desc;
+  if (SUCCEEDED(output->GetDesc(&output_desc)) &&
+      GetMonitorInfoW(output_desc.Monitor, &monitor_info) &&
+      EnumDisplaySettingsW(monitor_info.szDevice, ENUM_CURRENT_SETTINGS, &desktop) &&
+      SUCCEEDED(m_swap_chain->GetDesc(&swap_desc)))
+  {
+    DXGI_MODE_DESC wanted = {};
+    wanted.Width = desktop.dmPelsWidth;
+    wanted.Height = desktop.dmPelsHeight;
+    wanted.RefreshRate = {desktop.dmDisplayFrequency, 1};
+    wanted.Format = swap_desc.BufferDesc.Format;
+    DXGI_MODE_DESC mode = wanted;
+    if (FAILED(output->FindClosestMatchingMode(&wanted, &mode, nullptr)))
+      mode = wanted;
+    m_swap_chain->ResizeTarget(&mode);
+    if (FAILED(m_swap_chain->SetFullscreenState(TRUE, output.Get())))
+      return false;
+    // Recommended after the switch so the buffers' size follows the mode.
+    mode.RefreshRate = {};
+    m_swap_chain->ResizeTarget(&mode);
+    std::fprintf(stderr, "[display] exclusive %ux%u @ %u Hz\n", mode.Width, mode.Height,
+                 static_cast<unsigned>(desktop.dmDisplayFrequency));
+    return true;
+  }
+  return SUCCEEDED(m_swap_chain->SetFullscreenState(TRUE, output.Get()));
 }
 
 bool SwapChain::CheckForFullscreenChange()
 {
   if (m_fullscreen_request != m_has_fullscreen)
   {
-    HRESULT hr = m_swap_chain->SetFullscreenState(m_fullscreen_request, nullptr);
-    if (SUCCEEDED(hr))
+    const bool ok = m_fullscreen_request ?
+                        EnterExclusiveFullscreen() :
+                        SUCCEEDED(m_swap_chain->SetFullscreenState(FALSE, nullptr));
+    if (ok)
     {
       m_has_fullscreen = m_fullscreen_request;
       return true;
     }
+    // Don't retry every frame (e.g. another app holds the output).
+    std::fprintf(stderr, "[display] exclusive fullscreen %s failed\n",
+                 m_fullscreen_request ? "enter" : "exit");
+    m_fullscreen_request = m_has_fullscreen;
   }
 
   const bool new_fullscreen_state = GetFullscreenState(m_swap_chain.Get());

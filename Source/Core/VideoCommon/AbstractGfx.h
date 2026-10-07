@@ -151,6 +151,14 @@ public:
                             const AbstractTexture* src_texture,
                             const MathUtil::Rectangle<int>& src_rect);
 
+  // Scales an intensity/coverage texture and tightens the bilinear transition around glyph edges.
+  // Software rendering falls back to its regular scaler.
+  void SharpenAndScaleTextTexture(AbstractFramebuffer* dst_framebuffer,
+                                  const MathUtil::Rectangle<int>& dst_rect,
+                                  const AbstractTexture* src_texture,
+                                  const MathUtil::Rectangle<int>& src_rect,
+                                  bool preserve_color = false);
+
   // Converts an upper-left to lower-left if required by the backend, optionally
   // clamping to the framebuffer size.
   MathUtil::Rectangle<int> ConvertFramebufferRectangle(const MathUtil::Rectangle<int>& rect,

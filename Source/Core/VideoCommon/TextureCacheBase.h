@@ -49,6 +49,10 @@ constexpr std::string_view XFB_DUMP_PREFIX = "xfb1";
 
 static constexpr int FRAMECOUNT_INVALID = 0;
 
+bool IsColosseumTextUpscaleEnabled();
+void SetColosseumTextUpscaleEnabled(bool enabled);
+u64 GetColosseumTextUpscaleCount();
+
 struct TextureAndTLUTFormat
 {
   TextureAndTLUTFormat(TextureFormat texfmt_ = TextureFormat::I4,
@@ -292,7 +296,8 @@ public:
                                  bool clamp_bottom,
                                  const CopyFilterCoefficients::Values& filter_coefficients);
 
-  void ScaleTextureCacheEntryTo(RcTcacheEntry& entry, u32 new_width, u32 new_height);
+  void ScaleTextureCacheEntryTo(RcTcacheEntry& entry, u32 new_width, u32 new_height,
+                                bool sharpen_text = false, bool preserve_text_color = false);
 
   // Flushes all pending EFB copies to emulated RAM.
   void FlushEFBCopies();

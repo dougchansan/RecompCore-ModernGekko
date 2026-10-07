@@ -404,11 +404,15 @@ void ShaderCache::ClearCaches()
   m_texcoord_geometry_shader.reset();
   m_color_geometry_shader.reset();
   m_texture_copy_pixel_shader.reset();
+  m_text_sharpen_pixel_shader.reset();
+  m_color_text_sharpen_pixel_shader.reset();
   m_color_pixel_shader.reset();
 
   m_efb_copy_to_vram_pipelines.clear();
   m_efb_copy_to_ram_pipelines.clear();
   m_copy_rgba8_pipeline.reset();
+  m_text_sharpen_rgba8_pipeline.reset();
+  m_color_text_sharpen_rgba8_pipeline.reset();
   m_rgba8_stereo_copy_pipeline.reset();
   for (auto& pipeline : m_palette_conversion_pipelines)
     pipeline.reset();
@@ -1349,10 +1353,17 @@ bool ShaderCache::CompileSharedPipelines()
   m_texture_copy_pixel_shader = g_gfx->CreateShaderFromSource(
       ShaderStage::Pixel, FramebufferShaderGen::GenerateTextureCopyPixelShader(), nullptr,
       "Texture copy pixel shader");
+  m_text_sharpen_pixel_shader = g_gfx->CreateShaderFromSource(
+      ShaderStage::Pixel, FramebufferShaderGen::GenerateTextSharpenPixelShader(), nullptr,
+      "Colosseum text sharpen pixel shader");
+  m_color_text_sharpen_pixel_shader = g_gfx->CreateShaderFromSource(
+      ShaderStage::Pixel, FramebufferShaderGen::GenerateColorTextSharpenPixelShader(), nullptr,
+      "Colosseum color text sharpen pixel shader");
   m_color_pixel_shader = g_gfx->CreateShaderFromSource(
       ShaderStage::Pixel, FramebufferShaderGen::GenerateColorPixelShader(), nullptr,
       "Color pixel shader");
-  if (!m_texture_copy_pixel_shader || !m_color_pixel_shader)
+  if (!m_texture_copy_pixel_shader || !m_text_sharpen_pixel_shader ||
+      !m_color_text_sharpen_pixel_shader || !m_color_pixel_shader)
     return false;
 
   AbstractPipelineConfig config;
@@ -1368,6 +1379,18 @@ bool ShaderCache::CompileSharedPipelines()
   m_copy_rgba8_pipeline = g_gfx->CreatePipeline(config);
   if (!m_copy_rgba8_pipeline)
     return false;
+
+  config.pixel_shader = m_text_sharpen_pixel_shader.get();
+  m_text_sharpen_rgba8_pipeline = g_gfx->CreatePipeline(config);
+  if (!m_text_sharpen_rgba8_pipeline)
+    return false;
+
+  config.pixel_shader = m_color_text_sharpen_pixel_shader.get();
+  m_color_text_sharpen_rgba8_pipeline = g_gfx->CreatePipeline(config);
+  if (!m_color_text_sharpen_rgba8_pipeline)
+    return false;
+
+  config.pixel_shader = m_texture_copy_pixel_shader.get();
 
   if (UseGeometryShaderForEFBCopies())
   {

@@ -88,6 +88,14 @@ public:
   {
     return m_texture_copy_pixel_shader.get();
   }
+  const AbstractShader* GetTextSharpenPixelShader() const
+  {
+    return m_text_sharpen_pixel_shader.get();
+  }
+  const AbstractShader* GetColorTextSharpenPixelShader() const
+  {
+    return m_color_text_sharpen_pixel_shader.get();
+  }
   const AbstractShader* GetColorGeometryShader() const { return m_color_geometry_shader.get(); }
   const AbstractShader* GetColorPixelShader() const { return m_color_pixel_shader.get(); }
 
@@ -98,6 +106,14 @@ public:
 
   // RGBA8 framebuffer copy pipelines
   const AbstractPipeline* GetRGBA8CopyPipeline() const { return m_copy_rgba8_pipeline.get(); }
+  const AbstractPipeline* GetRGBA8TextSharpenPipeline() const
+  {
+    return m_text_sharpen_rgba8_pipeline.get();
+  }
+  const AbstractPipeline* GetRGBA8ColorTextSharpenPipeline() const
+  {
+    return m_color_text_sharpen_rgba8_pipeline.get();
+  }
   const AbstractPipeline* GetRGBA8StereoCopyPipeline() const
   {
     return m_rgba8_stereo_copy_pipeline.get();
@@ -204,6 +220,8 @@ private:
   std::unique_ptr<AbstractShader> m_texcoord_geometry_shader;
   std::unique_ptr<AbstractShader> m_color_geometry_shader;
   std::unique_ptr<AbstractShader> m_texture_copy_pixel_shader;
+  std::unique_ptr<AbstractShader> m_text_sharpen_pixel_shader;
+  std::unique_ptr<AbstractShader> m_color_text_sharpen_pixel_shader;
   std::unique_ptr<AbstractShader> m_color_pixel_shader;
 
   // GX Shader Caches
@@ -239,6 +257,8 @@ private:
 
   // Copy pipeline for RGBA8 textures
   std::unique_ptr<AbstractPipeline> m_copy_rgba8_pipeline;
+  std::unique_ptr<AbstractPipeline> m_text_sharpen_rgba8_pipeline;
+  std::unique_ptr<AbstractPipeline> m_color_text_sharpen_rgba8_pipeline;
   std::unique_ptr<AbstractPipeline> m_rgba8_stereo_copy_pipeline;
 
   // Palette conversion pipelines

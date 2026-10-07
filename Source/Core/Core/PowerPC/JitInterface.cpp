@@ -322,18 +322,29 @@ void JitInterface::CompileExceptionCheck(ExceptionType type)
   if (!m_jit)
     return;
 
+  // Register against the core that actually compiled the block this fired
+  // from. With static recompilation that is the fallback JIT, not the static
+  // core: the fallback reads these sets at compile time and is what retires
+  // the call site by recompiling with the check folded inline.
+  JitBase* const target = m_jit->GetExceptionCheckTarget();
+
+  // Cores that cannot fold the check inline gain nothing here and would
+  // otherwise pay for this on every gather-pipe store, forever.
+  if (!target->UsesCompiledExceptionChecks())
+    return;
+
   std::unordered_set<u32>* exception_addresses = nullptr;
 
   switch (type)
   {
   case ExceptionType::FIFOWrite:
-    exception_addresses = &m_jit->js.fifoWriteAddresses;
+    exception_addresses = &target->js.fifoWriteAddresses;
     break;
   case ExceptionType::PairedQuantize:
-    exception_addresses = &m_jit->js.pairedQuantizeAddresses;
+    exception_addresses = &target->js.pairedQuantizeAddresses;
     break;
   case ExceptionType::SpeculativeConstants:
-    exception_addresses = &m_jit->js.noSpeculativeConstantsAddresses;
+    exception_addresses = &target->js.noSpeculativeConstantsAddresses;
     break;
   }
 
@@ -355,8 +366,10 @@ void JitInterface::CompileExceptionCheck(ExceptionType type)
     exception_addresses->insert(ppc_state.pc);
 
     // Invalidate the JIT block so that it gets recompiled with the external exception check
-    // included.
-    m_jit->GetBlockCache()->InvalidateICache(ppc_state.pc, 4, true);
+    // included. Same reasoning as the set above: it has to be the compiling
+    // core's block cache, or the block is never rebuilt and the hook never
+    // stops firing.
+    target->GetBlockCache()->InvalidateICache(ppc_state.pc, 4, true);
   }
 }
 

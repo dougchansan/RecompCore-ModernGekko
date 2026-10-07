@@ -3,6 +3,9 @@
 
 #include "VideoBackends/D3D12/DX12Texture.h"
 
+#include <string>
+#include <fmt/format.h>
+
 #include "Common/Align.h"
 #include "Common/Assert.h"
 #include "Common/StringUtil.h"
@@ -55,6 +58,15 @@ DXTexture::DXTexture(const TextureConfig& config, ID3D12Resource* resource,
 
 DXTexture::~DXTexture()
 {
+  // Gfx tracks bound textures by SRV descriptor address and skips rebinding an
+  // unchanged address. Once this descriptor slot is freed and reused by a new
+  // texture, a still-"bound" slot would compare equal, the GPU descriptor table
+  // would not be re-copied, and draws would sample this destroyed resource
+  // (DRED: page fault on a recently freed allocation, device removed). Clear
+  // the binding so the next SetTexture marks the table dirty.
+  if (g_gfx)
+    g_gfx->UnbindTexture(this);
+
   if (m_uav_descriptor)
   {
     g_dx_context->DeferDescriptorDestruction(g_dx_context->GetDescriptorHeapManager(),
@@ -116,10 +128,23 @@ std::unique_ptr<DXTexture> DXTexture::Create(const TextureConfig& config, std::s
   HRESULT hr = g_dx_context->GetDevice()->CreateCommittedResource(
       &heap_properties, D3D12_HEAP_FLAG_NONE, &resource_desc, resource_state,
       config.IsRenderTarget() ? &optimized_clear_value : nullptr, IID_PPV_ARGS(&resource));
+  if (FAILED(hr))
+    g_dx_context->ReportDeviceRemoved();
   ASSERT_MSG(VIDEO, SUCCEEDED(hr), "Failed to create D3D12 texture resource: {}", DX12HRWrap(hr));
   if (FAILED(hr))
     return nullptr;
 
+  // Unnamed textures get a descriptive name so DRED page-fault reports
+  // (MODERNGEKKO_DRED=1) identify the resource.
+  std::string fallback_name;
+  if (name.empty())
+  {
+    static u32 s_texture_serial = 0;
+    fallback_name = fmt::format("tex#{} {}x{} L{} lv{} fmt{} flags{}", ++s_texture_serial,
+                                config.width, config.height, config.layers, config.levels,
+                                static_cast<int>(config.format), static_cast<u32>(config.flags));
+    name = fallback_name;
+  }
   auto tex =
       std::unique_ptr<DXTexture>(new DXTexture(config, resource.Get(), resource_state, name));
   if (!tex->CreateSRVDescriptor() || (config.IsComputeImage() && !tex->CreateUAVDescriptor()))
@@ -436,6 +461,8 @@ DXFramebuffer::DXFramebuffer(AbstractTexture* color_attachment, AbstractTexture*
 
 DXFramebuffer::~DXFramebuffer()
 {
+  if (g_gfx)
+    static_cast<Gfx*>(g_gfx.get())->OnFramebufferDestroyed(this);
   if (m_depth_attachment)
     g_dx_context->DeferDescriptorDestruction(g_dx_context->GetDSVHeapManager(),
                                              m_dsv_descriptor.index);

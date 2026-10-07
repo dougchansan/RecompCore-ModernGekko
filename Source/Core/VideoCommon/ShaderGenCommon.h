@@ -179,6 +179,11 @@ union ShaderHostConfig
   BitField<27, 1, bool, u32> backend_dynamic_vertex_loader;
   BitField<28, 1, bool, u32> backend_vs_point_line_expand;
   BitField<29, 1, bool, u32> backend_gl_layer_in_fs;
+  // Frame interpolation: layer 1 of the (stereo) EFB is rendered with matrices
+  // blended between the previous and current game frame (VS output pos_b).
+  BitField<30, 1, bool, u32> frame_interp;
+  // ...with 4 layers: 1-3 lerp pos_b (previous frame) -> pos at 1/4, 2/4, 3/4.
+  BitField<31, 1, bool, u32> frame_interp4;
 
   static ShaderHostConfig GetCurrent();
 };
@@ -287,6 +292,11 @@ void WriteSwitch(ShaderCode& out, APIType ApiType, std::string_view variable,
 #define I_CACHED_TANGENT "ctangent"
 #define I_CACHED_BINORMAL "cbinormal"
 
+// Frame interpolation (layer 1): blended copies of the position matrices.
+#define I_TRANSFORMMATRICES_B "ctrmtxb"
+#define I_POSNORMALMATRIX_B "cpnmtxb"
+#define I_PROJECTION_B "cprojb"
+
 #define I_STEREOPARAMS "cstereo"
 #define I_LINEPTPARAMS "clinept"
 #define I_TEXOFFSET "ctexoffset"
@@ -319,6 +329,9 @@ static const char s_shader_uniforms[] = "\tuint    components;\n"
                                         "\tuint vertex_offset_rawcolor0;\n"
                                         "\tuint vertex_offset_rawcolor1;\n"
                                         "\tuint4 vertex_offset_rawtex[2];\n"  // std140 is pain
+                                        "\tfloat4 " I_TRANSFORMMATRICES_B "[64];\n"
+                                        "\tfloat4 " I_POSNORMALMATRIX_B "[3];\n"
+                                        "\tfloat4 " I_PROJECTION_B "[4];\n"
                                         "\t#define xfmem_texMtxInfo(i) (xfmem_pack1[(i)].x)\n"
                                         "\t#define xfmem_postMtxInfo(i) (xfmem_pack1[(i)].y)\n"
                                         "\t#define xfmem_color(i) (xfmem_pack1[(i)].z)\n"

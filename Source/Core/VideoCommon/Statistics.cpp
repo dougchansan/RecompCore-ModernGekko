@@ -45,11 +45,25 @@ void Statistics::SwapDL()
 
 void Statistics::Display() const
 {
-  const float scale = ImGui::GetIO().DisplayFramebufferScale.x;
+  const float scale = ImGui::GetStyle().FontScaleMain;
+  static float last_scale = 0.0f;
+  static ImVec2 last_size;
+  if (last_scale > 0.0f && scale != last_scale)
+  {
+    const float ratio = scale / last_scale;
+    last_size = ImVec2(last_size.x * ratio, last_size.y * ratio);
+    ImGui::SetNextWindowSize(last_size);
+  }
   ImGui::SetNextWindowPos(ImVec2(10.0f * scale, 10.0f * scale), ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSizeConstraints(ImVec2(275.0f * scale, 400.0f * scale),
                                       ImGui::GetIO().DisplaySize);
-  if (!ImGui::Begin("Statistics", nullptr, ImGuiWindowFlags_NoNavInputs))
+  const bool visible = ImGui::Begin("Statistics", nullptr, ImGuiWindowFlags_NoNavInputs);
+  // Capture the constrained, user-resizable size after Begin, before the next scale change.
+  // Keep the expanded height when the user collapses the window.
+  if (!ImGui::IsWindowCollapsed())
+    last_size = ImGui::GetWindowSize();
+  last_scale = scale;
+  if (!visible)
   {
     ImGui::End();
     return;
@@ -180,7 +194,7 @@ void Statistics::AddScissorRect()
 void Statistics::DisplayScissor()
 {
   // TODO: This is the same position as the regular statistics text
-  const float scale = ImGui::GetIO().DisplayFramebufferScale.x;
+  const float scale = ImGui::GetStyle().FontScaleMain;
   ImGui::SetNextWindowPos(ImVec2(10.0f * scale, 10.0f * scale), ImGuiCond_FirstUseEver);
 
   if (!ImGui::Begin("Scissor Rectangles", nullptr, ImGuiWindowFlags_AlwaysAutoResize))

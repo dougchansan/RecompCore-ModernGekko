@@ -26,6 +26,10 @@ bool IsInitialized();
 InputConfig* GetConfig();
 
 GCPadStatus GetStatus(int pad_num);
+// Optional frontend input routing. Called after polling with neutral defaults
+// available in GCPadStatus; it must not call back into the controller system.
+using StatusFilter = void (*)(int pad_num, GCPadStatus& status);
+void SetStatusFilter(StatusFilter filter);
 ControllerEmu::ControlGroup* GetGroup(int pad_num, PadGroup group);
 void Rumble(int pad_num, ControlState strength);
 void ResetRumble(int pad_num);

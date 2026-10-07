@@ -62,6 +62,8 @@ add_library(inputcommon
   ControllerInterface/InputBackend.h
   ControllerInterface/MappingCommon.cpp
   ControllerInterface/MappingCommon.h
+  ControllerInterface/Touch/InputOverrider.cpp
+  ControllerInterface/Touch/InputOverrider.h
   ControllerInterface/Wiimote/WiimoteController.cpp
   ControllerInterface/Wiimote/WiimoteController.h
   ControlReference/ControlReference.cpp
@@ -141,8 +143,6 @@ elseif(ANDROID)
   target_sources(inputcommon PRIVATE
     ControllerInterface/Android/Android.cpp
     ControllerInterface/Android/Android.h
-    ControllerInterface/Touch/InputOverrider.cpp
-    ControllerInterface/Touch/InputOverrider.h
   )
   target_link_libraries(inputcommon PRIVATE
     androidcommon

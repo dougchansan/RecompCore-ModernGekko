@@ -3,7 +3,11 @@
 
 #include "VideoCommon/TextureCacheBase.h"
 
+#include <cstdio>
+#include <cstdlib>
+
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -40,6 +44,7 @@
 #include "VideoCommon/Assets/CustomTextureData.h"
 #include "VideoCommon/Assets/TextureAssetUtils.h"
 #include "VideoCommon/BPMemory.h"
+#include "VideoCommon/ColosseumTextUpscale.h"
 #include "VideoCommon/FramebufferManager.h"
 #include "VideoCommon/GraphicsModSystem/Runtime/FBInfo.h"
 #include "VideoCommon/GraphicsModSystem/Runtime/GraphicsModActionData.h"
@@ -66,6 +71,31 @@ static const int TEXTURE_POOL_KILL_THRESHOLD = 3;
 static int xfb_count = 0;
 
 std::unique_ptr<TextureCacheBase> g_texture_cache;
+
+namespace
+{
+std::atomic_bool s_colosseum_text_upscale_enabled{false};
+std::atomic<u64> s_colosseum_text_upscale_count{0};
+
+}  // namespace
+
+bool IsColosseumTextUpscaleEnabled()
+{
+  return s_colosseum_text_upscale_enabled.load(std::memory_order_relaxed);
+}
+
+void SetColosseumTextUpscaleEnabled(bool enabled)
+{
+  const bool previous =
+      s_colosseum_text_upscale_enabled.exchange(enabled, std::memory_order_relaxed);
+  if (enabled && !previous)
+    s_colosseum_text_upscale_count.store(0, std::memory_order_relaxed);
+}
+
+u64 GetColosseumTextUpscaleCount()
+{
+  return s_colosseum_text_upscale_count.load(std::memory_order_relaxed);
+}
 
 TCacheEntry::TCacheEntry(std::unique_ptr<AbstractTexture> tex,
                          std::unique_ptr<AbstractFramebuffer> fb)
@@ -386,7 +416,8 @@ RcTcacheEntry TextureCacheBase::ReinterpretEntry(const RcTcacheEntry& existing_e
   return reinterpreted_entry;
 }
 
-void TextureCacheBase::ScaleTextureCacheEntryTo(RcTcacheEntry& entry, u32 new_width, u32 new_height)
+void TextureCacheBase::ScaleTextureCacheEntryTo(RcTcacheEntry& entry, u32 new_width, u32 new_height,
+                                                bool sharpen_text, bool preserve_text_color)
 {
   if (entry->GetWidth() == new_width && entry->GetHeight() == new_height)
   {
@@ -411,8 +442,18 @@ void TextureCacheBase::ScaleTextureCacheEntryTo(RcTcacheEntry& entry, u32 new_wi
   }
 
   // No need to convert the coordinates here since they'll be the same.
-  g_gfx->ScaleTexture(new_texture->framebuffer.get(), new_texture->texture->GetConfig().GetRect(),
-                      entry->texture.get(), entry->texture->GetConfig().GetRect());
+  if (sharpen_text)
+  {
+    g_gfx->SharpenAndScaleTextTexture(new_texture->framebuffer.get(),
+                                      new_texture->texture->GetConfig().GetRect(),
+                                      entry->texture.get(), entry->texture->GetConfig().GetRect(),
+                                      preserve_text_color);
+  }
+  else
+  {
+    g_gfx->ScaleTexture(new_texture->framebuffer.get(), new_texture->texture->GetConfig().GetRect(),
+                        entry->texture.get(), entry->texture->GetConfig().GetRect());
+  }
   entry->texture.swap(new_texture->texture);
   entry->framebuffer.swap(new_texture->framebuffer);
 
@@ -1653,6 +1694,11 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
     const u32 width = texture_info.GetRawWidth();
     const u32 height = texture_info.GetRawHeight();
 
+    const ColosseumTextUpscale::Plan text_upscale_plan = ColosseumTextUpscale::GetPlan(
+        IsColosseumTextUpscaleEnabled(), texture_info.GetTextureFormat() == TextureFormat::I4,
+        texture_info.GetTextureFormat() == TextureFormat::RGB5A3, width, height,
+        texture_info.GetLevelCount(), creation_info.full_hash);
+    const bool upscale_text = text_upscale_plan.enabled;
     const TextureConfig config(width, height, texLevels, 1, 1, AbstractTextureFormat::RGBA8, 0,
                                AbstractTextureType::Texture_2DArray);
     entry = AllocateCacheEntry(config);
@@ -1759,7 +1805,8 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
 
     entry->has_arbitrary_mips = arbitrary_mip_detector.HasArbitraryMipmaps(dst_buffer);
 
-    if (g_ActiveConfig.bDumpTextures && !skip_texture_dump && texLevels > 0)
+    if (g_ActiveConfig.bDumpTextures && !skip_texture_dump && !upscale_text &&
+        texLevels > 0)
     {
       const std::string basename = texture_info.CalculateTextureName().GetFullName();
       if (g_ActiveConfig.bDumpBaseTextures)
@@ -1774,6 +1821,18 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
         }
       }
     }
+
+    if (upscale_text)
+    {
+      // Keep text uploads native-sized, then reconstruct them once on the GPU. Dynamic glyph
+      // surfaces avoid typewriter-animation hash churn, while the exact battle HUD atlas uses
+      // a color-preserving coverage pass for its Lv/HP/EXP labels.
+      ScaleTextureCacheEntryTo(
+          entry, text_upscale_plan.width, text_upscale_plan.height, true,
+          text_upscale_plan.filter == ColosseumTextUpscale::Filter::ColorCoverage);
+      s_colosseum_text_upscale_count.fetch_add(1, std::memory_order_relaxed);
+    }
+    entry->is_custom_tex = upscale_text;
   }
 
   const auto iter = m_textures_by_address.emplace(texture_info.GetRawAddress(), entry);
@@ -2191,6 +2250,27 @@ void TextureCacheBase::CopyRenderTargetToTexture(
   // Disadvantage of all methods: Calling this function requires the GPU to perform a pipeline flush
   // which stalls any further CPU processing.
   const bool is_xfb_copy = !is_depth_copy && !isIntensity && dstFormat == EFBCopyFormat::XFB;
+  static const bool copy_trace = [] {
+    const char* v = std::getenv("MODERNGEKKO_COPY_TRACE");
+    return v && v[0] == '1';
+  }();
+  if (copy_trace)
+  {
+    static unsigned traced = 0;
+    if (traced++ < 120)
+    {
+      std::fprintf(stderr, "[copy] rect=%d,%d %dx%d fmt=%d depth=%d xfb=%d half=%d clamp=%d,%d\n",
+                   srcRect.left, srcRect.top, srcRect.GetWidth(), srcRect.GetHeight(),
+                   static_cast<int>(dstFormat), is_depth_copy ? 1 : 0, is_xfb_copy ? 1 : 0,
+                   scaleByHalf ? 1 : 0, clamp_top ? 1 : 0, clamp_bottom ? 1 : 0);
+    }
+  }
+  // First-person depth of field: blur the finished EFB just before it becomes
+  // the displayed frame.
+  // (applied at the perspective -> orthographic switch, see XFStructs; the
+  // XFB copy ends the frame)
+  if (is_xfb_copy)
+    g_framebuffer_manager->ResetDepthOfFieldFrame();
   bool copy_to_vram = g_backend_info.bSupportsCopyToVram && !g_ActiveConfig.bDisableCopyToVRAM;
   bool copy_to_ram =
       !(is_xfb_copy ? g_ActiveConfig.bSkipXFBCopyToRam : g_ActiveConfig.bSkipEFBCopyToRam) ||

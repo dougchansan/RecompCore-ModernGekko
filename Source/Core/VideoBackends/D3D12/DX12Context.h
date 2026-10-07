@@ -118,6 +118,10 @@ public:
   // Waits for a specific fence.
   void WaitForFence(u64 fence);
 
+  // Logs the device removed reason and, with MODERNGEKKO_DRED=1, the DRED
+  // breadcrumbs and page fault data (once per process).
+  void ReportDeviceRemoved();
+
   // Defers destruction of a D3D resource (associates it with the current list).
   void DeferResourceDestruction(ID3D12Resource* resource);
 

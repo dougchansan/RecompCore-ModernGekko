@@ -3,6 +3,7 @@
 
 #include "VideoCommon/VertexShaderManager.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -14,6 +15,12 @@
 #include "Common/Matrix.h"
 #include "VideoCommon/BPFunctions.h"
 #include "VideoCommon/BPMemory.h"
+#include "VideoCommon/ColosseumProjection.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <set>
+#include <tuple>
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/FramebufferManager.h"
 #include "VideoCommon/FreeLookCamera.h"
@@ -25,6 +32,7 @@
 #include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/XFMemory.h"
 #include "VideoCommon/XFStateManager.h"
+#include "VideoCommon/XFStructs.h"
 
 void VertexShaderManager::Init()
 {
@@ -40,7 +48,14 @@ void VertexShaderManager::Init()
 
 Common::Matrix44 VertexShaderManager::LoadProjectionMatrix()
 {
-  const auto& rawProjection = xfmem.projection.rawProjection;
+  return LoadProjectionMatrix(xfmem.projection.rawProjection, &m_projection_matrix, true);
+}
+
+Common::Matrix44 VertexShaderManager::LoadProjectionMatrix(const std::array<float, 6>& rawProjection,
+                                                          std::array<float, 16>* projection_matrix,
+                                                          bool update_stats)
+{
+  auto& pm = *projection_matrix;
 
   switch (xfmem.projection.type)
   {
@@ -49,56 +64,142 @@ Common::Matrix44 VertexShaderManager::LoadProjectionMatrix()
     const Common::Vec2 fov_multiplier = g_freelook_camera.IsActive() ?
                                             g_freelook_camera.GetFieldOfViewMultiplier() :
                                             Common::Vec2{1, 1};
-    m_projection_matrix[0] = rawProjection[0] * g_ActiveConfig.fAspectRatioHackW * fov_multiplier.x;
-    m_projection_matrix[1] = 0.0f;
-    m_projection_matrix[2] = rawProjection[1] * g_ActiveConfig.fAspectRatioHackW * fov_multiplier.x;
-    m_projection_matrix[3] = 0.0f;
+    // Colosseum can retain a cached 16:9 projection after loading a state or
+    // changing output modes even though its game-side aspect constant has
+    // already been updated. Correct only projections that still describe a
+    // roughly 16:9 frustum; projections rebuilt by the game for the native
+    // target aspect pass through unchanged. This preserves the original
+    // vertical framing and character size while revealing more world
+    // horizontally (Hor+).
+    const float raw_aspect =
+        rawProjection[0] != 0.0f ? std::abs(rawProjection[2] / rawProjection[0]) : 0.0f;
+    // Only centered frustums qualify. The stale field camera this targets is
+    // symmetric, while battle arenas build an off-center (skewed) ~1.98-aspect
+    // frustum every frame for a pass that has to line up with the main camera;
+    // widening it left whole floor regions black at 32:9.
+    const bool off_center_projection =
+        std::abs(rawProjection[1]) > 0.01f || std::abs(rawProjection[3]) > 0.01f;
+    const bool is_cached_widescreen_projection =
+        !off_center_projection && raw_aspect >= 1.6f && raw_aspect <= 2.0f;
+    const bool square_offscreen_viewport =
+        g_ActiveConfig.bWidescreenHudSafeArea &&
+        VideoCommon::IsColosseumSquareOffscreenViewport(xfmem.viewport.wd,
+                                                        xfmem.viewport.ht);
+    const float authored_projection_scale =
+        std::clamp(g_ActiveConfig.fWidescreenHudSafeAreaScale, 0.25f, 1.0f);
+    // Colosseum renders its character and world shadows through a square
+    // offscreen viewport. That buffer is authored square and is sampled back
+    // through a projector, so its frustum has nothing to do with the output
+    // aspect: it must pass through untouched. Scaling it by the inverse safe
+    // area (which is what this branch used to do) stretched every shadow
+    // horizontally by 1/scale - 2x at 32:9 - and amplified the shadow camera's
+    // own per-draw aspect drift by the same factor, which read on screen as
+    // shadows swinging back and forth on a completely static scene.
+    constexpr float offscreen_projection_scale = 1.0f;
+    const float authored_menu_scale = std::max(
+        VideoCommon::GetColosseumAuthoredMenuHorizontalScale(
+            raw_aspect, g_ActiveConfig.bWidescreenAuthoredMenu),
+        g_ActiveConfig.bWidescreenAuthoredMenu ?
+            VideoCommon::COLOSSEUM_AUTHORED_MENU_MINIMUM_SCALE :
+            1.0f);
+    const float naming_scale = VideoCommon::GetColosseumNamingHorizontalScale(
+        g_ActiveConfig.bColosseumNamingPresentation);
+    const float native_hor_plus_scale =
+        g_ActiveConfig.bColosseumNamingPresentation ? naming_scale :
+        g_ActiveConfig.bWidescreenAuthoredMenu ? authored_menu_scale :
+        square_offscreen_viewport ? offscreen_projection_scale :
+        g_ActiveConfig.bWidescreenHudSafeArea && is_cached_widescreen_projection ?
+            authored_projection_scale :
+            1.0f;
+    const float horizontal_scale =
+        g_ActiveConfig.fAspectRatioHackW * fov_multiplier.x * native_hor_plus_scale;
+    // MODERNGEKKO_PROJ_TRACE=1: log each distinct perspective pass (viewport,
+    // raw aspect, applied horizontal scale) - temporary culling diagnostic.
+    static const bool proj_trace = [] {
+      const char* v = std::getenv("MODERNGEKKO_PROJ_TRACE");
+      return v && v[0] == '1';
+    }();
+    if (proj_trace && update_stats)
+    {
+      static std::set<std::tuple<int, int, int, int, int, int>> seen;
+      const auto key = std::make_tuple(
+          static_cast<int>(xfmem.viewport.wd * 2), static_cast<int>(xfmem.viewport.ht * 2),
+          static_cast<int>(xfmem.viewport.xOrig), static_cast<int>(xfmem.viewport.yOrig),
+          static_cast<int>(raw_aspect * 1000), static_cast<int>(horizontal_scale * 1000));
+      if (seen.insert(key).second && seen.size() < 200)
+      {
+        std::fprintf(stderr,
+                     "[proj] vp=%.1fx%.1f orig=%.1f,%.1f raw_aspect=%.3f hscale=%.3f "
+                     "p0=%.4f p1=%.4f p2=%.4f p3=%.4f square=%d cached16x9=%d\n",
+                     xfmem.viewport.wd * 2, xfmem.viewport.ht * 2, xfmem.viewport.xOrig,
+                     xfmem.viewport.yOrig, raw_aspect, horizontal_scale, rawProjection[0],
+                     rawProjection[1], rawProjection[2], rawProjection[3],
+                     square_offscreen_viewport ? 1 : 0, is_cached_widescreen_projection ? 1 : 0);
+      }
+    }
+    pm[0] = rawProjection[0] * horizontal_scale;
+    pm[1] = 0.0f;
+    pm[2] = rawProjection[1] * horizontal_scale;
+    pm[3] = 0.0f;
 
-    m_projection_matrix[4] = 0.0f;
-    m_projection_matrix[5] = rawProjection[2] * g_ActiveConfig.fAspectRatioHackH * fov_multiplier.y;
-    m_projection_matrix[6] = rawProjection[3] * g_ActiveConfig.fAspectRatioHackH * fov_multiplier.y;
-    m_projection_matrix[7] = 0.0f;
+    pm[4] = 0.0f;
+    pm[5] = rawProjection[2] * g_ActiveConfig.fAspectRatioHackH * fov_multiplier.y;
+    pm[6] = rawProjection[3] * g_ActiveConfig.fAspectRatioHackH * fov_multiplier.y;
+    pm[7] = 0.0f;
 
-    m_projection_matrix[8] = 0.0f;
-    m_projection_matrix[9] = 0.0f;
-    m_projection_matrix[10] = rawProjection[4];
-    m_projection_matrix[11] = rawProjection[5];
+    pm[8] = 0.0f;
+    pm[9] = 0.0f;
+    pm[10] = rawProjection[4];
+    pm[11] = rawProjection[5];
 
-    m_projection_matrix[12] = 0.0f;
-    m_projection_matrix[13] = 0.0f;
+    pm[12] = 0.0f;
+    pm[13] = 0.0f;
 
-    m_projection_matrix[14] = -1.0f;
-    m_projection_matrix[15] = 0.0f;
+    pm[14] = -1.0f;
+    pm[15] = 0.0f;
 
-    g_stats.gproj = m_projection_matrix;
+    if (update_stats)
+      g_stats.gproj = pm;
   }
   break;
 
   case ProjectionType::Orthographic:
   {
-    m_projection_matrix[0] = rawProjection[0];
-    m_projection_matrix[1] = 0.0f;
-    m_projection_matrix[2] = 0.0f;
-    m_projection_matrix[3] = rawProjection[1];
+    // Colosseum composites the perspective world and its 2D overlays through
+    // the same orthographic full-screen quad. Scaling this projection shrinks
+    // the whole camera and exposes stale EFB regions, so preserve it verbatim.
+    // Complete menu canvases are handled by the presenter instead. The naming
+    // screen is the one exception: its confirmation panels were authored out
+    // to x=660 for a 602-pixel VI aperture, so center the complete 640-pixel
+    // composition with the matching 602/640 horizontal scale.
+    const float naming_scale = VideoCommon::GetColosseumNamingHorizontalScale(
+        g_ActiveConfig.bColosseumNamingPresentation);
+    pm[0] = rawProjection[0] * naming_scale;
+    pm[1] = 0.0f;
+    pm[2] = 0.0f;
+    pm[3] = rawProjection[1] * naming_scale;
 
-    m_projection_matrix[4] = 0.0f;
-    m_projection_matrix[5] = rawProjection[2];
-    m_projection_matrix[6] = 0.0f;
-    m_projection_matrix[7] = rawProjection[3];
+    pm[4] = 0.0f;
+    pm[5] = rawProjection[2];
+    pm[6] = 0.0f;
+    pm[7] = rawProjection[3];
 
-    m_projection_matrix[8] = 0.0f;
-    m_projection_matrix[9] = 0.0f;
-    m_projection_matrix[10] = rawProjection[4];
-    m_projection_matrix[11] = rawProjection[5];
+    pm[8] = 0.0f;
+    pm[9] = 0.0f;
+    pm[10] = rawProjection[4];
+    pm[11] = rawProjection[5];
 
-    m_projection_matrix[12] = 0.0f;
-    m_projection_matrix[13] = 0.0f;
+    pm[12] = 0.0f;
+    pm[13] = 0.0f;
 
-    m_projection_matrix[14] = 0.0f;
-    m_projection_matrix[15] = 1.0f;
+    pm[14] = 0.0f;
+    pm[15] = 1.0f;
 
-    g_stats.g2proj = m_projection_matrix;
-    g_stats.proj = rawProjection;
+    if (update_stats)
+    {
+      g_stats.g2proj = pm;
+      g_stats.proj = rawProjection;
+    }
   }
   break;
 
@@ -109,7 +210,7 @@ Common::Matrix44 VertexShaderManager::LoadProjectionMatrix()
   PRIM_LOG("Projection: {} {} {} {} {} {}", rawProjection[0], rawProjection[1], rawProjection[2],
            rawProjection[3], rawProjection[4], rawProjection[5]);
 
-  auto corrected_matrix = Common::Matrix44::FromArray(m_projection_matrix);
+  auto corrected_matrix = Common::Matrix44::FromArray(pm);
 
   if (g_freelook_camera.IsActive() && xfmem.projection.type == ProjectionType::Perspective)
     corrected_matrix *= g_freelook_camera.GetView();
@@ -453,6 +554,40 @@ void VertexShaderManager::SetConstants(std::span<const std::string> textures,
     constants.xfmem_numColorChans = xfmem.numChan.numColorChans;
     dirty = true;
   }
+
+  if (FrameInterp::Enabled())
+    SetInterpConstants();
+}
+
+// Frame interpolation: the layer-1 copies of the position matrices and the
+// projection, from FrameInterp's blended shadow of XF memory. Kept separate
+// from the dirty tracking above because they change whenever a paired load
+// blends, not only when the live XF state changes.
+void VertexShaderManager::SetInterpConstants()
+{
+  if (FrameInterp::g_pos_dirty)
+  {
+    FrameInterp::g_pos_dirty = false;
+    memcpy(constants.transformmatrices_b.data(), FrameInterp::g_pos, sizeof(FrameInterp::g_pos));
+    dirty = true;
+  }
+
+  const u32 pn = g_main_cp_state.matrix_index_a.PosNormalMtxIdx;
+  const float* pos = &FrameInterp::g_pos[(pn & 0x3f) * 4];
+  if (memcmp(constants.posnormalmatrix_b.data(), pos, 3 * sizeof(float4)) != 0)
+  {
+    memcpy(constants.posnormalmatrix_b.data(), pos, 3 * sizeof(float4));
+    dirty = true;
+  }
+
+  std::array<float, 6> raw;
+  std::copy(std::begin(FrameInterp::g_proj), std::end(FrameInterp::g_proj), raw.begin());
+  const Common::Matrix44 projection = LoadProjectionMatrix(raw, &m_projection_matrix_b, false);
+  if (memcmp(constants.projection_b.data(), projection.data.data(), 4 * sizeof(float4)) != 0)
+  {
+    memcpy(constants.projection_b.data(), projection.data.data(), 4 * sizeof(float4));
+    dirty = true;
+  }
 }
 
 void VertexShaderManager::TransformToClipSpace(const float* data, float* out, u32 MtxIdx)
@@ -483,10 +618,15 @@ void VertexShaderManager::DoState(PointerWrap& p)
   p.DoArray(m_projection_matrix);
   g_freelook_camera.DoState(p);
 
-  p.Do(constants);
+  // Serialize only the original constants: the frame-interpolation fields
+  // appended to VertexShaderConstants are derived state, and including them
+  // would change the savestate layout and reject every existing state.
+  p.DoArray(reinterpret_cast<u8*>(&constants),
+            static_cast<u32>(offsetof(VertexShaderConstants, transformmatrices_b)));
 
   if (p.IsReadMode())
   {
     dirty = true;
+    FrameInterp::g_pos_dirty = true;
   }
 }

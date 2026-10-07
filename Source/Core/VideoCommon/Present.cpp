@@ -3,10 +3,18 @@
 
 #include "VideoCommon/Present.h"
 
+#include <algorithm>
+
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+
 #include "Common/ChunkFile.h"
+#include "Common/Timer.h"
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/CoreTiming.h"
+#include "Core/HW/SystemTimers.h"
 #include "Core/HW/VideoInterface.h"
 #include "Core/Host.h"
 #include "Core/System.h"
@@ -15,6 +23,7 @@
 
 #include "Present.h"
 #include "VideoCommon/AbstractGfx.h"
+#include "VideoCommon/ColosseumProjection.h"
 #include "VideoCommon/FrameDumper.h"
 #include "VideoCommon/FramebufferManager.h"
 #include "VideoCommon/OnScreenUI.h"
@@ -212,11 +221,216 @@ void Presenter::ViSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height,
 
   if (!is_duplicate || !g_ActiveConfig.bSkipPresentingDuplicateXFBs)
   {
-    Present(&present_info);
+    if (g_ActiveConfig.stereo_mode == StereoMode::FrameInterp && m_xfb_entry && !is_duplicate)
+    {
+      // MODERNGEKKO_INTERP_PRESENT: "ba" (default) presents the in-between
+      // layer then the real one; "a"/"b" present only one layer (diagnostic).
+      static const std::string order = [] {
+        const char* v = std::getenv("MODERNGEKKO_INTERP_PRESENT");
+        return std::string(v && *v ? v : "ba");
+      }();
+      m_interp_layers = m_xfb_entry->texture ?
+                            std::clamp<u32>(m_xfb_entry->texture->GetLayers(), 2, 4) :
+                            2;
+      // Behind schedule (the game frame arrived more than a step after its
+      // slot): in-between presents cost CPU time on this thread, so show only
+      // the real frame until emulation catches up - heavy scenes such as
+      // battles lose smoothness instead of game speed.
+      const bool behind = m_interp_grid != TimePoint{} &&
+                          Clock::now() > m_interp_frame_end + std::chrono::milliseconds(4);
+      if (order == "ba" && (behind || !InterpLayerAllowed()))
+      {
+        // Display or emulation cannot keep up: show only the real frame, and
+        // expect the next one a field from now (if it is late again, keep
+        // shedding; once frames arrive on time, in-between frames resume).
+        m_interp_pending = false;
+        const TimePoint shown = Clock::now();
+        m_interp_grid = shown;
+        m_interp_frame_end = shown + std::chrono::microseconds(16683);
+        m_interp_present_layer = 0;
+        Present(&present_info);
+      }
+      else if (order == "ba")
+      {
+        // In-between frames now and at 1/n-field steps, then the real frame,
+        // held to a wall-clock grid while emulation keeps running in between.
+        m_interp_present_layer = 1;
+        WaitForInterpSlot();
+        Present(&present_info);
+        m_interp_present_layer = 0;
+        ScheduleInterpRealPresent(present_info);
+      }
+      else
+      {
+        for (const char layer : order)
+        {
+          m_interp_present_layer = layer == 'b' ? 1 : 0;
+          Present(&present_info);
+        }
+        m_interp_present_layer = 0;
+      }
+    }
+    else
+    {
+      m_interp_present_layer = 0;
+      Present(&present_info);
+    }
     ProcessFrameDumping(ticks);
 
     video_events.after_present_event.Trigger(present_info);
   }
+}
+
+void Presenter::ScheduleInterpRealPresent(const PresentInfo& in_between)
+{
+  auto& system = Core::System::GetInstance();
+
+  // n layers per game frame: layer 1 was just presented; layers 2..n-1 and
+  // then the real frame (layer 0) follow at 1/n-field steps.
+  m_interp_layers = m_xfb_entry && m_xfb_entry->texture ?
+                        std::clamp<u32>(m_xfb_entry->texture->GetLayers(), 2, 4) :
+                        2;
+  m_interp_step_ticks = system.GetVideoInterface().GetTicksPerField() / m_interp_layers;
+  m_interp_next_layer = m_interp_layers > 2 ? 2 : 0;
+
+  m_interp_pending = true;
+  m_interp_pending_xfb_id = m_last_xfb_id;
+  m_interp_pending_info = in_between;
+  // Wake well before each slot: GPU work for the next frame runs inline on this
+  // thread and delays CoreTiming events by milliseconds, while waking early is
+  // free (WaitForInterpSlot holds the present to its wall-clock slot). The
+  // first step, right after the swap, is hit hardest.
+  ScheduleInterpStep(m_interp_step_ticks / 4);
+}
+
+void Presenter::ScheduleInterpStep(u64 delay_ticks)
+{
+  auto& system = Core::System::GetInstance();
+  auto& core_timing = system.GetCoreTiming();
+  static CoreTiming::EventType* event = nullptr;
+  if (!event)
+  {
+    event = core_timing.RegisterEvent(
+        "FrameInterpRealPresent", [](Core::System&, u64, s64) {
+          if (g_presenter)
+            g_presenter->PresentInterpReal();
+        });
+  }
+  const double step_seconds = static_cast<double>(m_interp_step_ticks) /
+                              system.GetSystemTimers().GetTicksPerSecond();
+  m_interp_pending_info.intended_present_time +=
+      std::chrono::duration_cast<DT>(std::chrono::duration<double>(step_seconds));
+  core_timing.RemoveEvent(event);
+  core_timing.ScheduleEvent(static_cast<s64>(delay_ticks), event, 0,
+                            CoreTiming::FromThread::ANY);
+}
+
+namespace
+{
+// MODERNGEKKO_INTERP_STATS: how presents met their wall-clock slots.
+struct
+{
+  u32 late = 0;
+  u32 late_layer[4] = {};
+  u32 resyncs = 0;
+  double late_max_ms = 0;
+} g_interp_pace_stats;
+}  // namespace
+
+bool Presenter::InterpLayerAllowed()
+{
+  const double step_ms = 1000.0 / 60.0 / std::max<u32>(m_interp_layers, 2);
+  const TimePoint now = Clock::now();
+  if (m_interp_dropping)
+  {
+    if (now < m_interp_retry)
+      return false;
+    m_interp_dropping = false;  // try again
+    m_interp_block_ms = 0;
+    g_frame_interp_dropping.store(false, std::memory_order_relaxed);
+  }
+  else if (m_interp_block_ms > 0.5 * step_ms)
+  {
+    m_interp_dropping = true;
+    m_interp_retry = now + std::chrono::seconds(2);
+    g_frame_interp_dropping.store(true, std::memory_order_relaxed);
+    return false;
+  }
+  return true;
+}
+
+void Presenter::WaitForInterpSlot()
+{
+  // Emulated time runs ahead in bursts and the frame limiter catches up later,
+  // so CoreTiming-scheduled presents bunch together (0.5 ms then 8 ms apart),
+  // which looks no smoother than 60 FPS. Hold each present to a wall-clock
+  // grid of field/n steps instead. Sleeping here only happens while emulation
+  // is ahead of that grid, i.e. time the limiter would otherwise sleep anyway.
+  auto& system = Core::System::GetInstance();
+  const double field_seconds =
+      static_cast<double>(system.GetVideoInterface().GetTicksPerField()) /
+      system.GetSystemTimers().GetTicksPerSecond();
+  const auto step = std::chrono::duration_cast<DT>(
+      std::chrono::duration<double>(field_seconds / std::max<u32>(m_interp_layers, 2)));
+  static Common::PrecisionTimer timer;
+
+  // Presents per game frame run 1, 2, ..., n-1, 0; this many steps remain from
+  // this present to the next frame's first one.
+  const u32 layers = std::max<u32>(m_interp_layers, 2);
+  const u32 layer = static_cast<u32>(std::clamp(m_interp_present_layer, 0, 3));
+  const u32 remaining = layer == 0 ? 1 : layers - layer + 1;
+
+  const TimePoint now = Clock::now();
+  if (m_interp_grid == TimePoint{} || now > m_interp_grid + step || m_interp_grid > now + 2 * step)
+  {
+    // Late by more than a step, or far off: restart the grid here.
+    m_interp_grid = now;
+    m_interp_frame_end = now + remaining * step;
+    ++g_interp_pace_stats.resyncs;
+  }
+  else if (m_interp_grid > now)
+  {
+    timer.SleepUntil(m_interp_grid);
+    g_interp_pace_stats.late_max_ms = std::max(
+        g_interp_pace_stats.late_max_ms, DT_ms(Clock::now() - m_interp_grid).count());
+  }
+  else
+  {
+    ++g_interp_pace_stats.late;
+    ++g_interp_pace_stats.late_layer[layer];
+    g_interp_pace_stats.late_max_ms =
+        std::max(g_interp_pace_stats.late_max_ms, DT_ms(now - m_interp_grid).count());
+  }
+  // A frame's first present fixes where the next frame starts (its slot plus n
+  // steps), keeping the 60 Hz cadence. When a present runs late (usually that
+  // first one, whose timing the game sets), the rest of the frame's presents
+  // share the delay evenly instead of the next one bunching up behind it.
+  if (layer == 1)
+    m_interp_frame_end = m_interp_grid + remaining * step;
+  const TimePoint shown = std::max(now, m_interp_grid);
+  m_interp_grid = shown + std::max<DT>((m_interp_frame_end - shown) / remaining, step / 2);
+}
+
+void Presenter::PresentInterpReal()
+{
+  // Skip if a newer frame arrived (or the screen blanked) in the meantime.
+  if (!m_interp_pending || !m_xfb_entry || m_last_xfb_id != m_interp_pending_xfb_id)
+  {
+    m_interp_pending = false;
+    return;
+  }
+  const u32 layer = m_interp_next_layer;
+  m_interp_present_layer = static_cast<int>(layer);
+  WaitForInterpSlot();
+  Present(&m_interp_pending_info);
+  m_interp_present_layer = 0;
+  if (layer == 0)
+  {
+    m_interp_pending = false;
+    return;
+  }
+  m_interp_next_layer = layer + 1 < m_interp_layers ? layer + 1 : 0;
+  ScheduleInterpStep(m_interp_step_ticks / 2);
 }
 
 void Presenter::ImmediateSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height)
@@ -494,7 +708,9 @@ float Presenter::CalculateDrawAspectRatio(bool allow_stretch) const
     // The actual aspect ratio of the XFB texture is irrelevant, the VI one is the one that matters
     const auto& vi = Core::System::GetInstance().GetVideoInterface();
     const float vi_aspect_ratio = vi.GetAspectRatio();
-    const float source_aspect_ratio = AdjustAspectRatioForCustomCrop(vi_aspect_ratio);
+    const float source_aspect_ratio = GetColosseumPresentationAspect(
+        AdjustAspectRatioForCustomCrop(vi_aspect_ratio),
+        g_ActiveConfig.bWidescreenAuthoredMenu);
 
     // This will scale up the source ~4:3 resolution to its equivalent ~16:9 resolution
     if (aspect_mode == AspectMode::ForceWide ||
@@ -883,6 +1099,14 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
 
     g_gfx->SelectMainBuffer();
   }
+  else if (g_ActiveConfig.stereo_mode == StereoMode::FrameInterp)
+  {
+    // Layer 0 = real frame, layers 1..n-1 = in-between frames (clamped: an XFB
+    // copied before a 120 <-> 240 switch has fewer layers).
+    const int last_layer = static_cast<int>(source_texture->GetLayers()) - 1;
+    m_post_processor->BlitFromTexture(target_rc, source_rc, source_texture,
+                                      std::min(m_interp_present_layer, last_layer));
+  }
   else if (g_ActiveConfig.stereo_mode == StereoMode::SideBySide ||
            g_ActiveConfig.stereo_mode == StereoMode::TopAndBottom)
   {
@@ -905,6 +1129,16 @@ void Presenter::Present(PresentInfo* present_info)
 
   if (g_gfx->IsHeadless() || (!m_onscreen_ui && !m_xfb_entry))
     return;
+
+  // Exclusive fullscreen follows the platform's request (display mode, focus).
+  // The swap chain picks it up when the backbuffer is next bound.
+  if (const bool exclusive = g_exclusive_fullscreen_wanted.load(std::memory_order_relaxed);
+      exclusive != m_exclusive_fullscreen_applied)
+  {
+    m_exclusive_fullscreen_applied = exclusive;
+    g_gfx->SetFullscreen(exclusive);
+    std::fprintf(stderr, "[display] exclusive fullscreen %s\n", exclusive ? "on" : "off");
+  }
 
   if (!g_gfx->SupportsUtilityDrawing())
   {
@@ -943,9 +1177,20 @@ void Presenter::Present(PresentInfo* present_info)
     RenderXFBToScreen(render_target_rc, m_xfb_entry->texture.get(), render_source_rc);
   }
 
+  // Frame interpolation presents one game frame several times. Building the
+  // on-screen UI (statistics, graphs, OSD) is CPU work on the emulation thread,
+  // so build it once per game frame and redraw the same draw data for the
+  // in-between presents; the next UI frame starts after the real (layer 0)
+  // present. Doing it per present cost battles their full speed at 240 FPS.
+  const bool more_presents_this_frame =
+      g_ActiveConfig.stereo_mode == StereoMode::FrameInterp && m_interp_present_layer != 0;
   if (m_onscreen_ui)
   {
-    m_onscreen_ui->Finalize();
+    if (!m_ui_rendered)
+    {
+      m_onscreen_ui->Finalize();
+      m_ui_rendered = true;
+    }
     if (backbuffer_bound)
       m_onscreen_ui->DrawImGui();
   }
@@ -965,7 +1210,54 @@ void Presenter::Present(PresentInfo* present_info)
       present_info->present_time_accuracy = PresentInfo::PresentTimeAccuracy::PresentInProgress;
     }
 
+    const auto before_present = Clock::now();
     g_gfx->PresentBackbuffer();
+    if (g_ActiveConfig.stereo_mode == StereoMode::FrameInterp)
+    {
+      m_interp_block_ms +=
+          (DT_ms(Clock::now() - before_present).count() - m_interp_block_ms) * 0.1;
+    }
+    // MODERNGEKKO_INTERP_STATS=1: present pacing - count, interval spread and
+    // time spent blocked inside the swap chain's Present (VSync waits).
+    static const bool stats = [] {
+      const char* v = std::getenv("MODERNGEKKO_INTERP_STATS");
+      return v && v[0] == '1';
+    }();
+    if (stats)
+    {
+      static TimePoint last{}, window_start = Clock::now();
+      static u32 count = 0, layer_counts[4] = {};
+      static double min_ms = 1e9, max_ms = 0, blocked_ms = 0;
+      const auto now = Clock::now();
+      if (last != TimePoint{})
+      {
+        const double ms = std::chrono::duration<double, std::milli>(now - last).count();
+        min_ms = std::min(min_ms, ms);
+        max_ms = std::max(max_ms, ms);
+      }
+      blocked_ms += std::chrono::duration<double, std::milli>(now - before_present).count();
+      last = now;
+      ++count;
+      ++layer_counts[std::clamp(m_interp_present_layer, 0, 3)];
+      const double window = std::chrono::duration<double>(now - window_start).count();
+      if (window >= 2.0)
+      {
+        std::fprintf(stderr,
+                     "[present] %.1f/s interval min=%.2f max=%.2f ms blocked=%.2f ms/present "
+                     "layers=%u/%u/%u/%u late=%u (%u/%u/%u/%u) resync=%u late_max=%.2f ms\n",
+                     count / window, min_ms, max_ms, blocked_ms / count, layer_counts[0],
+                     layer_counts[1], layer_counts[2], layer_counts[3], g_interp_pace_stats.late, g_interp_pace_stats.late_layer[0],
+                     g_interp_pace_stats.late_layer[1], g_interp_pace_stats.late_layer[2],
+                     g_interp_pace_stats.late_layer[3],
+                     g_interp_pace_stats.resyncs, g_interp_pace_stats.late_max_ms);
+        g_interp_pace_stats = {};
+        window_start = now;
+        count = 0;
+        min_ms = 1e9;
+        max_ms = blocked_ms = 0;
+        std::fill(std::begin(layer_counts), std::end(layer_counts), 0u);
+      }
+    }
   }
 
   if (m_xfb_entry)
@@ -976,8 +1268,11 @@ void Presenter::Present(PresentInfo* present_info)
     SetSuggestedWindowSize(rect.GetWidth(), rect.GetHeight());
   }
 
-  if (m_onscreen_ui)
+  if (m_onscreen_ui && !more_presents_this_frame)
+  {
     m_onscreen_ui->BeginImGuiFrame(m_backbuffer_width, m_backbuffer_height);
+    m_ui_rendered = false;
+  }
 
   g_gfx->EndUtilityDrawing();
 }

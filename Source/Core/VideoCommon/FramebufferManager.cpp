@@ -3,6 +3,9 @@
 
 #include "VideoCommon/FramebufferManager.h"
 
+#include <algorithm>
+#include <cstdio>
+
 #include <fmt/format.h>
 #include <memory>
 
@@ -99,6 +102,13 @@ void FramebufferManager::RecreateEFBFramebuffer(int efb_scale)
   DestroyEFBFramebuffer();
   if (!CreateEFBFramebuffer(efb_scale) || !CreateReadbackFramebuffer())
     PanicAlertFmt("Failed to recreate EFB framebuffer");
+
+  std::fprintf(stderr, "[efb] recreated (scale %d, %u layers)\n", efb_scale, GetEFBLayers());
+  // Game draws assume the EFB stays bound and never rebind it, so bind the new
+  // one now. Otherwise the backend keeps pointing at the destroyed framebuffer:
+  // D3D12 re-applies it when the next command list starts and writes through
+  // its freed render-target descriptors (device removed).
+  BindEFBFramebuffer();
 }
 
 void FramebufferManager::RecompileShaders()
@@ -147,6 +157,8 @@ AbstractTextureFormat FramebufferManager::GetEFBDepthCopyFormat()
 
 static u32 CalculateEFBLayers()
 {
+  if (g_ActiveConfig.stereo_mode == StereoMode::FrameInterp)
+    return static_cast<u32>(g_ActiveConfig.iFrameInterpLayers);
   return (g_ActiveConfig.stereo_mode != StereoMode::Off) ? 2 : 1;
 }
 
@@ -309,6 +321,163 @@ void FramebufferManager::DestroyEFBFramebuffer()
   m_efb_resolve_color_texture.reset();
   m_efb_depth_resolve_framebuffer.reset();
   m_efb_depth_resolve_texture.reset();
+}
+
+void FramebufferManager::ApplyDepthOfField(int level)
+{
+  if (level <= 0 || IsEFBMultisampled() || !m_efb_color_texture || !m_efb_depth_texture)
+    return;
+
+  const u32 width = m_efb_color_texture->GetWidth();
+  const u32 height = m_efb_color_texture->GetHeight();
+  const u32 layers = m_efb_color_texture->GetLayers();
+  const AbstractTextureFormat format = GetEFBColorFormat();
+
+  // (Re)create the target and pipeline whenever the EFB changes shape.
+  if (!m_dof_texture || m_dof_texture->GetWidth() != width ||
+      m_dof_texture->GetHeight() != height || m_dof_texture->GetLayers() != layers ||
+      m_dof_format != format)
+  {
+    m_dof_framebuffer.reset();
+    m_dof_texture.reset();
+    m_dof_pipeline.reset();
+    m_dof_texture = g_gfx->CreateTexture(
+        TextureConfig(width, height, 1, layers, 1, format, AbstractTextureFlag_RenderTarget,
+                      AbstractTextureType::Texture_2DArray),
+        "Depth of field target");
+    if (!m_dof_texture)
+      return;
+    m_dof_framebuffer = g_gfx->CreateFramebuffer(m_dof_texture.get(), nullptr);
+    auto pixel_shader = g_gfx->CreateShaderFromSource(
+        ShaderStage::Pixel, FramebufferShaderGen::GenerateDepthOfFieldPixelShader(), nullptr,
+        "Depth of field pixel shader");
+    if (!m_dof_framebuffer || !pixel_shader)
+    {
+      std::fprintf(stderr, "[dof] blur shader/target creation failed\n");
+      return;
+    }
+    AbstractPipelineConfig config = {};
+    config.vertex_shader = g_shader_cache->GetScreenQuadVertexShader();
+    config.geometry_shader = layers > 1 ? g_shader_cache->GetTexcoordGeometryShader() : nullptr;
+    config.pixel_shader = pixel_shader.get();
+    config.rasterization_state = RenderState::GetNoCullRasterizationState(PrimitiveType::Triangles);
+    config.depth_state = RenderState::GetNoDepthTestingDepthState();
+    config.blending_state = RenderState::GetNoBlendingBlendState();
+    config.framebuffer_state = RenderState::GetColorFramebufferState(format);
+    config.usage = AbstractPipelineUsage::Utility;
+    m_dof_pipeline = g_gfx->CreatePipeline(config);
+    m_dof_format = format;
+  }
+  if (!m_dof_pipeline || !m_dof_framebuffer)
+    return;
+
+  // Smoothed focus: two 1x1 R32F targets, read one / write the other per frame.
+  if (!m_dof_focus_pipeline)
+  {
+    for (u32 i = 0; i < 2; i++)
+    {
+      m_dof_focus[i] = g_gfx->CreateTexture(
+          TextureConfig(1, 1, 1, 1, 1, AbstractTextureFormat::R32F, AbstractTextureFlag_RenderTarget,
+                        AbstractTextureType::Texture_2DArray),
+          "Depth of field focus");
+      if (!m_dof_focus[i])
+        return;
+      m_dof_focus_framebuffer[i] = g_gfx->CreateFramebuffer(m_dof_focus[i].get(), nullptr);
+    }
+    auto focus_shader = g_gfx->CreateShaderFromSource(
+        ShaderStage::Pixel, FramebufferShaderGen::GenerateDepthOfFieldFocusPixelShader(), nullptr,
+        "Depth of field focus pixel shader");
+    if (!focus_shader || !m_dof_focus_framebuffer[0] || !m_dof_focus_framebuffer[1])
+    {
+      std::fprintf(stderr, "[dof] focus shader/target creation failed\n");
+      return;
+    }
+    AbstractPipelineConfig config = {};
+    config.vertex_shader = g_shader_cache->GetScreenQuadVertexShader();
+    config.pixel_shader = focus_shader.get();
+    config.rasterization_state = RenderState::GetNoCullRasterizationState(PrimitiveType::Triangles);
+    config.depth_state = RenderState::GetNoDepthTestingDepthState();
+    config.blending_state = RenderState::GetNoBlendingBlendState();
+    config.framebuffer_state = RenderState::GetColorFramebufferState(AbstractTextureFormat::R32F);
+    config.usage = AbstractPipelineUsage::Utility;
+    m_dof_focus_pipeline = g_gfx->CreatePipeline(config);
+    if (!m_dof_focus_pipeline)
+    {
+      std::fprintf(stderr, "[dof] focus pipeline creation failed\n");
+      return;
+    }
+    std::fprintf(stderr, "[dof] pipelines ready (level %d)\n", level);
+  }
+
+  // Per level (very low .. very high): relative inverse-depth difference that
+  // reaches full blur, and the largest blur radius in EFB texels at native
+  // height (scaled with the internal resolution).
+  static constexpr float kScale[] = {0.0f, 0.5f, 0.9f, 1.6f, 2.6f, 4.0f};
+  static constexpr float kRadius[] = {0.0f, 1.5f, 2.5f, 3.5f, 5.0f, 7.0f};
+  // Depth within this relative band of the focus stays fully sharp.
+  constexpr float kInFocusBand = 0.15f;
+  // Focus eases toward the new value at this rate per game frame (~0.1 s).
+  constexpr float kFocusBlend = 0.2f;
+  const int index = std::clamp(level, 1, 5);
+  const float resolution_scale = static_cast<float>(height) / 528.0f;
+  const float far_is_one = g_backend_info.bSupportsReversedDepthRange ? 1.0f : 0.0f;
+  struct Uniforms
+  {
+    float params[4];
+    float params2[4];
+  } uniforms = {{1.0f / static_cast<float>(width), 1.0f / static_cast<float>(height),
+                 kScale[index], kRadius[index] * resolution_scale},
+                {far_is_one, kInFocusBand, 0, 0}};
+  struct FocusUniforms
+  {
+    float params[4];
+  } focus_uniforms = {{m_dof_frames_idle > 2 ? 1.0f : kFocusBlend, far_is_one, 0.08f, 0.10f}};
+  m_dof_frames_idle = 0;
+  const u32 previous = m_dof_focus_index;
+  const u32 current = previous ^ 1u;
+  m_dof_focus_index = current;
+
+  const MathUtil::Rectangle<int> rect = m_efb_color_texture->GetRect();
+  // A sampleable (R32F) copy of the depth buffer, via the same path EFB depth
+  // copies use.
+  AbstractTexture* const depth = ResolveEFBDepthTexture(rect, true);
+  g_gfx->BeginUtilityDrawing();
+  // Transition the EFB attachments for sampling (Vulkan image layouts), as the
+  // EFB resolve paths do before reading them.
+  m_efb_color_texture->FinishedRendering();
+  m_efb_depth_texture->FinishedRendering();
+
+  // 1. Focus: window around the centre dot, smoothed over frames.
+  m_dof_focus[previous]->FinishedRendering();
+  g_gfx->SetAndDiscardFramebuffer(m_dof_focus_framebuffer[current].get());
+  g_gfx->SetViewportAndScissor(m_dof_focus[current]->GetRect());
+  g_gfx->SetPipeline(m_dof_focus_pipeline.get());
+  g_gfx->SetTexture(0, m_dof_focus[previous].get());
+  g_gfx->SetTexture(1, depth);
+  g_gfx->SetSamplerState(0, RenderState::GetPointSamplerState());
+  g_gfx->SetSamplerState(1, RenderState::GetPointSamplerState());
+  g_vertex_manager->UploadUtilityUniforms(&focus_uniforms, sizeof(focus_uniforms));
+  g_gfx->Draw(0, 3);
+  m_dof_focus[current]->FinishedRendering();
+
+  // 2. Blur by distance from that focus.
+  g_gfx->SetAndDiscardFramebuffer(m_dof_framebuffer.get());
+  g_gfx->SetViewportAndScissor(rect);
+  g_gfx->SetPipeline(m_dof_pipeline.get());
+  g_gfx->SetTexture(0, m_efb_color_texture.get());
+  g_gfx->SetTexture(1, depth);
+  g_gfx->SetTexture(2, m_dof_focus[current].get());
+  g_gfx->SetSamplerState(0, RenderState::GetLinearSamplerState());
+  g_gfx->SetSamplerState(1, RenderState::GetPointSamplerState());
+  g_gfx->SetSamplerState(2, RenderState::GetPointSamplerState());
+  g_vertex_manager->UploadUtilityUniforms(&uniforms, sizeof(uniforms));
+  g_gfx->Draw(0, 3);
+  // Write the blurred image back so the XFB copy (and everything after it)
+  // sees it.
+  for (u32 layer = 0; layer < layers; layer++)
+    m_efb_color_texture->CopyRectangleFromTexture(m_dof_texture.get(), rect, layer, 0, rect,
+                                                  layer, 0);
+  g_gfx->EndUtilityDrawing();
 }
 
 void FramebufferManager::BindEFBFramebuffer()

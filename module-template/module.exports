@@ -1,6 +1,9 @@
 {
   global:
     staticrecomp_get_module;
+    staticrecomp_set_sdk_guard_v1;
+    staticrecomp_set_call_guard_v2;
+    staticrecomp_is_nofallback_chunk_v2;
     /* The lockstep verifier dlsym's this to install the module's RAM write
        journal. Without it StaticRecompLockstepVerifier::Init() prints
        "module lacks ppc_set_mem_write_journal export" and silently disables

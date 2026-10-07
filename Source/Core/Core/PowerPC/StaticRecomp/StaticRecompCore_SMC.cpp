@@ -220,7 +220,9 @@ bool StaticRecompCore::FastDispatchableAt(u32 address)
   if (IsForcedFallbackAddress(address))
     return false;
   const int index = ChunkIndexOf(address);
-  return index >= 0 && m_chunk_state[index] == CHUNK_VERIFIED;
+  return index >= 0 &&
+         (m_hook_aware_module || !ChunkContainsHostCall(static_cast<u32>(index))) &&
+         m_chunk_state[index] == CHUNK_VERIFIED;
 }
 
 bool StaticRecompCore::DispatchableAt(u32 address)
@@ -229,6 +231,11 @@ bool StaticRecompCore::DispatchableAt(u32 address)
     return false;
   const int index = ChunkIndexOf(address);
   if (index < 0)
+    return false;
+  // An affected chunk must reach the fallback dispatcher at every hook;
+  // logging it at module load alone does not prevent native execution.
+  // A hook-aware module returns to the dispatcher at every hook itself.
+  if (!m_hook_aware_module && ChunkContainsHostCall(static_cast<u32>(index)))
     return false;
   if (m_chunk_state[index] == CHUNK_UNVERIFIED)
     VerifyChunk(static_cast<u32>(index));
@@ -277,6 +284,48 @@ bool StaticRecompCore::ChunkContainsHostCall(u32 index) const
     std::fprintf(stderr, "[staticrecomp] mod fallback: chunk [0x%08X,0x%08X)\n", chunk.start,
                  chunk.end);
   return found;
+}
+
+bool StaticRecompCore::RegionNeedsInterception(u32 start, u32 end) const
+{
+  if (end <= start)
+    return false;
+
+  const u64 key = (static_cast<u64>(start) << 32) | end;
+  const auto cached = m_native_region_blocked.find(key);
+  if (cached != m_native_region_blocked.end())
+    return cached->second;
+
+  bool blocked = false;
+  for (const StaticRecompRange& range : m_forced_fallback_ranges)
+  {
+    if (start < range.end && range.start < end)
+    {
+      blocked = true;
+      break;
+    }
+  }
+  if (!blocked && m_module_source.host_call_contains)
+  {
+    if (m_module_source.host_call_range_contains)
+    {
+      blocked = m_module_source.host_call_range_contains(start, end,
+                                                         m_module_source.host_call_user);
+    }
+    else
+    {
+      for (u32 address = start; address < end; address += 4)
+      {
+        if (IsHostCallAddress(address))
+        {
+          blocked = true;
+          break;
+        }
+      }
+    }
+  }
+  m_native_region_blocked.emplace(key, blocked);
+  return blocked;
 }
 
 void StaticRecompCore::VerifyChunk(u32 index)
