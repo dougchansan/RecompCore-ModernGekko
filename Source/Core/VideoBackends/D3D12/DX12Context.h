@@ -121,6 +121,9 @@ public:
   // Logs the device removed reason and, with MODERNGEKKO_DRED=1, the DRED
   // breadcrumbs and page fault data (once per process).
   void ReportDeviceRemoved();
+  // MODERNGEKKO_DRED_MARKERS=1: label the next commands for DRED reports.
+  static bool MarkersEnabled();
+  void Marker(const char* fmt, ...);
 
   // Defers destruction of a D3D resource (associates it with the current list).
   void DeferResourceDestruction(ID3D12Resource* resource);

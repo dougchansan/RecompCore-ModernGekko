@@ -221,6 +221,8 @@ private:
 
 public:
   bool InterpPresentDue() const { return m_interp_due.load(std::memory_order_relaxed); }
+  // Wall-clock slot of the next game frame's first present (GPU thread).
+  TimePoint InterpNextFrameSlot() const { return m_interp_frame_end; }
   void ServiceInterpPresents();
   u64 InterpGeneration() const { return m_interp_generation; }
   void ScheduleInterpRealPresent(const PresentInfo& in_between);

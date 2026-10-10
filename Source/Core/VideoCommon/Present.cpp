@@ -24,6 +24,7 @@
 #include "Present.h"
 #include "VideoCommon/AbstractGfx.h"
 #include "VideoCommon/AsyncRequests.h"
+#include "VideoCommon/CameraWarp.h"
 #include "VideoCommon/ColosseumProjection.h"
 #include "VideoCommon/Fifo.h"
 #include "VideoCommon/FrameDumper.h"
@@ -1499,6 +1500,7 @@ void Presenter::DoState(PointerWrap& p)
     m_interp_pending = false;
     ++m_interp_generation;
     m_interp_grid = {};
+    CameraWarp::Reset();
     m_interp_due.store(false, std::memory_order_relaxed);
   }
 

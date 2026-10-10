@@ -236,6 +236,11 @@ ShaderCode GenerateGeometryShaderCode(APIType api_type, const ShaderHostConfig& 
     // primitive k/layers of the way from its previous-frame position (pos_b,
     // transformed with last frame's matrices) to its current one.
     out.Write("\tif (eye != 0) f.pos = lerp(f.pos_b, f.pos, float(eye) / {}.0);\n", layers);
+    // 240 Hz camera: rotate the layer to where the latest look input puts the
+    // camera when it is shown (identity outside the main perspective pass).
+    out.Write("\tf.pos = float4(dot(" I_INTERP_CAMERA "[eye * 4], f.pos), dot(" I_INTERP_CAMERA
+              "[eye * 4 + 1], f.pos), dot(" I_INTERP_CAMERA "[eye * 4 + 2], f.pos), dot("
+              I_INTERP_CAMERA "[eye * 4 + 3], f.pos));\n");
   }
   else if (stereo)
   {

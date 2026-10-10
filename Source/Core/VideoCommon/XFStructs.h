@@ -26,4 +26,12 @@ extern float g_proj[6];
 extern bool g_pos_dirty;
 bool Enabled();
 void Frame();  // call at each XFB copy
+void Reset();  // after a state load: resync with XF memory
+// Whether the shadow word at a position-matrix address holds the previous
+// frame's value (false: the current value, e.g. after the frame's load order
+// diverged from the previous frame's).
+bool HoldsPreviousFrame(u32 address);
+// Before each draw: pairs the matrix loads since the last draw with the
+// previous frame's by mesh (the position array) and updates the shadow.
+void BeforeDraw();
 }  // namespace FrameInterp

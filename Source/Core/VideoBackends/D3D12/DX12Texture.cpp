@@ -3,6 +3,7 @@
 
 #include "VideoBackends/D3D12/DX12Texture.h"
 
+#include <cstdio>
 #include <string>
 #include <fmt/format.h>
 
@@ -262,6 +263,11 @@ bool DXTexture::CreateUAVDescriptor()
 void DXTexture::Load(u32 level, u32 width, u32 height, u32 row_length, const u8* buffer,
                      size_t buffer_size, u32 layer)
 {
+  if (DXContext::MarkersEnabled())
+  {
+    g_dx_context->Marker("upload %ux%u level %u/%u layer %u/%u fmt%u bytes%zu", width, height, level,
+                         GetLevels(), layer, GetLayers(), static_cast<u32>(GetFormat()), buffer_size);
+  }
   // Textures greater than 1024*1024 will be put in staging textures that are released after
   // execution instead. A 2048x2048 texture is 16MB, and we'd only fit four of these in our
   // streaming buffer and be blocking frequently. Games are unlikely to have textures this
@@ -385,6 +391,29 @@ void DXTexture::CopyRectangleFromTexture(const AbstractTexture* src,
          static_cast<u32>(dst_rect.bottom) <= GetHeight() && dst_layer <= GetLayers() &&
          dst_level <= GetLevels() && src_rect.GetWidth() == dst_rect.GetWidth() &&
          src_rect.GetHeight() == dst_rect.GetHeight());
+  // The assert above allows layer == layers. Such a copy addresses a subresource of
+  // another mip level or past the resource (CalcSubresource), which the GPU does
+  // not survive: refuse it.
+  if (src_layer >= src->GetLayers() || dst_layer >= GetLayers() ||
+      src_level >= src->GetLevels() || dst_level >= GetLevels())
+  {
+    static u32 refused = 0;
+    if (refused++ < 16)
+    {
+      std::fprintf(stderr,
+                   "[dx12] refused texture copy: src layer %u/%u level %u/%u -> dst layer %u/%u "
+                   "level %u/%u\n",
+                   src_layer, src->GetLayers(), src_level, src->GetLevels(), dst_layer, GetLayers(),
+                   dst_level, GetLevels());
+    }
+    return;
+  }
+  if (DXContext::MarkersEnabled())
+  {
+    g_dx_context->Marker("copy %ux%u src L%u/%u lv%u -> dst L%u/%u lv%u", src_rect.GetWidth(),
+                         src_rect.GetHeight(), src_layer, src->GetLayers(), src_level, dst_layer,
+                         GetLayers(), dst_level);
+  }
   const D3D12_TEXTURE_COPY_LOCATION dst_loc = {
       m_resource.Get(),
       D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
@@ -401,7 +430,8 @@ void DXTexture::CopyRectangleFromTexture(const AbstractTexture* src,
   g_dx_context->GetCommandList()->CopyTextureRegion(&dst_loc, dst_rect.left, dst_rect.top, 0,
                                                     &src_loc, &src_box);
 
-  // Only restore the source layout. Destination is restored by FinishedRendering().
+  // Only restore the source layout. Destination is restored by FinishedRendering(),
+  // or transitioned by SetTexture when it is next sampled.
   src_dxtex->TransitionToState(old_src_state);
 }
 
@@ -723,7 +753,9 @@ void DXStagingTexture::CopyFromTexture(const AbstractTexture* src,
   g_dx_context->GetCommandList()->CopyTextureRegion(&dst_loc, dst_rect.left, dst_rect.top, 0,
                                                     &src_loc, &src_box);
 
-  // Restore old source texture layout.
+  // Restore the source's state: savestates read back the live EFB, which stays
+  // bound as the render target without being re-bound (SetTexture transitions
+  // textures for sampling when they are used).
   src_tex->TransitionToState(old_state);
 
   // Data is ready when the current command list is complete.
@@ -764,7 +796,7 @@ void DXStagingTexture::CopyToTexture(const MathUtil::Rectangle<int>& src_rect, A
   g_dx_context->GetCommandList()->CopyTextureRegion(&dst_loc, dst_rect.left, dst_rect.top, 0,
                                                     &src_loc, &src_box);
 
-  // Restore old source texture layout.
+  // Restore old destination texture layout.
   dst_tex->TransitionToState(old_state);
 
   // Data is ready when the current command list is complete.

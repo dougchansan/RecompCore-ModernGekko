@@ -260,13 +260,41 @@ void Gfx::SetScissorRect(const MathUtil::Rectangle<int>& rc)
 void Gfx::SetTexture(u32 index, const AbstractTexture* texture)
 {
   const DXTexture* dxtex = static_cast<const DXTexture*>(texture);
+  // Always transition to the shader-readable state before the descriptor-change
+  // check.  CopyRectangleFromTexture (texture-cache stitching) leaves the
+  // destination in D3D12_RESOURCE_STATE_COPY_DEST; if the same SRV descriptor
+  // was already cached in m_state.textures the early return below would skip
+  // the barrier, causing the next draw to read from a COPY_DEST resource and
+  // hang the GPU (DXGI_ERROR_DEVICE_HUNG 0x887a0006).
+  //
+  // Exception: if this texture is the currently-bound framebuffer's color
+  // attachment (DirtyState_Framebuffer is clear, meaning BindFramebuffer already
+  // ran and OMSetRenderTargets references it as an RT output), issuing a PSR
+  // transition would leave the resource in PSR state while the draw writes to it
+  // as an RTV — a wrong-state write that AMD reports as a deferred VA=0x0 fault
+  // at the next ResourceBarrier.  Substitute NullSRV instead so the draw never
+  // samples from the active render target.
+  if (dxtex)
+  {
+    if (!(m_dirty_bits & DirtyState_Framebuffer) && m_current_framebuffer &&
+        ((m_current_framebuffer->HasColorBuffer() &&
+          m_current_framebuffer->GetColorAttachment() == texture) ||
+         m_current_framebuffer->GetDepthAttachment() == texture))
+    {
+      const SIZE_T null_ptr = g_dx_context->GetNullSRVDescriptor().cpu_handle.ptr;
+      if (m_state.textures[index].ptr != null_ptr)
+      {
+        m_state.textures[index].ptr = null_ptr;
+        m_dirty_bits |= DirtyState_Textures;
+      }
+      return;
+    }
+    dxtex->TransitionToState(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+  }
   if (m_state.textures[index].ptr == dxtex->GetSRVDescriptor().cpu_handle.ptr)
     return;
 
   m_state.textures[index].ptr = dxtex->GetSRVDescriptor().cpu_handle.ptr;
-  if (dxtex)
-    dxtex->TransitionToState(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-
   m_dirty_bits |= DirtyState_Textures;
 }
 
@@ -334,6 +362,13 @@ void Gfx::Draw(u32 base_vertex, u32 num_vertices)
 {
   if (!ApplyState())
     return;
+  if (DXContext::MarkersEnabled())
+  {
+    g_dx_context->Marker("draw util fb%p L%u %ux%u fmt%u v%u", static_cast<const void*>(m_current_framebuffer),
+                         m_current_framebuffer->GetLayers(), m_current_framebuffer->GetWidth(),
+                         m_current_framebuffer->GetHeight(),
+                         static_cast<u32>(m_current_framebuffer->GetColorFormat()), num_vertices);
+  }
 
   g_dx_context->GetCommandList()->DrawInstanced(num_vertices, 1, base_vertex, 0);
 }
@@ -342,6 +377,15 @@ void Gfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
 {
   if (!ApplyState())
     return;
+  if (DXContext::MarkersEnabled())
+  {
+    g_dx_context->Marker("draw gx fb%p L%u %ux%u usage%u dvl%d i%u",
+                         static_cast<const void*>(m_current_framebuffer),
+                         m_current_framebuffer->GetLayers(), m_current_framebuffer->GetWidth(),
+                         m_current_framebuffer->GetHeight(),
+                         static_cast<u32>(static_cast<const DXPipeline*>(m_current_pipeline)->GetUsage()),
+                         UsesDynamicVertexLoader(m_current_pipeline) ? 1 : 0, num_indices);
+  }
 
   // DX12 is great and doesn't include the base vertex in SV_VertexID
   if (UsesDynamicVertexLoader(m_current_pipeline))
@@ -539,6 +583,34 @@ bool Gfx::ApplyState()
   if (!m_current_framebuffer || !m_current_pipeline)
     return false;
 
+  // If the framebuffer is dirty, BindFramebuffer (called below) will transition the color
+  // attachment to RENDER_TARGET after UpdateDescriptorTables builds the SRV table.  If the
+  // color attachment's SRV is still cached in m_state.textures at that point, the GPU will
+  // sample it while it is in RT state, causing an AMD VA=0x0 fault.  Evict it now, before the
+  // SRV table is built, so the descriptor table never contains an RT-state texture.
+  // The same applies to the depth attachment (e.g. the EFB depth left in slot 0 by a
+  // depth resolve), which becomes DEPTH_WRITE.
+  if (m_dirty_bits & DirtyState_Framebuffer)
+  {
+    const DXFramebuffer* fb = static_cast<const DXFramebuffer*>(m_current_framebuffer);
+    const SIZE_T null_ptr = g_dx_context->GetNullSRVDescriptor().cpu_handle.ptr;
+    for (const AbstractTexture* attachment : {fb->GetColorAttachment(), fb->GetDepthAttachment()})
+    {
+      if (!attachment)
+        continue;
+      const SIZE_T srv_ptr =
+          static_cast<const DXTexture*>(attachment)->GetSRVDescriptor().cpu_handle.ptr;
+      for (u32 i = 0; i < VideoCommon::MAX_PIXEL_SHADER_SAMPLERS; i++)
+      {
+        if (m_state.textures[i].ptr == srv_ptr)
+        {
+          m_state.textures[i].ptr = null_ptr;
+          m_dirty_bits |= DirtyState_Textures;
+        }
+      }
+    }
+  }
+
   // Updating the descriptor tables can cause command list execution if no descriptors remain.
   SetRootSignatures();
   SetDescriptorHeaps();
@@ -550,14 +622,15 @@ bool Gfx::ApplyState()
   m_dirty_bits &=
       ~(DirtyState_Framebuffer | DirtyState_Pipeline | DirtyState_Viewport |
         DirtyState_ScissorRect | DirtyState_PS_UAV | DirtyState_PS_CBV | DirtyState_VS_CBV |
-        DirtyState_GS_CBV | DirtyState_SRV_Descriptor | DirtyState_Sampler_Descriptor |
+        DirtyState_SRV_Descriptor | DirtyState_Sampler_Descriptor |
         DirtyState_UAV_Descriptor | DirtyState_VertexBuffer | DirtyState_IndexBuffer |
         DirtyState_PrimitiveTopology | DirtyState_CUS_CBV);
-  // DirtyState_VS_SRV_Descriptor is cleared only once the table is actually
-  // bound below. Clearing it for a draw whose pipeline does not use the
-  // dynamic vertex loader left ROOT_PARAMETER_VS_SRV unset for the next
-  // dynamic-vertex-loader draw in the same command list (GPU-based validation:
-  // "Uninitialized root argument accessed", root parameter 7 -> device removed).
+  // DirtyState_VS_SRV_Descriptor and DirtyState_GS_CBV are cleared only once
+  // the binding is actually made below. Clearing them unconditionally would leave
+  // ROOT_PARAMETER_VS_SRV / ROOT_PARAMETER_GS_CBV unset for the next draw that
+  // needs them in the same command list, because Utility-pipeline draws skip the
+  // non-Utility binding block (GPU-based validation: "Uninitialized root argument
+  // accessed" -> device removed, page fault VA 0x0).
 
   auto* const cmdlist = g_dx_context->GetCommandList();
   auto* const pipeline = static_cast<const DXPipeline*>(m_current_pipeline);
@@ -627,6 +700,7 @@ bool Gfx::ApplyState()
     {
       cmdlist->SetGraphicsRootConstantBufferView(ROOT_PARAMETER_GS_CBV,
                                                  m_state.constant_buffers[3]);
+      m_dirty_bits &= ~DirtyState_GS_CBV;
     }
 
     if (dirty_bits & DirtyState_UAV_Descriptor && g_ActiveConfig.bBBoxEnable)

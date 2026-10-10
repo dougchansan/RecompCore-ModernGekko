@@ -732,6 +732,12 @@ ShaderCode GenerateVertexShaderCode(APIType api_type, const ShaderHostConfig& ho
   {
     out.Write("\tfloat4 view_pos_b = float4(vertex_input.position * dolphin_position_matrix_b(), "
               "1.0);\n");
+    // Into the current frame's camera orientation (identity outside the main
+    // perspective pass, or without the camera mod's stamps).
+    // The rows' .w carry the eye translation (third-person orbit); view_pos_b.w is 1.
+    out.Write("\tview_pos_b.xyz = float3(dot(" I_INTERP_VIEW_DELTA "[0], view_pos_b), dot("
+              I_INTERP_VIEW_DELTA "[1], view_pos_b), dot(" I_INTERP_VIEW_DELTA
+              "[2], view_pos_b));\n");
     out.Write("\to.pos_b = vec4(dot(" I_PROJECTION_B "[0], view_pos_b), dot(" I_PROJECTION_B
               "[1], view_pos_b), dot(" I_PROJECTION_B "[2], view_pos_b), dot(" I_PROJECTION_B
               "[3], view_pos_b));\n");

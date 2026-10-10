@@ -3,6 +3,8 @@
 
 #include "VideoCommon/VertexShaderManager.h"
 
+#include "VideoCommon/CameraWarp.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -588,6 +590,26 @@ void VertexShaderManager::SetInterpConstants()
     memcpy(constants.projection_b.data(), projection.data.data(), 4 * sizeof(float4));
     dirty = true;
   }
+
+  // Camera turn previous -> current frame for the main perspective pass (the full
+  // viewport excludes shadow passes); identity elsewhere.
+  std::array<float4, 3> delta = {{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}};
+  std::array<std::array<float, 4>, 3> warp;
+  // Only previous-frame positions need moving into the current camera: a
+  // matrix without a previous-frame pair is already there, and moving it too
+  // opened gaps (black) between floor pieces while walking or orbiting.
+  if (xfmem.projection.type == ProjectionType::Perspective &&
+      std::abs(xfmem.viewport.wd) * 2.0f >= 560.0f &&
+      FrameInterp::HoldsPreviousFrame((pn & 0x3f) * 4) && CameraWarp::GetViewDelta(&warp))
+  {
+    for (int r = 0; r < 3; ++r)
+      delta[r] = warp[r];
+  }
+  if (delta != constants.interp_view_delta)
+  {
+    constants.interp_view_delta = delta;
+    dirty = true;
+  }
 }
 
 void VertexShaderManager::TransformToClipSpace(const float* data, float* out, u32 MtxIdx)
@@ -627,6 +649,7 @@ void VertexShaderManager::DoState(PointerWrap& p)
   if (p.IsReadMode())
   {
     dirty = true;
-    FrameInterp::g_pos_dirty = true;
+    // xfmem was restored before this (VideoCommon_DoState order).
+    FrameInterp::Reset();
   }
 }

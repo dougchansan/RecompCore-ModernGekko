@@ -94,6 +94,10 @@ std::string GetDiskShaderCacheFileName(APIType api_type, const char* type, bool 
     filename += fmt::format("-{:06X}", host_config.bits);
   }
 
+  // ModernGekko shader generator revision: the build's version string never
+  // changes, so bump this when a generator's output changes to drop stale
+  // compiled shaders (r2: frame-interpolation camera correction).
+  filename += "-mg4";
   filename += ".cache";
   return filename;
 }

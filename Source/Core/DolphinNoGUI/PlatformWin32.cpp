@@ -61,6 +61,10 @@ void Host_ToggleSixtyFps();
 bool Host_IsAutosaveEnabled();
 void Host_ToggleAutosave();
 
+// The frontend keeps the camera mod's view next to the state (<state>.camera).
+void Host_SaveCameraForState(const std::string& state_path);
+void Host_RestoreCameraForState(const std::string& state_path);
+
 namespace
 {
 // Menu command ids. Load State entries are allocated a contiguous range,
@@ -411,6 +415,7 @@ void PlatformWin32::SaveStateToStatesDirectory()
       StringToPath(directory) /
       State::Layout::TimestampedName(now, m_save_sequence, State::Layout::MANUAL_PREFIX);
   State::SaveAs(Core::System::GetInstance(), PathToString(path));
+  Host_SaveCameraForState(PathToString(path));
 }
 
 void PlatformWin32::ToggleFullscreen()
@@ -766,6 +771,7 @@ LRESULT PlatformWin32::WndProc(const HWND hwnd, const UINT msg, const WPARAM wPa
       const std::size_t index = command - ID_LOAD_STATE_FIRST;
       if (index < platform->m_load_state_paths.size())
         State::LoadAs(system, platform->m_load_state_paths[index]);
+        Host_RestoreCameraForState(platform->m_load_state_paths[index]);
     }
     break;
   }

@@ -3,11 +3,13 @@
 
 #include "VideoCommon/XFStructs.h"
 
+#include <bitset>
 #include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 #include <cstdlib>
 #include <string>
@@ -22,6 +24,7 @@
 #include "Core/System.h"
 
 #include "VideoCommon/CPMemory.h"
+#include "VideoCommon/CameraWarp.h"
 #include "VideoCommon/Fifo.h"
 #include "VideoCommon/FramebufferManager.h"
 #include "VideoCommon/GeometryShaderManager.h"
@@ -280,17 +283,35 @@ bool g_pos_dirty = true;
 
 namespace
 {
+// Loads are paired with the previous frame's by key: XF address, size, and the
+// position array of the draw that uses them (the mesh). Pairing by position in
+// the frame's load order (with only address and size checked) went wrong as
+// soon as one model was culled or appeared - every later matrix paired with a
+// neighbour's (most loads are 12 words to slot 0), so in-between frames drew
+// floor pieces from another object's place (black flicker crossing a
+// boundary at 120 / 240 FPS).
 struct LoadRec
 {
   u16 address;
   u16 words;
   u32 data;  // index into the data pool
+  u32 base;  // position array base of the first draw after the load
 };
-std::vector<LoadRec> s_prev, s_cur;
+std::vector<LoadRec> s_cur, s_pending;
 std::vector<u32> s_prev_data, s_cur_data;
-size_t s_cursor;
-bool s_paired = true;
+std::unordered_map<u64, std::vector<u32>> s_prev_map;  // key -> data indices, in order
+std::unordered_map<u64, u32> s_key_uses;               // occurrences used this frame
+bool s_have_prev = false;
+// Shadow words written by this frame's loads; the rest are refreshed from XF
+// memory at the frame's end so an unchanged matrix blends to itself.
+std::bitset<256> s_pos_loaded;
+// Shadow words holding the previous frame's value (a paired load); the rest
+// hold the current value, already in the current camera.
+std::bitset<256> s_pos_previous;
+bool s_proj_loaded = false;
 u32 s_stat_frames, s_stat_loads, s_stat_moved, s_stat_static, s_stat_unpaired, s_stat_cut;
+
+constexpr u32 kNoDraw = 0xFFFFFFFFu;
 
 float AsFloat(u32 bits)
 {
@@ -298,48 +319,147 @@ float AsFloat(u32 bits)
   std::memcpy(&f, &bits, sizeof(f));
   return f;
 }
-}  // namespace
 
-bool Enabled()
+// A whole 3x4 position matrix (view * model): the change from the previous
+// frame's, D = M_now * M_prev^-1, is the camera's motion for every static
+// object. A camera cut is a large turn or a jump that is large next to the
+// object's distance; judging single words instead let a cut through for big
+// meshes (the floor blended between two unrelated views and left the screen
+// for an in-between frame - black floor when the field camera switched).
+// Returns -1 if the matrix cannot be judged this way.
+int IsMatrixCut(const u32* now_words, const u32* prev_words)
 {
-  return g_ActiveConfig.stereo_mode == StereoMode::FrameInterp;
+  double c[12], p[12];
+  for (int i = 0; i < 12; ++i)
+  {
+    c[i] = AsFloat(now_words[i]);
+    p[i] = AsFloat(prev_words[i]);
+  }
+  // Rows r: A[r][0..2] = m[r*4+0..2], t[r] = m[r*4+3].
+  auto A = [](const double* m, int r, int k) { return m[r * 4 + k]; };
+  const double det = A(p, 0, 0) * (A(p, 1, 1) * A(p, 2, 2) - A(p, 1, 2) * A(p, 2, 1)) -
+                     A(p, 0, 1) * (A(p, 1, 0) * A(p, 2, 2) - A(p, 1, 2) * A(p, 2, 0)) +
+                     A(p, 0, 2) * (A(p, 1, 0) * A(p, 2, 1) - A(p, 1, 1) * A(p, 2, 0));
+  if (!std::isfinite(det) || std::fabs(det) < 1e-9)
+    return -1;
+  double inv[3][3];
+  inv[0][0] = (A(p, 1, 1) * A(p, 2, 2) - A(p, 1, 2) * A(p, 2, 1)) / det;
+  inv[0][1] = (A(p, 0, 2) * A(p, 2, 1) - A(p, 0, 1) * A(p, 2, 2)) / det;
+  inv[0][2] = (A(p, 0, 1) * A(p, 1, 2) - A(p, 0, 2) * A(p, 1, 1)) / det;
+  inv[1][0] = (A(p, 1, 2) * A(p, 2, 0) - A(p, 1, 0) * A(p, 2, 2)) / det;
+  inv[1][1] = (A(p, 0, 0) * A(p, 2, 2) - A(p, 0, 2) * A(p, 2, 0)) / det;
+  inv[1][2] = (A(p, 0, 2) * A(p, 1, 0) - A(p, 0, 0) * A(p, 1, 2)) / det;
+  inv[2][0] = (A(p, 1, 0) * A(p, 2, 1) - A(p, 1, 1) * A(p, 2, 0)) / det;
+  inv[2][1] = (A(p, 0, 1) * A(p, 2, 0) - A(p, 0, 0) * A(p, 2, 1)) / det;
+  inv[2][2] = (A(p, 0, 0) * A(p, 1, 1) - A(p, 0, 1) * A(p, 1, 0)) / det;
+  double d[3][3];
+  for (int r = 0; r < 3; ++r)
+    for (int k = 0; k < 3; ++k)
+      d[r][k] = A(c, r, 0) * inv[0][k] + A(c, r, 1) * inv[1][k] + A(c, r, 2) * inv[2][k];
+  // Rotation angle of D with its uniform scale (animated scaling) removed.
+  const double d_det = d[0][0] * (d[1][1] * d[2][2] - d[1][2] * d[2][1]) -
+                       d[0][1] * (d[1][0] * d[2][2] - d[1][2] * d[2][0]) +
+                       d[0][2] * (d[1][0] * d[2][1] - d[1][1] * d[2][0]);
+  if (!std::isfinite(d_det) || d_det <= 0)
+    return 1;  // mirrored or degenerate: not motion
+  const double scale = std::cbrt(d_det);
+  if (scale < 0.5 || scale > 2.0)
+    return 1;
+  const double cos_angle = ((d[0][0] + d[1][1] + d[2][2]) / scale - 1.0) * 0.5;
+  constexpr double kMaxTurn = 0.6;  // rad per game frame (~34 deg; fast turns are ~0.1)
+  if (cos_angle < std::cos(kMaxTurn))
+    return 1;
+  // Translation of D: t_now - D * t_prev, against the object's distance.
+  double jump = 0, distance = 0;
+  for (int r = 0; r < 3; ++r)
+  {
+    const double moved =
+        A(c, r, 3) - (d[r][0] * A(p, 0, 3) + d[r][1] * A(p, 1, 3) + d[r][2] * A(p, 2, 3));
+    jump += moved * moved;
+    distance = std::max({distance, std::fabs(A(c, r, 3)), std::fabs(A(p, r, 3))});
+  }
+  return std::sqrt(jump) > 0.3 * distance + 2.0 ? 1 : 0;
 }
 
-void Load(u32 address, u32 words, const u8* be_data)
+u64 Key(u32 address, u32 words, u32 base)
 {
-  if (!Enabled())
-    return;
+  return (u64(base) << 32) | (u64(address & 0xFFFF) << 16) | u64(words & 0xFFFF);
+}
+
+// Pairs one recorded load and writes its previous-frame (or current) words to
+// the shadow.
+void ResolveLoad(LoadRec rec, bool* flushed)
+{
+  const u32 address = rec.address, words = rec.words;
   const bool touches_pos = address < 0x100;
-  const bool touches_proj = address <= 0x1025 && address + words > 0x1020;
-  if (!touches_pos && !touches_proj)
-    return;
+  const u32* now_words = &s_cur_data[rec.data];
 
-  const u32 data_index = static_cast<u32>(s_cur_data.size());
-  s_cur.push_back({static_cast<u16>(address), static_cast<u16>(words), data_index});
-
-  const LoadRec* prev = nullptr;
-  if (s_paired && s_cursor < s_prev.size() && s_prev[s_cursor].address == address &&
-      s_prev[s_cursor].words == words)
-    prev = &s_prev[s_cursor];
-  else
-    s_paired = false;
-  ++s_cursor;
+  const u32* prev = nullptr;
+  // Projections are not blended: a projection load paired with another pass's
+  // (a different kind of view) gave in-between frames an invalid projection -
+  // the field floor vanished from them while walking (black flicker at 120 /
+  // 240 FPS only). They change rarely; a zoom simply steps at the game rate.
+  // MODERNGEKKO_INTERP_PROJ=1 blends them again (diagnostic).
+  static const bool blend_projection = [] {
+    const char* v = std::getenv("MODERNGEKKO_INTERP_PROJ");
+    return v && v[0] == '1';
+  }();
+  if (s_have_prev && (touches_pos || blend_projection))
+  {
+    const u64 key = Key(address, words, rec.base);
+    if (const auto it = s_prev_map.find(key); it != s_prev_map.end())
+    {
+      const u32 use = s_key_uses[key]++;
+      if (use < it->second.size())
+        prev = &s_prev_data[it->second[use]];
+    }
+  }
 
   // Camera cuts: a paired load whose values jump far between frames is a new
   // view, not motion - blending it would show a bogus halfway frame, so it is
-  // taken as-is. Matrix entries are rotation/scale (|x| ~ 1) or translations;
-  // per-frame motion moves them a small fraction of that.
+  // taken as-is. Rotation/scale entries are judged against their own size;
+  // position-matrix translations (every 4th word) against the object's
+  // distance from the camera, since turning swings an object near the screen
+  // centre from x ~ 0 to x ~ 50 in a frame, which is motion, not a cut.
   ++s_stat_loads;
   if (!prev)
     ++s_stat_unpaired;
+  if (prev && touches_pos && words == 12 && (address & 3) == 0)
+  {
+    const int cut = IsMatrixCut(now_words, prev);
+    if (cut == 1)
+    {
+      prev = nullptr;
+      ++s_stat_cut;
+    }
+    else if (cut == 0)
+    {
+      ++(std::memcmp(now_words, prev, 12 * sizeof(u32)) != 0 ? s_stat_moved : s_stat_static);
+    }
+    if (cut >= 0)
+      goto judged;
+  }
   if (prev)
   {
+    float distance = 0;
+    if (touches_pos)
+    {
+      for (u32 i = 0; i < words; ++i)
+      {
+        if (((address + i) & 3) != 3)
+          continue;
+        distance = std::max({distance, std::fabs(AsFloat(now_words[i])), std::fabs(AsFloat(prev[i]))});
+      }
+    }
     bool moved = false;
     for (u32 i = 0; i < words; ++i)
     {
-      const float now = AsFloat(Common::swap32(be_data + 4 * i));
-      const float old_value = AsFloat(s_prev_data[prev->data + i]);
-      const float limit = std::max(1.0f, 0.5f * std::max(std::fabs(now), std::fabs(old_value)));
+      const float now = AsFloat(now_words[i]);
+      const float old_value = AsFloat(prev[i]);
+      const bool translation = touches_pos && address + i < 0x100 && ((address + i) & 3) == 3;
+      const float size = translation ? std::max({distance, std::fabs(now), std::fabs(old_value)}) :
+                                       std::max(std::fabs(now), std::fabs(old_value));
+      const float limit = std::max(1.0f, 0.5f * size);
       if (!(std::fabs(now - old_value) <= limit))
       {
         prev = nullptr;
@@ -351,40 +471,128 @@ void Load(u32 address, u32 words, const u8* be_data)
     if (prev)
       ++(moved ? s_stat_moved : s_stat_static);
   }
+judged:
 
-  bool flushed = false;
   for (u32 i = 0; i < words; ++i)
   {
-    const u32 bits = Common::swap32(be_data + 4 * i);
-    s_cur_data.push_back(bits);
-    float value = AsFloat(bits);
-    if (prev)
-    {
-      const float old_value = AsFloat(s_prev_data[prev->data + i]);
-      value = old_value;
-    }
+    const float value = AsFloat(prev ? prev[i] : now_words[i]);
     const u32 a = address + i;
+    if (a < 0x100)
+    {
+      s_pos_loaded.set(a);
+      if (s_pos_previous[a] != (prev != nullptr))
+      {
+        // The camera correction for the pending batch depends on it.
+        if (!*flushed)
+        {
+          g_vertex_manager->Flush();
+          *flushed = true;
+        }
+        s_pos_previous.set(a, prev != nullptr);
+      }
+    }
+    else if (a >= 0x1020 && a <= 0x1025)
+    {
+      s_proj_loaded = true;
+    }
     float* slot = a < 0x100 ? &g_pos[a] : (a >= 0x1020 && a <= 0x1025) ? &g_proj[a - 0x1020] : nullptr;
     if (!slot || std::memcmp(slot, &value, sizeof(value)) == 0)
       continue;
     // The batch the vertex manager is still accumulating was issued under
-    // the old matrices; draw it before its layer-1 copies change (the real
-    // XF write below does the same for layer 0).
-    if (!flushed)
+    // the old matrices; draw it before its layer-1 copies change.
+    if (!*flushed)
     {
       g_vertex_manager->Flush();
-      flushed = true;
+      *flushed = true;
     }
     *slot = value;
     if (a < 0x100)
       g_pos_dirty = true;
   }
+  s_cur.push_back(rec);
+}
+
+void ResolvePending(u32 base)
+{
+  if (s_pending.empty())
+    return;
+  bool flushed = false;
+  for (LoadRec rec : s_pending)
+  {
+    rec.base = base;
+    ResolveLoad(rec, &flushed);
+  }
+  s_pending.clear();
+}
+}  // namespace
+
+void Reset();
+
+bool Enabled()
+{
+  const bool enabled = g_ActiveConfig.stereo_mode == StereoMode::FrameInterp;
+  // Switched on mid-session: the shadow is whatever it held before.
+  static bool was_enabled = false;
+  if (enabled && !was_enabled)
+  {
+    was_enabled = true;
+    Reset();
+  }
+  was_enabled = enabled;
+  return enabled;
+}
+
+void Load(u32 address, u32 words, const u8* be_data)
+{
+  if (!Enabled())
+    return;
+  const bool touches_pos = address < 0x100;
+  const bool touches_proj = address <= 0x1025 && address + words > 0x1020;
+  if (!touches_pos && !touches_proj)
+    return;
+  // Paired when the draw that uses it arrives (BeforeDraw), which names the mesh.
+  const u32 data_index = static_cast<u32>(s_cur_data.size());
+  for (u32 i = 0; i < words; ++i)
+    s_cur_data.push_back(Common::swap32(be_data + 4 * i));
+  s_pending.push_back({static_cast<u16>(address), static_cast<u16>(words), data_index, kNoDraw});
+}
+
+void BeforeDraw()
+{
+  if (s_pending.empty() || !Enabled())
+    return;
+  ResolvePending(g_main_cp_state.array_bases[CPArray::Position]);
+}
+
+bool HoldsPreviousFrame(u32 address)
+{
+  return address < 0x100 && s_pos_previous[address];
+}
+
+// After a state load (or a frame-interpolation restart) the shadow holds another
+// scene: take the live XF state and stop pairing until a full frame is recorded.
+void Reset()
+{
+  s_pos_previous.reset();
+  std::copy(std::begin(xfmem.posMatrices), std::end(xfmem.posMatrices), g_pos);
+  std::copy(xfmem.projection.rawProjection.begin(), xfmem.projection.rawProjection.end(), g_proj);
+  g_pos_dirty = true;
+  s_cur.clear();
+  s_pending.clear();
+  s_prev_data.clear();
+  s_cur_data.clear();
+  s_prev_map.clear();
+  s_key_uses.clear();
+  s_have_prev = false;
+  s_pos_loaded.reset();
+  s_proj_loaded = false;
 }
 
 void Frame()
 {
   if (!Enabled())
     return;
+  ResolvePending(kNoDraw);
   // MODERNGEKKO_INTERP_STATS=1: every 120 frames, how many matrix loads were
   // paired and moved (interpolated), paired but unchanged, unpaired, or cut.
   static const bool stats = [] {
@@ -397,17 +605,44 @@ void Frame()
                  s_stat_loads, s_stat_moved, s_stat_static, s_stat_unpaired, s_stat_cut);
     s_stat_frames = s_stat_loads = s_stat_moved = s_stat_static = s_stat_unpaired = s_stat_cut = 0;
   }
-  std::swap(s_prev, s_cur);
+  CameraWarp::OnFrame();
+  // Words not loaded this frame keep their live value: the next frame's
+  // layer-1 copy of an unchanged matrix must equal the matrix, not the blended
+  // value from frames ago (which also outlives the scene that loaded it).
+  for (u32 a = 0; a < 0x100; ++a)
+  {
+    if (!s_pos_loaded[a])
+      s_pos_previous.reset(a);
+    if (!s_pos_loaded[a] && std::memcmp(&g_pos[a], &xfmem.posMatrices[a], sizeof(float)) != 0)
+    {
+      g_pos[a] = xfmem.posMatrices[a];
+      g_pos_dirty = true;
+    }
+  }
+  if (!s_proj_loaded)
+    std::copy(xfmem.projection.rawProjection.begin(), xfmem.projection.rawProjection.end(), g_proj);
+  s_pos_loaded.reset();
+  s_proj_loaded = false;
+  // This frame's loads become the next frame's pairing table.
+  s_prev_map.clear();
+  for (const LoadRec& rec : s_cur)
+    s_prev_map[Key(rec.address, rec.words, rec.base)].push_back(rec.data);
   std::swap(s_prev_data, s_cur_data);
   s_cur.clear();
   s_cur_data.clear();
-  s_cursor = 0;
-  s_paired = true;
+  s_key_uses.clear();
+  s_have_prev = true;
 }
 }  // namespace FrameInterp
 
 void LoadXFReg(u16 base_address, u8 transfer_size, const u8* data)
 {
+  // The camera mod's per-frame camera stamp (outside XF memory).
+  if (base_address == CameraWarp::kStampAddress)
+  {
+    CameraWarp::Stamp(transfer_size, data);
+    return;
+  }
   XFTrace::Load('x', base_address, transfer_size, data);
   FrameInterp::Load(base_address, transfer_size, data);
   if (base_address > XFMEM_REGISTERS_END)

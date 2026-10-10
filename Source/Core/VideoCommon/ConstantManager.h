@@ -109,6 +109,9 @@ struct alignas(16) VertexShaderConstants
   std::array<float4, 64> transformmatrices_b;
   std::array<float4, 3> posnormalmatrix_b;
   std::array<float4, 4> projection_b;
+  // Camera rotation previous -> current frame (view space, 3 rows), applied to
+  // the previous-frame position so layers blend object motion only.
+  std::array<float4, 3> interp_view_delta;
 };
 
 enum class VSExpand : u32
@@ -125,4 +128,8 @@ struct alignas(16) GeometryShaderConstants
   int4 texoffset;
   VSExpand vs_expand;  // Used by VS point/line expansion in ubershaders
   u32 pad[3];
+
+  // Frame interpolation: per-layer clip-space camera correction, 4 rows per
+  // layer (CameraWarp). Not saved in savestates (derived each frame).
+  std::array<float4, 16> interp_camera;
 };

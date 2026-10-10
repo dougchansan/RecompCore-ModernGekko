@@ -296,9 +296,11 @@ void WriteSwitch(ShaderCode& out, APIType ApiType, std::string_view variable,
 #define I_TRANSFORMMATRICES_B "ctrmtxb"
 #define I_POSNORMALMATRIX_B "cpnmtxb"
 #define I_PROJECTION_B "cprojb"
+#define I_INTERP_VIEW_DELTA "cinterpview"
 
 #define I_STEREOPARAMS "cstereo"
 #define I_LINEPTPARAMS "clinept"
+#define I_INTERP_CAMERA "cinterpcam"
 #define I_TEXOFFSET "ctexoffset"
 
 static const char s_shader_uniforms[] = "\tuint    components;\n"
@@ -332,6 +334,7 @@ static const char s_shader_uniforms[] = "\tuint    components;\n"
                                         "\tfloat4 " I_TRANSFORMMATRICES_B "[64];\n"
                                         "\tfloat4 " I_POSNORMALMATRIX_B "[3];\n"
                                         "\tfloat4 " I_PROJECTION_B "[4];\n"
+                                        "\tfloat4 " I_INTERP_VIEW_DELTA "[3];\n"
                                         "\t#define xfmem_texMtxInfo(i) (xfmem_pack1[(i)].x)\n"
                                         "\t#define xfmem_postMtxInfo(i) (xfmem_pack1[(i)].y)\n"
                                         "\t#define xfmem_color(i) (xfmem_pack1[(i)].z)\n"
@@ -340,7 +343,8 @@ static const char s_shader_uniforms[] = "\tuint    components;\n"
 static const char s_geometry_shader_uniforms[] = "\tfloat4 " I_STEREOPARAMS ";\n"
                                                  "\tfloat4 " I_LINEPTPARAMS ";\n"
                                                  "\tint4 " I_TEXOFFSET ";\n"
-                                                 "\tuint vs_expand;\n";
+                                                 "\tuint vs_expand;\n"
+                                                 "\tfloat4 " I_INTERP_CAMERA "[16];\n";
 
 constexpr std::string_view CUSTOM_PIXELSHADER_COLOR_FUNC = "customShaderColor";
 

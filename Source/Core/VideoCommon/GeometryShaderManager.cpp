@@ -3,18 +3,34 @@
 
 #include "VideoCommon/GeometryShaderManager.h"
 
+#include <cmath>
+#include <cstddef>
+
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
+#include "Core/System.h"
 #include "VideoCommon/BPMemory.h"
+#include "VideoCommon/CameraWarp.h"
+#include "VideoCommon/VertexShaderManager.h"
 #include "VideoCommon/RenderState.h"
+#include "VideoCommon/ShaderGenCommon.h"
 #include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/XFMemory.h"
 
 static constexpr int LINE_PT_TEX_OFFSETS[8] = {0, 16, 8, 4, 2, 1, 1, 1};
 
+static void SetIdentityCamera(std::array<float4, 16>* m)
+{
+  for (u32 i = 0; i < 16; ++i)
+    (*m)[i] = {i % 4 == 0 ? 1.0f : 0.0f, i % 4 == 1 ? 1.0f : 0.0f, i % 4 == 2 ? 1.0f : 0.0f,
+               i % 4 == 3 ? 1.0f : 0.0f};
+}
+
 void GeometryShaderManager::Init()
 {
   constants = {};
+  SetIdentityCamera(&constants.interp_camera);
+  m_camera_warp_active = false;
 
   // Init any initial constants which aren't zero when bpmem is zero.
   SetViewportChanged();
@@ -85,6 +101,37 @@ void GeometryShaderManager::SetConstants(PrimitiveType prim)
 
     dirty = true;
   }
+
+  if (g_ActiveConfig.stereo_mode == StereoMode::FrameInterp)
+    UpdateCameraWarp();
+}
+
+// 240 Hz camera (see CameraWarp.h): only the main perspective pass - the full
+// viewport excludes the 384x384 shadow passes; HUD and composite are
+// orthographic.
+void GeometryShaderManager::UpdateCameraWarp()
+{
+  bool active = xfmem.projection.type == ProjectionType::Perspective &&
+                std::abs(xfmem.viewport.wd) * 2.0f >= 560.0f;
+  if (active)
+  {
+    const auto& vs = Core::System::GetInstance().GetVertexShaderManager().constants;
+    const u32 layers = ShaderHostConfig::GetCurrent().frame_interp4 ? 4 : 2;
+    std::array<float4, 16> matrices;
+    active = CameraWarp::GetLayerMatrices(layers, vs.projection, vs.pixelcentercorrection,
+                                          g_backend_info.bSupportsClipControl, &matrices);
+    if (active && matrices != constants.interp_camera)
+    {
+      constants.interp_camera = matrices;
+      dirty = true;
+    }
+  }
+  if (!active && m_camera_warp_active)
+  {
+    SetIdentityCamera(&constants.interp_camera);
+    dirty = true;
+  }
+  m_camera_warp_active = active;
 }
 
 void GeometryShaderManager::SetViewportChanged()
@@ -122,7 +169,10 @@ void GeometryShaderManager::DoState(PointerWrap& p)
   p.Do(m_projection_changed);
   p.Do(m_viewport_changed);
 
-  p.Do(constants);
+  // Only the original constants: interp_camera is derived each frame, and
+  // saving it would change the savestate layout.
+  p.DoArray(reinterpret_cast<u8*>(&constants),
+            static_cast<u32>(offsetof(GeometryShaderConstants, interp_camera)));
 
   if (p.IsReadMode())
   {

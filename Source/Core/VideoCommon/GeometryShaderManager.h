@@ -29,6 +29,8 @@ public:
 private:
   void SetVSExpand(VSExpand expand);
 
+  void UpdateCameraWarp();
+  bool m_camera_warp_active = false;
   bool m_projection_changed = false;
   bool m_viewport_changed = false;
 };

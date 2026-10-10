@@ -3,6 +3,8 @@
 
 #include "VideoBackends/D3D12/DX12Context.h"
 
+#include <cstring>
+#include <cstdarg>
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -206,6 +208,10 @@ bool DXContext::CreateDevice(u32 adapter_index, bool enable_debug_layer)
     {
       dred_settings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
       dred_settings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+      // Keep marker text (DXContext::Marker) with the breadcrumbs.
+      ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> dred_settings1;
+      if (SUCCEEDED(dred_settings.As(&dred_settings1)))
+        dred_settings1->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
       std::fprintf(stderr, "[dred] enabled\n");
     }
   }
@@ -608,6 +614,47 @@ void DXContext::DestroyPendingResources(CommandListResources& cmdlist)
   cmdlist.pending_resources.clear();
 }
 
+namespace
+{
+// CPU-side copy of the markers, tagged with their command list, for reports on
+// drivers that do not keep DRED breadcrumb context strings.
+struct MarkerRecord
+{
+  const void* list;
+  char text[160];
+};
+std::array<MarkerRecord, 512> s_marker_ring{};
+size_t s_marker_next = 0;
+}  // namespace
+
+bool DXContext::MarkersEnabled()
+{
+  static const bool enabled = [] {
+    const char* env = std::getenv("MODERNGEKKO_DRED_MARKERS");
+    return env && env[0] == '1';
+  }();
+  return enabled;
+}
+
+void DXContext::Marker(const char* fmt, ...)
+{
+  char text[160];
+  va_list args;
+  va_start(args, fmt);
+  std::vsnprintf(text, sizeof(text), fmt, args);
+  va_end(args);
+  MarkerRecord& record = s_marker_ring[s_marker_next++ % s_marker_ring.size()];
+  record.list = GetCommandList();
+  std::memcpy(record.text, text, sizeof(text));
+  wchar_t wide[160];
+  size_t n = 0;
+  for (; text[n] && n < 159; n++)
+    wide[n] = static_cast<wchar_t>(text[n]);
+  wide[n] = 0;
+  // Metadata 0: a wide string, which DRED keeps as the breadcrumb context.
+  GetCommandList()->SetMarker(0, wide, static_cast<UINT>((n + 1) * sizeof(wchar_t)));
+}
+
 void DXContext::ReportDeviceRemoved()
 {
   static bool reported = false;
@@ -635,6 +682,20 @@ void DXContext::ReportDeviceRemoved()
       const UINT completed = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
       if (completed >= node->BreadcrumbCount)
         continue;  // fully executed
+      if (MarkersEnabled())
+      {
+        // Our markers for this command list, oldest first (most recent use).
+        std::vector<const MarkerRecord*> mine;
+        for (size_t k = 0; k < s_marker_ring.size(); k++)
+        {
+          const MarkerRecord& r = s_marker_ring[(s_marker_next + k) % s_marker_ring.size()];
+          if (r.list == node->pCommandList)
+            mine.push_back(&r);
+        }
+        const size_t from = mine.size() > 16 ? mine.size() - 16 : 0;
+        for (size_t k = from; k < mine.size(); k++)
+          std::fprintf(stderr, "[dred]   cpu marker: %s\n", mine[k]->text);
+      }
       std::fprintf(stderr, "[dred] list %p queue %p: %u/%u ops completed\n",
                    static_cast<const void*>(node->pCommandList),
                    static_cast<const void*>(node->pCommandQueue), completed,
@@ -645,6 +706,31 @@ void DXContext::ReportDeviceRemoved()
       {
         std::fprintf(stderr, "[dred]   %s op %u: %d\n", i == completed ? ">>" : "  ", i,
                      static_cast<int>(node->pCommandHistory[i]));
+      }
+    }
+  }
+
+  // MODERNGEKKO_DRED_MARKERS=1: the labels (DXContext::Marker) around the op
+  // that did not complete.
+  ComPtr<ID3D12DeviceRemovedExtendedData1> dred1;
+  D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 breadcrumbs1 = {};
+  if (SUCCEEDED(m_device.As(&dred1)) && SUCCEEDED(dred1->GetAutoBreadcrumbsOutput1(&breadcrumbs1)))
+  {
+    for (const D3D12_AUTO_BREADCRUMB_NODE1* node = breadcrumbs1.pHeadAutoBreadcrumbNode; node;
+         node = node->pNext)
+    {
+      const UINT completed = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
+      if (completed >= node->BreadcrumbCount)
+        continue;
+      for (UINT c = 0; c < node->BreadcrumbContextsCount; c++)
+      {
+        const D3D12_DRED_BREADCRUMB_CONTEXT& ctx = node->pBreadcrumbContexts[c];
+        if (ctx.BreadcrumbIndex + 24 >= completed && ctx.BreadcrumbIndex <= completed + 4)
+        {
+          std::fprintf(stderr, "[dred]   %s marker @op %u: %ls\n",
+                       ctx.BreadcrumbIndex >= completed ? ">>" : "  ", ctx.BreadcrumbIndex,
+                       ctx.pContextString ? ctx.pContextString : L"");
+        }
       }
     }
   }
