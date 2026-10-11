@@ -59,6 +59,12 @@ public:
   bool ShouldYieldAt(u32 address);
   bool TryRecoverZeroCallback(PowerPC::PowerPCState& ppc);
 
+  // Runs the guest function at `address` to completion on a copy of `cpu`
+  // (arguments in its r3..r10, its stack below r1) and returns the function's
+  // r3/r4 in cpu->gpr[3]/[4]. For mods: plain, non-yielding guest functions
+  // only. `cpu` must be a state this core is executing (a hook's state).
+  static bool CallGuest(CPUState* cpu, u32 address);
+
   void ClearCache() override;
   void Jit(u32 em_address) override {}
   bool HandleFault(uintptr_t access_address, SContext* ctx) override { return false; }

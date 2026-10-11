@@ -60,6 +60,63 @@ bool StaticRecompCore::HookHostCall(CPUState* cpu, u32 address)
          core->m_module_source.host_call(cpu, address, core->m_module_source.host_call_user);
 }
 
+bool StaticRecompCore::CallGuest(CPUState* cpu, u32 address)
+{
+  auto* core = cpu ? static_cast<StaticRecompCore*>(cpu->external_user_data) : nullptr;
+  if (!core || !core->m_module || !core->m_module->dispatch)
+    return false;
+  // Returning to this address ends the call: low memory globals, never code.
+  constexpr u32 kReturn = 0x80000010u;
+  CPUState state = *cpu;
+  state.lr = kReturn;
+  state.pc = address;
+  for (u32 dispatches = 0; dispatches < 10000000u; ++dispatches)
+  {
+    if (state.pc == kReturn)
+    {
+      cpu->gpr[3] = state.gpr[3];
+      cpu->gpr[4] = state.gpr[4];
+      return true;
+    }
+    // `sc` (the OS uses it to sync caches around thread switches): the module
+    // has redirected to the system call vector with srr0/srr1 saved. The GC
+    // OS handler only toggles HID0 and returns (rfi), so return directly.
+    if (state.pc == 0x00000C00u || state.pc == 0x80000C00u)
+    {
+      state.pc = state.srr0;
+      state.msr = state.srr1;
+      state.exception = 0;
+      continue;
+    }
+    // FP unavailable: the OS enables the FPU lazily per thread. The call runs
+    // on the hooked thread's own state, so enable it and retry the instruction.
+    if (state.pc == 0x00000800u || state.pc == 0x80000800u)
+    {
+      state.pc = state.srr0;
+      state.msr = state.srr1 | 0x2000u;  // MSR[FP]
+      state.exception = 0;
+      continue;
+    }
+    state.exception = 0;
+    if (!core->DispatchableAt(state.pc))
+    {
+      std::fprintf(stderr, "[mod] guest call %08x left module code at %08x\n", address,
+                   state.pc);
+      return false;
+    }
+    u32 linked = state.pc;
+    if (core->m_has_rel_modules)
+      core->ResolveNativeAddress(state.pc, &linked, nullptr);
+    state.pc = linked;
+    core->m_module->dispatch(&state, linked);
+    if (core->m_has_rel_modules)
+      state.pc = core->TranslateRelAddress(state.pc);
+    state.downcount = 0;
+  }
+  std::fprintf(stderr, "[mod] guest call %08x did not return\n", address);
+  return false;
+}
+
 // Profiling: external (non-RAM) accesses bucketed by the top address nibble.
 u64 g_static_recomp_ext_counts[2][16];
 
