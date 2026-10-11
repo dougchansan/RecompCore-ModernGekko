@@ -473,9 +473,20 @@ static void FifoPlayerThread(Core::System& system, const std::optional<std::stri
 // Initialize and create emulation thread
 // Call browser: Init():s_emu_thread().
 // See the BootManager.cpp file description for a complete call schedule.
+// Startup timeline (stderr): seconds on the steady clock, comparable with the
+// camera mod's boot trace.
+static void StartupMark(const char* stage)
+{
+  std::fprintf(stderr, "[startup-core] t=%.2f %s\n",
+               std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
+                   .count(),
+               stage);
+}
+
 static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot,
                       WindowSystemInfo wsi)
 {
+  StartupMark("emu thread");
   NotifyStateChanged(State::Starting);
   Common::ScopeGuard flag_guard{[] {
     {
@@ -544,6 +555,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
   AudioCommon::InitSoundStream(system);
   Common::ScopeGuard audio_guard([&system] { AudioCommon::ShutdownSoundStream(system); });
 
+  StartupMark("hardware init");
   HW::Init(system,
            NetPlay::IsNetPlayRunning() ? &(boot_session_data.GetNetplaySettings()->sram) : nullptr);
 
@@ -565,7 +577,9 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
 
   // In single-core mode: This holds a video backend shutdown function.
   // In dual-core mode: This holds a GPU thread stopping function (which does the backend shutdown).
+  StartupMark("video backend start");
   const auto video_guard = GetInitializedVideoGuard(system, wsi);
+  StartupMark("video backend ready");
   if (!video_guard)
   {
     PanicAlertFmt("Failed to initialize video backend!");
@@ -603,6 +617,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
   {
     ASSERT(IsCPUThread());
     CPUThreadGuard guard(system);
+    StartupMark("boot up");
     if (!CBoot::BootUp(system, guard, std::move(boot)))
       return;
   }
@@ -620,6 +635,7 @@ static void EmuThread(Core::System& system, std::unique_ptr<BootParameters> boot
     wiifs_guard.Dismiss();
 
   // This adds the SyncGPU handler to CoreTiming, so now CoreTiming::Advance might block.
+  StartupMark("running");
   system.GetFifo().Prepare();
 
   const Common::EventHook frame_presented =
