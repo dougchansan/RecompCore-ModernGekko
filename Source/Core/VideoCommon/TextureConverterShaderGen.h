@@ -28,6 +28,9 @@ struct UidData
   u32 all_copy_filter_coefs_needed : 1;
   u32 copy_filter_can_overflow : 1;
   u32 apply_gamma : 1;
+  // Soft shadows: R4 copies (Colosseum's projected shadow masks) are blurred
+  // within the copied region; 0 off, 1 soft, 2 softer (g_soft_shadows).
+  u32 soft_shadow : 2;
 };
 #pragma pack()
 

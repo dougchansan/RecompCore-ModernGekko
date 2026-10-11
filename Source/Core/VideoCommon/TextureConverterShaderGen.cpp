@@ -3,6 +3,8 @@
 
 #include "VideoCommon/TextureConverterShaderGen.h"
 
+#include <algorithm>
+
 #include "Common/CommonTypes.h"
 #include "VideoCommon/BPMemory.h"
 #include "VideoCommon/TextureCacheBase.h"
@@ -48,6 +50,10 @@ TCShaderUid GetShaderUid(EFBCopyFormat dst_format, bool is_depth_copy, bool is_i
   uid_data->copy_filter_can_overflow = TextureCacheBase::CopyFilterCanOverflow(filter_coefficients);
   // If the gamma is needed, then include that too.
   uid_data->apply_gamma = gamma_rcp != 1.0f;
+  uid_data->soft_shadow =
+      dst_format == EFBCopyFormat::R4 && !is_depth_copy && !is_intensity ?
+          std::clamp(g_soft_shadows.load(std::memory_order_relaxed), 0, 2) :
+          0;
 
   return out;
 }
@@ -186,8 +192,37 @@ ShaderCode GeneratePixelShader(APIType api_type, const UidData* uid_data)
   switch (uid_data->dst_format)
   {
   case EFBCopyFormat::R4:  // R4
-    out.Write("  float red = float(texcol_raw.r & 0xF0u) / 240.0;\n"
-              "  ocol0 = float4(red, red, red, red);\n");
+    if (uid_data->soft_shadow)
+    {
+      // Soft shadow: average the mask over a disc (radius a share of the copied
+      // region, so it looks the same at any internal resolution), staying
+      // inside the region so neighbouring EFB contents never bleed in.
+      out.Write("  float2 region_lo = src_offset, region_hi = src_offset + src_size;\n"
+                "  float2 radius = src_size * {};\n"
+                "  float red = 0.0, weight = 0.0;\n"
+                "  for (int ring = 0; ring <= 2; ring++) {{\n"
+                "    int taps = ring == 0 ? 1 : 8 * ring;\n"
+                "    float w = ring == 0 ? 1.0 : (ring == 1 ? 0.75 : 0.45);\n"
+                "    for (int i = 0; i < taps; i++) {{\n"
+                "      float a = 6.2831853 * (float(i) + 0.5 * float(ring)) / float(taps);\n"
+                "      float2 o = float2(cos(a), sin(a)) * (float(ring) / 2.0) * radius;\n"
+                "      float2 uv = clamp(v_tex0.xy + o, region_lo, region_hi);\n"
+                "      red += w * float(SampleEFB(float3(uv, v_tex0.z), 0.0).r & 0xF0u) / 240.0;\n"
+                "      weight += w;\n"
+                "    }}\n"
+                "  }}\n"
+                "  red /= weight;\n"
+                "  // Keep the shadow core (and the lit area) at full strength; only the edge\n"
+                "  // between them fades.\n"
+                "  red = smoothstep(0.15, 0.85, red);\n"
+                "  ocol0 = float4(red, red, red, red);\n",
+                uid_data->soft_shadow == 2 ? "0.0045" : "0.003");
+    }
+    else
+    {
+      out.Write("  float red = float(texcol_raw.r & 0xF0u) / 240.0;\n"
+                "  ocol0 = float4(red, red, red, red);\n");
+    }
     break;
 
   case EFBCopyFormat::R8_0x1:  // R8

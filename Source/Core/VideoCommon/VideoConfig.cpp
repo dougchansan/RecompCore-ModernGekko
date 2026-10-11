@@ -44,6 +44,7 @@ std::atomic<int> g_frame_interp_layers{0};
 std::atomic<bool> g_frame_interp_dropping{false};
 std::atomic<int> g_depth_of_field_level{0};
 std::atomic<int> g_world_tint_milli[3] = {1000, 1000, 1000};
+std::atomic<int> g_soft_shadows{0};
 std::atomic<bool> g_exclusive_fullscreen_wanted{false};
 VideoConfig g_Config;
 VideoConfig g_ActiveConfig;
