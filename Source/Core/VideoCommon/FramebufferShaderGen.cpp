@@ -765,6 +765,57 @@ std::string GenerateDepthOfFieldPixelShader()
   return code.GetBuffer();
 }
 
+// Screen-space ambient occlusion from the EFB depth alone. q = inverse distance
+// (raw depth measured from the far end, as in the depth of field shader), so
+// q0 / q = z / z0 for a neighbour: the relative amount by which it is closer
+// to the camera than this pixel, independent of the projection. Neighbours a
+// little closer (creases, contact points) occlude; much closer ones (another
+// object's silhouette in front) fade out to avoid halos.
+// params: xy = texel size, z = radius in texels, w = strength; params2.x = 1
+// when far is stored as 1. samp0 = EFB colour, samp1 = EFB depth.
+std::string GenerateAmbientOcclusionPixelShader()
+{
+  static constexpr std::array<std::array<float, 2>, 16> kTaps{{
+      {0.177f, 0.000f},  {-0.226f, 0.207f}, {0.033f, -0.395f}, {0.287f, 0.359f},
+      {-0.513f, -0.108f}, {0.500f, -0.299f}, {-0.191f, 0.622f}, {-0.330f, -0.592f},
+      {0.701f, 0.207f},  {-0.701f, 0.330f}, {0.264f, -0.758f}, {0.398f, 0.746f},
+      {-0.865f, -0.243f}, {0.876f, -0.395f}, {-0.330f, 0.907f}, {-0.360f, -0.933f},
+  }};
+  ShaderCode code;
+  EmitUniformBufferDeclaration(code);
+  code.Write("{{\n"
+             "  float4 params;\n"
+             "  float4 params2;\n"
+             "}};\n\n");
+  EmitSamplerDeclarations(code, 0, 2, false);
+  EmitPixelMainDeclaration(code, 1, 0);
+  code.Write("{{\n"
+             "#define INVDEPTH(uv) abs(params2.x - texture(samp1, uv).r)\n"
+             "  float4 colour = texture(samp0, v_tex0);\n"
+             "  float q0 = INVDEPTH(v_tex0);\n"
+             "  float occlusion = 0.0;\n"
+             "  if (q0 > 1e-5)\n"
+             "  {{\n"
+             "    float2 radius = params.xy * params.z;\n");
+  for (const auto& tap : kTaps)
+  {
+    code.Write("    {{\n"
+               "      float q = INVDEPTH(float3(v_tex0.xy + float2({:.3f}, {:.3f}) * radius, v_tex0.z));\n"
+               "      float closer = 1.0 - q0 / max(q, 1e-7);\n"
+               "      occlusion += clamp((closer - 0.004) / 0.03, 0.0, 1.0) *\n"
+               "                   (1.0 - clamp((closer - 0.12) / 0.12, 0.0, 1.0));\n"
+               "    }}\n",
+               tap[0], tap[1]);
+  }
+  code.Write("  }}\n"
+             "  float ao = clamp(1.0 - params.w * occlusion / 16.0, 0.35, 1.0);\n"
+             "  ocol0 = float4(colour.rgb * ao, colour.a);\n");
+  if (const char* debug = std::getenv("MODERNGEKKO_SSAO_DEBUG"); debug && debug[0] == '1')
+    code.Write("  ocol0 = float4(ao, ao, ao, 1.0);\n");
+  code.Write("}}\n");
+  return code.GetBuffer();
+}
+
 // Depth-of-field focus, rendered into a 1x1 texture: the mean inverse depth of a
 // 5x5 grid over a window around the screen centre (the first-person dot),
 // eased toward from the previous frame's focus (samp0) so characters passing

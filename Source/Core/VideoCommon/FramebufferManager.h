@@ -208,11 +208,28 @@ public:
   void ResetDepthOfFieldFrame()
   {
     m_dof_applied_this_frame = false;
+    m_ao_applied_this_frame = false;
     if (m_dof_frames_idle < 1000)
       m_dof_frames_idle++;
   }
+  // Screen-space ambient occlusion on the EFB from its depth, in place, at the
+  // same point as depth of field (before the 2D overlay). level 1-3.
+  void ApplyAmbientOcclusion(int level);
+  void ApplyAmbientOcclusionOnce(int level)
+  {
+    if (!m_ao_applied_this_frame)
+    {
+      m_ao_applied_this_frame = true;
+      ApplyAmbientOcclusion(level);
+    }
+  }
 
 private:
+  std::unique_ptr<AbstractPipeline> m_ao_pipeline;
+  std::unique_ptr<AbstractTexture> m_ao_texture;
+  std::unique_ptr<AbstractFramebuffer> m_ao_framebuffer;
+  AbstractTextureFormat m_ao_format = AbstractTextureFormat::Undefined;
+  bool m_ao_applied_this_frame = false;
   std::unique_ptr<AbstractPipeline> m_dof_pipeline;
   std::unique_ptr<AbstractTexture> m_dof_texture;
   std::unique_ptr<AbstractFramebuffer> m_dof_framebuffer;

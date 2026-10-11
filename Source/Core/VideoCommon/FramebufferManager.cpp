@@ -480,6 +480,86 @@ void FramebufferManager::ApplyDepthOfField(int level)
   g_gfx->EndUtilityDrawing();
 }
 
+void FramebufferManager::ApplyAmbientOcclusion(int level)
+{
+  if (level <= 0 || IsEFBMultisampled() || !m_efb_color_texture || !m_efb_depth_texture)
+    return;
+  const u32 width = m_efb_color_texture->GetWidth();
+  const u32 height = m_efb_color_texture->GetHeight();
+  const u32 layers = m_efb_color_texture->GetLayers();
+  const AbstractTextureFormat format = GetEFBColorFormat();
+  if (!m_ao_texture || m_ao_texture->GetWidth() != width || m_ao_texture->GetHeight() != height ||
+      m_ao_texture->GetLayers() != layers || m_ao_format != format)
+  {
+    m_ao_framebuffer.reset();
+    m_ao_texture.reset();
+    m_ao_pipeline.reset();
+    m_ao_texture = g_gfx->CreateTexture(
+        TextureConfig(width, height, 1, layers, 1, format, AbstractTextureFlag_RenderTarget,
+                      AbstractTextureType::Texture_2DArray),
+        "Ambient occlusion target");
+    if (!m_ao_texture)
+      return;
+    m_ao_framebuffer = g_gfx->CreateFramebuffer(m_ao_texture.get(), nullptr);
+    auto pixel_shader = g_gfx->CreateShaderFromSource(
+        ShaderStage::Pixel, FramebufferShaderGen::GenerateAmbientOcclusionPixelShader(), nullptr,
+        "Ambient occlusion pixel shader");
+    if (!m_ao_framebuffer || !pixel_shader)
+    {
+      std::fprintf(stderr, "[ssao] shader/target creation failed\n");
+      return;
+    }
+    AbstractPipelineConfig config = {};
+    config.vertex_shader = g_shader_cache->GetScreenQuadVertexShader();
+    config.geometry_shader = layers > 1 ? g_shader_cache->GetTexcoordGeometryShader() : nullptr;
+    config.pixel_shader = pixel_shader.get();
+    config.rasterization_state = RenderState::GetNoCullRasterizationState(PrimitiveType::Triangles);
+    config.depth_state = RenderState::GetNoDepthTestingDepthState();
+    config.blending_state = RenderState::GetNoBlendingBlendState();
+    config.framebuffer_state = RenderState::GetColorFramebufferState(format);
+    config.usage = AbstractPipelineUsage::Utility;
+    m_ao_pipeline = g_gfx->CreatePipeline(config);
+    m_ao_format = format;
+    std::fprintf(stderr, "[ssao] pipeline %s (level %d)\n", m_ao_pipeline ? "ready" : "failed",
+                 level);
+  }
+  if (!m_ao_pipeline || !m_ao_framebuffer)
+    return;
+
+  // Per level: sampling radius (EFB texels at native height) and strength.
+  static constexpr float kRadius[] = {0.0f, 6.0f, 9.0f, 12.0f};
+  static constexpr float kStrength[] = {0.0f, 0.6f, 0.9f, 1.2f};
+  const int index = std::clamp(level, 1, 3);
+  const float resolution_scale = static_cast<float>(height) / 528.0f;
+  const float far_is_one = g_backend_info.bSupportsReversedDepthRange ? 1.0f : 0.0f;
+  struct Uniforms
+  {
+    float params[4];
+    float params2[4];
+  } uniforms = {{1.0f / static_cast<float>(width), 1.0f / static_cast<float>(height),
+                 kRadius[index] * resolution_scale, kStrength[index]},
+                {far_is_one, 0, 0, 0}};
+
+  const MathUtil::Rectangle<int> rect = m_efb_color_texture->GetRect();
+  AbstractTexture* const depth = ResolveEFBDepthTexture(rect, true);
+  g_gfx->BeginUtilityDrawing();
+  m_efb_color_texture->FinishedRendering();
+  m_efb_depth_texture->FinishedRendering();
+  g_gfx->SetAndDiscardFramebuffer(m_ao_framebuffer.get());
+  g_gfx->SetViewportAndScissor(rect);
+  g_gfx->SetPipeline(m_ao_pipeline.get());
+  g_gfx->SetTexture(0, m_efb_color_texture.get());
+  g_gfx->SetTexture(1, depth);
+  g_gfx->SetSamplerState(0, RenderState::GetPointSamplerState());
+  g_gfx->SetSamplerState(1, RenderState::GetPointSamplerState());
+  g_vertex_manager->UploadUtilityUniforms(&uniforms, sizeof(uniforms));
+  g_gfx->Draw(0, 3);
+  for (u32 layer = 0; layer < layers; layer++)
+    m_efb_color_texture->CopyRectangleFromTexture(m_ao_texture.get(), rect, layer, 0, rect, layer,
+                                                  0);
+  g_gfx->EndUtilityDrawing();
+}
+
 void FramebufferManager::BindEFBFramebuffer()
 {
   g_gfx->SetFramebuffer(m_efb_framebuffer.get());

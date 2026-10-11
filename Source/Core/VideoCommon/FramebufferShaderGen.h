@@ -27,6 +27,7 @@ std::string GenerateTextureReinterpretShader(TextureFormat from_format, TextureF
 std::string GenerateEFBRestorePixelShader();
 std::string GenerateDepthOfFieldPixelShader();
 std::string GenerateDepthOfFieldFocusPixelShader();
+std::string GenerateAmbientOcclusionPixelShader();
 std::string GenerateImGuiVertexShader();
 std::string GenerateImGuiPixelShader(bool linear_space_output = false);
 

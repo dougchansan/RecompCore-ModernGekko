@@ -157,6 +157,14 @@ static void XFRegWritten(Core::System& system, XFStateManager& xf_state_manager,
           static_cast<ProjectionType>(value) == ProjectionType::Orthographic &&
           std::abs(xfmem.viewport.wd) * 2.0f >= 560.0f)
       {
+        // Ambient occlusion first (it darkens creases in the sharp image), then
+        // depth of field. MODERNGEKKO_SSAO=1..3 (test hook, no menu yet).
+        static const int ssao = [] {
+          const char* v = std::getenv("MODERNGEKKO_SSAO");
+          return v ? std::clamp(std::atoi(v), 0, 3) : 0;
+        }();
+        if (ssao > 0)
+          g_framebuffer_manager->ApplyAmbientOcclusionOnce(ssao);
         if (const int dof = g_depth_of_field_level.load(std::memory_order_relaxed); dof > 0)
           g_framebuffer_manager->ApplyDepthOfFieldOnce(dof);
       }
