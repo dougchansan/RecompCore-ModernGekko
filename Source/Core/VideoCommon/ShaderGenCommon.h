@@ -277,6 +277,7 @@ void WriteSwitch(ShaderCode& out, APIType ApiType, std::string_view variable,
 #define I_FOGRANGE "cfogrange"
 #define I_ZSLOPE "czslope"
 #define I_EFBSCALE "cefbscale"
+#define I_WORLD_TINT "cworldtint"
 
 #define I_POSNORMALMATRIX "cpnmtx"
 #define I_PROJECTION "cproj"

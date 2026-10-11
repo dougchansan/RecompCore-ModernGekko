@@ -275,6 +275,9 @@ void Frame()
 // then hold its previous-frame words, giving the vertex shader's pos_b, which the
 // geometry shader blends toward pos for the in-between layers. Once a frame
 // diverges, the rest of that frame uses its real values (no motion).
+// See LoadXFReg: the camera mod's world-drawing marker (outside XF memory).
+constexpr u16 kWorldMarkerAddress = 0x7E10;
+
 namespace FrameInterp
 {
 float g_pos[256];
@@ -641,6 +644,20 @@ void LoadXFReg(u16 base_address, u8 transfer_size, const u8* data)
   if (base_address == CameraWarp::kStampAddress)
   {
     CameraWarp::Stamp(transfer_size, data);
+    return;
+  }
+  // The camera mod's world marker: nonzero while the 3D world draws (the
+  // time-of-day grade applies), zero around 2D sprites. In FIFO order with
+  // the draws; the pending batch belongs to the previous state.
+  if (base_address == kWorldMarkerAddress)
+  {
+    const bool active = transfer_size >= 1 && Common::swap32(data) != 0;
+    auto& pixel_shader_manager = Core::System::GetInstance().GetPixelShaderManager();
+    if (active != pixel_shader_manager.m_world_tint_active)
+    {
+      g_vertex_manager->Flush();
+      pixel_shader_manager.SetWorldTintActive(active);
+    }
     return;
   }
   XFTrace::Load('x', base_address, transfer_size, data);

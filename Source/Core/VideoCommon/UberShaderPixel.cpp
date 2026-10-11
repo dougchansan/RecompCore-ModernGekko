@@ -1190,9 +1190,9 @@ ShaderCode GenPixelShader(APIType api_type, const ShaderHostConfig& host_config,
   else
   {
     out.Write("  if (bpmem_rgba6_format)\n"
-              "    ocol0.rgb = float3(TevResult.rgb >> 2) / 63.0;\n"
+              "    ocol0.rgb = float3(TevResult.rgb >> 2) / 63.0 * " I_WORLD_TINT ".rgb;\n"
               "  else\n"
-              "    ocol0.rgb = float3(TevResult.rgb) / 255.0;\n"
+              "    ocol0.rgb = float3(TevResult.rgb) / 255.0 * " I_WORLD_TINT ".rgb;\n"
               "\n"
               "  if (bpmem_dstalpha != 0u)\n");
     out.Write("    ocol0.a = float({} >> 2) / 63.0;\n",

@@ -426,6 +426,9 @@ extern std::atomic<bool> g_frame_interp_dropping;
 // First-person depth of field (0 = off, 1-3 = low/medium/high); set by the
 // pause menu only while the camera mod's first-person view is active.
 extern std::atomic<int> g_depth_of_field_level;
+// Time-of-day grade for the 3D world, RGB x1000 (1000 = none), set by the
+// frontend; applied while the camera mod marks world drawing.
+extern std::atomic<int> g_world_tint_milli[3];
 // Exclusive fullscreen wanted right now (display mode Exclusive, fullscreen and
 // focused); the presenter applies changes on the GPU thread.
 extern std::atomic<bool> g_exclusive_fullscreen_wanted;

@@ -382,6 +382,7 @@ void WritePixelShaderCommonHeader(ShaderCode& out, APIType api_type,
             "\tbool  logic_op_enable;\n"
             "\tuint  logic_op_mode;\n"
             "\tuint  time_ms;\n"
+            "\tfloat4 " I_WORLD_TINT ";\n"
             "}};\n\n");
   out.Write("#define bpmem_combiners(i) (bpmem_pack1[(i)].xy)\n"
             "#define bpmem_tevind(i) (bpmem_pack1[(i)].z)\n"
@@ -1798,10 +1799,11 @@ static void WriteColor(ShaderCode& out, APIType api_type, const pixel_shader_uid
     return;
   }
 
+  // The time-of-day grade multiplies the world's color (1,1,1 elsewhere).
   if (uid_data->rgba6_format)
-    out.Write("\tocol0.rgb = float3(prev.rgb >> 2) / 63.0;\n");
+    out.Write("\tocol0.rgb = float3(prev.rgb >> 2) / 63.0 * " I_WORLD_TINT ".rgb;\n");
   else
-    out.Write("\tocol0.rgb = float3(prev.rgb) / 255.0;\n");
+    out.Write("\tocol0.rgb = float3(prev.rgb) / 255.0 * " I_WORLD_TINT ".rgb;\n");
 
   // Colors will be blended against the 8-bit alpha from ocol1 and
   // the 6-bit alpha from ocol0 will be written to the framebuffer

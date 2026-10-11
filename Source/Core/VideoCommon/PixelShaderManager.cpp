@@ -81,8 +81,28 @@ void PixelShaderManager::Dirty()
   dirty = true;
 }
 
+void PixelShaderManager::SetWorldTintActive(bool active)
+{
+  m_world_tint_active = active;
+}
+
 void PixelShaderManager::SetConstants()
 {
+  {
+    // Time-of-day grade: only while the camera mod marks the 3D world as
+    // drawing (XF marker), so 2D menus and HUD keep their colors.
+    float4 tint = {1.0f, 1.0f, 1.0f, 1.0f};
+    if (m_world_tint_active)
+    {
+      for (int i = 0; i < 3; ++i)
+        tint[i] = g_world_tint_milli[i].load(std::memory_order_relaxed) / 1000.0f;
+    }
+    if (constants.world_tint != tint)
+    {
+      constants.world_tint = tint;
+      dirty = true;
+    }
+  }
   if (m_fog_range_adjusted_changed)
   {
     // set by two components, so keep changed flag here
@@ -533,7 +553,9 @@ void PixelShaderManager::DoState(PointerWrap& p)
   p.Do(m_indirect_dirty);
   p.Do(m_dest_alpha_dirty);
 
-  p.Do(constants);
+  // The world tint (and its padding) is host-side and not saved, so states
+  // keep their original layout.
+  p.DoArray(reinterpret_cast<u8*>(&constants), offsetof(PixelShaderConstants, world_tint));
 
   if (p.IsReadMode())
   {

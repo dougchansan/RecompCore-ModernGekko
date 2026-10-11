@@ -19,6 +19,8 @@ public:
   void DoState(PointerWrap& p);
 
   void SetConstants();  // sets pixel shader constants
+  // Camera mod marker: the 3D world is drawing (time-of-day grade applies).
+  void SetWorldTintActive(bool active);
 
   // constant management
   // Some of these functions grab the constant values from global state,
@@ -53,6 +55,7 @@ public:
 
   PixelShaderConstants constants{};
   bool dirty = false;
+  bool m_world_tint_active = false;
 
   // Constants for custom shaders
   std::span<u8> custom_constants;
