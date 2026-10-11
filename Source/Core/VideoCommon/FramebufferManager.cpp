@@ -527,8 +527,8 @@ void FramebufferManager::ApplyAmbientOcclusion(int level)
     return;
 
   // Per level: sampling radius (EFB texels at native height) and strength.
-  static constexpr float kRadius[] = {0.0f, 6.0f, 9.0f, 12.0f};
-  static constexpr float kStrength[] = {0.0f, 0.6f, 0.9f, 1.2f};
+  static constexpr float kRadius[] = {0.0f, 7.0f, 10.0f, 14.0f};
+  static constexpr float kStrength[] = {0.0f, 0.9f, 1.4f, 2.0f};
   const int index = std::clamp(level, 1, 3);
   const float resolution_scale = static_cast<float>(height) / 528.0f;
   const float far_is_one = g_backend_info.bSupportsReversedDepthRange ? 1.0f : 0.0f;

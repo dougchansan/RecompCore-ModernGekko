@@ -431,6 +431,8 @@ extern std::atomic<int> g_depth_of_field_level;
 extern std::atomic<int> g_world_tint_milli[3];
 // Soft shadows for EFB R4 copies (the game's shadow masks): 0 off, 1, 2.
 extern std::atomic<int> g_soft_shadows;
+// Screen-space ambient occlusion: 0 off, 1 low, 2 medium, 3 high (pause menu).
+extern std::atomic<int> g_ambient_occlusion;
 // Exclusive fullscreen wanted right now (display mode Exclusive, fullscreen and
 // focused); the presenter applies changes on the GPU thread.
 extern std::atomic<bool> g_exclusive_fullscreen_wanted;
