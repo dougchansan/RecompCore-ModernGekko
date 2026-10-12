@@ -13,6 +13,7 @@
     ppc_set_mem_write_journal;
     /* Hook-aware modules (make_hook_aware_module.py): StaticRecompCore checks it. */
     dolrecomp_hook_aware_calls;
+    dolrecomp_hook_aware_addresses;
   local:
     *;
 };

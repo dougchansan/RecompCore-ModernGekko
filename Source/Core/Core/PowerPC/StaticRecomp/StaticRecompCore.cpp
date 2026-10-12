@@ -415,6 +415,52 @@ void StaticRecompCore::LoadModule()
   m_has_rel_modules = desc->num_rel_modules != 0;
   m_chunk_state.assign(desc->num_chunk_ranges, CHUNK_UNVERIFIED);
   m_chunk_host_call_state.assign(desc->num_chunk_ranges, 0);
+
+  // A hook-aware module (scripts/make-hook-aware-module.py) calls straight past
+  // every address it was not built to hook, so a loaded mod hooking anywhere
+  // else would never fire. Then run it like any other module (hooked chunks
+  // through the fallback): slower, but every hook fires.
+  if (m_hook_aware_module && m_module_source.host_call_contains)
+  {
+    const auto* baked =
+        static_cast<const u32*>(m_library.GetSymbolAddress("dolrecomp_hook_aware_addresses"));
+    std::vector<u32> listed;
+    for (const u32* p = baked; p && *p; ++p)
+      listed.push_back(*p);
+    u32 missing = 0;
+    for (u32 i = 0; baked && i < desc->num_chunk_ranges && !missing; ++i)
+    {
+      const StaticRecompRange& chunk = desc->chunk_ranges[i];
+      if (m_module_source.host_call_range_contains &&
+          !m_module_source.host_call_range_contains(chunk.start, chunk.end,
+                                                    m_module_source.host_call_user))
+      {
+        continue;
+      }
+      for (u32 address = chunk.start; address < chunk.end; address += 4)
+      {
+        if (IsHostCallAddress(address) &&
+            std::find(listed.begin(), listed.end(), address) == listed.end())
+        {
+          missing = address;
+          break;
+        }
+      }
+    }
+    if (!baked)
+    {
+      std::fprintf(stderr,
+                   "[staticrecomp] hook-aware module without its hook list: mod hooks not checked\n");
+    }
+    else if (missing)
+    {
+      std::fprintf(stderr,
+                   "[staticrecomp] a mod hooks 0x%08X, which this hook-aware module was not built "
+                   "for: hooked chunks run through the fallback (rebuild the module to include it)\n",
+                   missing);
+      m_hook_aware_module = false;
+    }
+  }
   m_native_region_blocked.clear();
   m_effective_chunk_hashes.assign(desc->chunk_hashes,
                                   desc->chunk_hashes + desc->num_chunk_ranges);
