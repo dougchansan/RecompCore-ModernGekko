@@ -26,6 +26,7 @@
 #include "VideoCommon/VideoConfig.h"
 
 #include <imgui.h>
+#include <imgui_internal.h>
 
 std::unique_ptr<VideoCommon::ShaderCache> g_shader_cache;
 
@@ -171,6 +172,14 @@ void ShaderCache::WaitForAsyncCompiler()
   bool running = true;
 
   constexpr auto update_ui_progress = [](size_t completed, size_t total) {
+    // Frame interpolation presents can reuse the finished ImGui frame, so a
+    // new one is not always open here; drawing then asserts in Begin. Skip
+    // the progress window in that case and just keep presenting.
+    if (ImGuiContext* context = ImGui::GetCurrentContext(); !context || !context->WithinFrameScope)
+    {
+      g_presenter->Present();
+      return;
+    }
     const float center_x = ImGui::GetIO().DisplaySize.x * 0.5f;
     const float center_y = ImGui::GetIO().DisplaySize.y * 0.5f;
     const float scale = ImGui::GetIO().DisplayFramebufferScale.x;
