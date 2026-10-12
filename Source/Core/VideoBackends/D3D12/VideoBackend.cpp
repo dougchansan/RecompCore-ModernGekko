@@ -3,6 +3,7 @@
 
 #include "VideoBackends/D3D12/VideoBackend.h"
 
+#include <cstdlib>
 #include <string>
 
 #include "Common/CommonTypes.h"

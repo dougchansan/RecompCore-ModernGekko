@@ -468,9 +468,7 @@ void Jit64::DoMergedBranchCondition()
 
   SetJumpTarget(pDontBranch);
 
-  if (analyzer.HasOption(PPCAnalyst::PPCAnalyzer::OPTION_PRESERVE_CALL_BOUNDARIES) ?
-          !js.op[1].conditionalContinue :
-          !analyzer.HasOption(PPCAnalyst::PPCAnalyzer::OPTION_CONDITIONAL_CONTINUE))
+  if (!analyzer.HasOption(PPCAnalyst::PPCAnalyzer::OPTION_CONDITIONAL_CONTINUE))
   {
     gpr.Flush();
     fpr.Flush();
@@ -517,9 +515,7 @@ void Jit64::DoMergedBranchImmediate(s64 val)
     fpr.Flush();
     DoMergedBranch();
   }
-  else if (analyzer.HasOption(PPCAnalyst::PPCAnalyzer::OPTION_PRESERVE_CALL_BOUNDARIES) ?
-               !js.op[1].conditionalContinue :
-               !analyzer.HasOption(PPCAnalyst::PPCAnalyzer::OPTION_CONDITIONAL_CONTINUE))
+  else if (!analyzer.HasOption(PPCAnalyst::PPCAnalyzer::OPTION_CONDITIONAL_CONTINUE))
   {
     gpr.Flush();
     fpr.Flush();
