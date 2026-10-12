@@ -797,22 +797,88 @@ std::string GenerateAmbientOcclusionPixelShader()
              "  if (q0 > 1e-5)\n"
              "  {{\n"
              "    float2 radius = params.xy * params.z;\n");
-  for (const auto& tap : kTaps)
+  // Opposite pairs: inverse depth is affine across a flat surface in screen
+  // space, so on any plane (also ground seen at a grazing angle) the pair's
+  // mean equals q0. Only a concave shape (crease, corner, contact) puts the
+  // mean above it.
+  for (size_t i = 0; i < kTaps.size() / 2; ++i)
   {
+    const auto& tap = kTaps[i * 2 + 1];
     code.Write("    {{\n"
-               "      float q = INVDEPTH(float3(v_tex0.xy + float2({:.3f}, {:.3f}) * radius, v_tex0.z));\n"
-               "      float closer = 1.0 - q0 / max(q, 1e-7);\n"
-               "      occlusion += clamp((closer - 0.004) / 0.03, 0.0, 1.0) *\n"
-               "                   (1.0 - clamp((closer - 0.12) / 0.12, 0.0, 1.0));\n"
+               "      float2 o = float2({:.3f}, {:.3f}) * radius;\n"
+               "      float qa = INVDEPTH(float3(v_tex0.xy + o, v_tex0.z));\n"
+               "      float qb = INVDEPTH(float3(v_tex0.xy - o, v_tex0.z));\n"
+               "      float bend = (0.5 * (qa + qb) - q0) / q0;\n"
+               "      occlusion += 2.0 * clamp((bend - 0.002) / 0.02, 0.0, 1.0) *\n"
+               "                   (1.0 - clamp((bend - 0.10) / 0.10, 0.0, 1.0));\n"
                "    }}\n",
                tap[0], tap[1]);
   }
+  // Highlights (water sparkle, glints, lamps) keep their brightness: occlusion
+  // darkens ambient light, not specular light.
   code.Write("  }}\n"
              "  float ao = clamp(1.0 - params.w * occlusion / 16.0, 0.35, 1.0);\n"
+             "  float luma = dot(colour.rgb, float3(0.299, 0.587, 0.114));\n"
+             "  ao = mix(ao, 1.0, smoothstep(0.55, 0.9, luma));\n"
              "  ocol0 = float4(colour.rgb * ao, colour.a);\n");
   if (const char* debug = std::getenv("MODERNGEKKO_SSAO_DEBUG"); debug && debug[0] == '1')
     code.Write("  ocol0 = float4(ao, ao, ao, 1.0);\n");
   code.Write("}}\n");
+  return code.GetBuffer();
+}
+
+// "Cinematic" look on the 3D image (before the 2D overlay): single-pass bloom
+// from bright pixels on two rings, distance haze from the depth, a filmic
+// tone curve, saturation, warm highlights and a light vignette.
+// params: xy = texel size, z = bloom radius (texels), w = bloom strength;
+// params2: x = 1 when far is stored as 1, y = haze strength, z = grade amount,
+// w = saturation. samp0 = EFB colour, samp1 = EFB depth.
+std::string GenerateCinematicPixelShader()
+{
+  static constexpr std::array<std::array<float, 2>, 12> kRing{{
+      {1.000f, 0.000f}, {0.866f, 0.500f}, {0.500f, 0.866f}, {0.000f, 1.000f},
+      {-0.500f, 0.866f}, {-0.866f, 0.500f}, {-1.000f, 0.000f}, {-0.866f, -0.500f},
+      {-0.500f, -0.866f}, {0.000f, -1.000f}, {0.500f, -0.866f}, {0.866f, -0.500f},
+  }};
+  ShaderCode code;
+  EmitUniformBufferDeclaration(code);
+  code.Write("{{\n"
+             "  float4 params;\n"
+             "  float4 params2;\n"
+             "}};\n\n");
+  EmitSamplerDeclarations(code, 0, 2, false);
+  EmitPixelMainDeclaration(code, 1, 0);
+  code.Write("{{\n"
+             "  float4 colour = texture(samp0, v_tex0);\n"
+             "  float3 c = colour.rgb;\n"
+             "  float3 bloom = float3(0.0, 0.0, 0.0);\n"
+             "  float2 r = params.xy * params.z;\n");
+  for (const float scale : {0.35f, 1.0f})
+  {
+    for (const auto& p : kRing)
+    {
+      code.Write("  {{ float3 s = texture(samp0, float3(v_tex0.xy + float2({:.3f}, {:.3f}) * r, v_tex0.z)).rgb;\n"
+                 "    bloom += max(s - float3(0.75, 0.75, 0.75), float3(0.0, 0.0, 0.0)); }}\n",
+                 p[0] * scale, p[1] * scale);
+    }
+  }
+  code.Write("  c += bloom * (params.w * 3.0 / 24.0);\n"
+             // Haze: q = inverse distance (raw depth from the far end); the sky
+             // (q ~ 0) is left alone.
+             "  float q = abs(params2.x - texture(samp1, v_tex0).r);\n"
+             "  float far_amount = q > 1e-5 ? clamp(1.0 - q * 250.0, 0.0, 1.0) : 0.0;\n"
+             "  c = mix(c, float3(0.86, 0.80, 0.70), far_amount * far_amount * params2.y);\n"
+             // Filmic curve (ACES fit) with a little exposure, blended by grade.
+             "  float3 x = c * 1.25;\n"
+             "  float3 film = clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);\n"
+             "  c = mix(c, film, params2.z);\n"
+             "  float luma = dot(c, float3(0.299, 0.587, 0.114));\n"
+             "  c = mix(float3(luma, luma, luma), c, params2.w);\n"
+             "  c *= mix(float3(1.0, 1.0, 1.0), float3(1.04, 1.0, 0.95), smoothstep(0.5, 1.0, luma) * params2.z);\n"
+             "  float2 d = v_tex0.xy - float2(0.5, 0.5);\n"
+             "  c *= 1.0 - 0.18 * params2.z * dot(d, d);\n"
+             "  ocol0 = float4(clamp(c, 0.0, 1.0), colour.a);\n"
+             "}}\n");
   return code.GetBuffer();
 }
 

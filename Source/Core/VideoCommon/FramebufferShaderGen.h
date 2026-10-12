@@ -28,6 +28,7 @@ std::string GenerateEFBRestorePixelShader();
 std::string GenerateDepthOfFieldPixelShader();
 std::string GenerateDepthOfFieldFocusPixelShader();
 std::string GenerateAmbientOcclusionPixelShader();
+std::string GenerateCinematicPixelShader();
 std::string GenerateImGuiVertexShader();
 std::string GenerateImGuiPixelShader(bool linear_space_output = false);
 

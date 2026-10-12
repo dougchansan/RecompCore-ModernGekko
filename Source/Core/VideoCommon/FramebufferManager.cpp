@@ -560,6 +560,86 @@ void FramebufferManager::ApplyAmbientOcclusion(int level)
   g_gfx->EndUtilityDrawing();
 }
 
+void FramebufferManager::ApplyCinematic(int level)
+{
+  if (level <= 0 || IsEFBMultisampled() || !m_efb_color_texture || !m_efb_depth_texture)
+    return;
+  const u32 width = m_efb_color_texture->GetWidth();
+  const u32 height = m_efb_color_texture->GetHeight();
+  const u32 layers = m_efb_color_texture->GetLayers();
+  const AbstractTextureFormat format = GetEFBColorFormat();
+  if (!m_cine_texture || m_cine_texture->GetWidth() != width ||
+      m_cine_texture->GetHeight() != height || m_cine_texture->GetLayers() != layers ||
+      m_cine_format != format)
+  {
+    m_cine_framebuffer.reset();
+    m_cine_texture.reset();
+    m_cine_pipeline.reset();
+    m_cine_texture = g_gfx->CreateTexture(
+        TextureConfig(width, height, 1, layers, 1, format, AbstractTextureFlag_RenderTarget,
+                      AbstractTextureType::Texture_2DArray),
+        "Cinematic target");
+    if (!m_cine_texture)
+      return;
+    m_cine_framebuffer = g_gfx->CreateFramebuffer(m_cine_texture.get(), nullptr);
+    auto pixel_shader = g_gfx->CreateShaderFromSource(
+        ShaderStage::Pixel, FramebufferShaderGen::GenerateCinematicPixelShader(), nullptr,
+        "Cinematic pixel shader");
+    if (!m_cine_framebuffer || !pixel_shader)
+    {
+      std::fprintf(stderr, "[cinematic] shader/target creation failed\n");
+      return;
+    }
+    AbstractPipelineConfig config = {};
+    config.vertex_shader = g_shader_cache->GetScreenQuadVertexShader();
+    config.geometry_shader = layers > 1 ? g_shader_cache->GetTexcoordGeometryShader() : nullptr;
+    config.pixel_shader = pixel_shader.get();
+    config.rasterization_state = RenderState::GetNoCullRasterizationState(PrimitiveType::Triangles);
+    config.depth_state = RenderState::GetNoDepthTestingDepthState();
+    config.blending_state = RenderState::GetNoBlendingBlendState();
+    config.framebuffer_state = RenderState::GetColorFramebufferState(format);
+    config.usage = AbstractPipelineUsage::Utility;
+    m_cine_pipeline = g_gfx->CreatePipeline(config);
+    m_cine_format = format;
+    std::fprintf(stderr, "[cinematic] pipeline %s (level %d)\n",
+                 m_cine_pipeline ? "ready" : "failed", level);
+  }
+  if (!m_cine_pipeline || !m_cine_framebuffer)
+    return;
+
+  // Level 1 "vivid": light bloom and grade, no haze. Level 2 "cinematic".
+  const bool cinematic = level >= 2;
+  const float resolution_scale = static_cast<float>(height) / 528.0f;
+  const float far_is_one = g_backend_info.bSupportsReversedDepthRange ? 1.0f : 0.0f;
+  struct Uniforms
+  {
+    float params[4];
+    float params2[4];
+  } uniforms = {{1.0f / static_cast<float>(width), 1.0f / static_cast<float>(height),
+                 (cinematic ? 14.0f : 10.0f) * resolution_scale, cinematic ? 0.9f : 0.5f},
+                {far_is_one, 0.0f /* haze: depth scale still to be measured */, cinematic ? 0.85f : 0.5f,
+                 cinematic ? 1.12f : 1.15f}};
+
+  const MathUtil::Rectangle<int> rect = m_efb_color_texture->GetRect();
+  AbstractTexture* const depth = ResolveEFBDepthTexture(rect, true);
+  g_gfx->BeginUtilityDrawing();
+  m_efb_color_texture->FinishedRendering();
+  m_efb_depth_texture->FinishedRendering();
+  g_gfx->SetAndDiscardFramebuffer(m_cine_framebuffer.get());
+  g_gfx->SetViewportAndScissor(rect);
+  g_gfx->SetPipeline(m_cine_pipeline.get());
+  g_gfx->SetTexture(0, m_efb_color_texture.get());
+  g_gfx->SetTexture(1, depth);
+  g_gfx->SetSamplerState(0, RenderState::GetLinearSamplerState());
+  g_gfx->SetSamplerState(1, RenderState::GetPointSamplerState());
+  g_vertex_manager->UploadUtilityUniforms(&uniforms, sizeof(uniforms));
+  g_gfx->Draw(0, 3);
+  for (u32 layer = 0; layer < layers; layer++)
+    m_efb_color_texture->CopyRectangleFromTexture(m_cine_texture.get(), rect, layer, 0, rect,
+                                                  layer, 0);
+  g_gfx->EndUtilityDrawing();
+}
+
 void FramebufferManager::BindEFBFramebuffer()
 {
   g_gfx->SetFramebuffer(m_efb_framebuffer.get());

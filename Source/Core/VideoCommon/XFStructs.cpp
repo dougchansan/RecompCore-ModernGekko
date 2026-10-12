@@ -168,6 +168,13 @@ static void XFRegWritten(Core::System& system, XFStateManager& xf_state_manager,
                                               g_ambient_occlusion.load(std::memory_order_relaxed);
         if (ssao > 0)
           g_framebuffer_manager->ApplyAmbientOcclusionOnce(ssao);
+        // Cinematic look after occlusion (test hook MODERNGEKKO_CINE=1 vivid, 2 cinematic).
+        static const int cine = [] {
+          const char* v = std::getenv("MODERNGEKKO_CINE");
+          return v ? std::clamp(std::atoi(v), 0, 2) : 0;
+        }();
+        if (cine > 0)
+          g_framebuffer_manager->ApplyCinematicOnce(cine);
         if (const int dof = g_depth_of_field_level.load(std::memory_order_relaxed); dof > 0)
           g_framebuffer_manager->ApplyDepthOfFieldOnce(dof);
       }

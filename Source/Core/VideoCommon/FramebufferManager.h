@@ -209,6 +209,7 @@ public:
   {
     m_dof_applied_this_frame = false;
     m_ao_applied_this_frame = false;
+    m_cine_applied_this_frame = false;
     if (m_dof_frames_idle < 1000)
       m_dof_frames_idle++;
   }
@@ -224,7 +225,24 @@ public:
     }
   }
 
+  // Bloom, distance haze and filmic grading on the 3D image, after ambient
+  // occlusion. level 1 vivid, 2 cinematic.
+  void ApplyCinematic(int level);
+  void ApplyCinematicOnce(int level)
+  {
+    if (!m_cine_applied_this_frame)
+    {
+      m_cine_applied_this_frame = true;
+      ApplyCinematic(level);
+    }
+  }
+
 private:
+  std::unique_ptr<AbstractPipeline> m_cine_pipeline;
+  std::unique_ptr<AbstractTexture> m_cine_texture;
+  std::unique_ptr<AbstractFramebuffer> m_cine_framebuffer;
+  AbstractTextureFormat m_cine_format = AbstractTextureFormat::Undefined;
+  bool m_cine_applied_this_frame = false;
   std::unique_ptr<AbstractPipeline> m_ao_pipeline;
   std::unique_ptr<AbstractTexture> m_ao_texture;
   std::unique_ptr<AbstractFramebuffer> m_ao_framebuffer;
