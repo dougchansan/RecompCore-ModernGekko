@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "VideoCommon/RenderState.h"
+#include "VideoCommon/VideoConfig.h"
 
 #include <algorithm>
 #include <array>
@@ -193,6 +194,14 @@ void BlendingState::Generate(const BPMemory& bp)
   {
     src_factor_alpha = SrcBlendFactor::Zero;
     dst_factor_alpha = DstBlendFactor::One;
+  }
+  if (!target_has_alpha && color_update && !logic_op_enable &&
+      g_object_ids.load(std::memory_order_relaxed))
+  {
+    alpha_update = true;
+    subtract_alpha = false;
+    src_factor_alpha = SrcBlendFactor::One;
+    dst_factor_alpha = DstBlendFactor::Zero;
   }
 }
 

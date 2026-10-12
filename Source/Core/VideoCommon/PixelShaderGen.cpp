@@ -1822,6 +1822,10 @@ static void WriteColor(ShaderCode& out, APIType api_type, const pixel_shader_uid
     if (use_dual_source)
       out.Write("\tocol1 = float4(0.0, 0.0, 0.0, float(prev.a) / 255.0);\n");
   }
+  // Object ID (EFB formats without alpha): written to the otherwise unused
+  // alpha channel for post effects; blending reads ocol1 (dual source).
+  if (!uid_data->rgba6_format && use_dual_source)
+    out.Write("\tocol0.a = " I_WORLD_TINT ".a;\n");
 }
 
 static void WriteBlend(ShaderCode& out, const pixel_shader_uid_data* uid_data)

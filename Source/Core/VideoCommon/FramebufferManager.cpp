@@ -27,6 +27,7 @@
 #include "VideoCommon/Present.h"
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/VideoCommon.h"
+#include "VideoCommon/BPMemory.h"
 #include "VideoCommon/VideoConfig.h"
 
 // Maximum number of pixels poked in one batch * 6
@@ -538,7 +539,12 @@ void FramebufferManager::ApplyAmbientOcclusion(int level)
     float params2[4];
   } uniforms = {{1.0f / static_cast<float>(width), 1.0f / static_cast<float>(height),
                  kRadius[index] * resolution_scale, kStrength[index]},
-                {far_is_one, 0, 0, 0}};
+                {far_is_one,
+                 g_object_ids.load(std::memory_order_relaxed) &&
+                         bpmem.zcontrol.pixel_format != PixelFormat::RGBA6_Z24 ?
+                     1.0f :
+                     0.0f,
+                 0, 0}};
 
   const MathUtil::Rectangle<int> rect = m_efb_color_texture->GetRect();
   AbstractTexture* const depth = ResolveEFBDepthTexture(rect, true);

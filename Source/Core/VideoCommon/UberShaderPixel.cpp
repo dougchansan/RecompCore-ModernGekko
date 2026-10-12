@@ -1200,6 +1200,9 @@ ShaderCode GenPixelShader(APIType api_type, const ShaderHostConfig& host_config,
     out.Write("  else\n"
               "    ocol0.a = float(TevResult.a >> 2) / 63.0;\n"
               "  \n");
+    if (use_dual_source)
+      out.Write("  if (!bpmem_rgba6_format)\n"
+                "    ocol0.a = " I_WORLD_TINT ".a;  // object ID (no EFB alpha)\n");
 
     if (use_dual_source || use_framebuffer_fetch)
     {

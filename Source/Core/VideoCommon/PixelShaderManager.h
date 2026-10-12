@@ -21,6 +21,10 @@ public:
   void SetConstants();  // sets pixel shader constants
   // Camera mod marker: the 3D world is drawing (time-of-day grade applies).
   void SetWorldTintActive(bool active);
+  // Object ID for the following draws (0 = untagged/world), from the camera
+  // mod's marker; written to EFB alpha for post effects.
+  void SetObjectId(u32 id) { m_object_id = id; }
+  u32 m_object_id = 0;
 
   // constant management
   // Some of these functions grab the constant values from global state,

@@ -166,6 +166,7 @@ static void XFRegWritten(Core::System& system, XFStateManager& xf_state_manager,
         }();
         const int ssao = ssao_override >= 0 ? ssao_override :
                                               g_ambient_occlusion.load(std::memory_order_relaxed);
+        g_object_ids.store(ssao > 0, std::memory_order_relaxed);
         if (ssao > 0)
           g_framebuffer_manager->ApplyAmbientOcclusionOnce(ssao);
         // Cinematic look after occlusion (test hook MODERNGEKKO_CINE=1 vivid, 2 cinematic).
@@ -675,6 +676,19 @@ void LoadXFReg(u16 base_address, u8 transfer_size, const u8* data)
     {
       g_vertex_manager->Flush();
       pixel_shader_manager.SetWorldTintActive(active);
+    }
+    return;
+  }
+  // The camera mod's object-ID marker (0x7E20): the ID of the model about to
+  // draw, 0 after it (see PixelShaderManager::SetObjectId).
+  if (base_address == 0x7E20)
+  {
+    const u32 id = transfer_size >= 1 ? Common::swap32(data) & 0xFF : 0;
+    auto& pixel_shader_manager = Core::System::GetInstance().GetPixelShaderManager();
+    if (id != pixel_shader_manager.m_object_id)
+    {
+      g_vertex_manager->Flush();
+      pixel_shader_manager.SetObjectId(id);
     }
     return;
   }

@@ -92,6 +92,9 @@ void PixelShaderManager::SetConstants()
     // Time-of-day grade: only while the camera mod marks the 3D world as
     // drawing (XF marker), so 2D menus and HUD keep their colors.
     float4 tint = {1.0f, 1.0f, 1.0f, 1.0f};
+    // Fourth channel: the object ID written to EFB alpha (1.0 = untagged).
+    if (m_object_id != 0)
+      tint[3] = static_cast<float>(m_object_id & 0xFF) / 255.0f;
     if (m_world_tint_active)
     {
       for (int i = 0; i < 3; ++i)

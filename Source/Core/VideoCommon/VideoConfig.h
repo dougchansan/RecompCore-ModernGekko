@@ -433,6 +433,9 @@ extern std::atomic<int> g_world_tint_milli[3];
 extern std::atomic<int> g_soft_shadows;
 // Screen-space ambient occlusion: 0 off, 1 low, 2 medium, 3 high (pause menu).
 extern std::atomic<int> g_ambient_occlusion;
+// Object IDs in the EFB alpha channel (formats without alpha only): set
+// while a post effect reads them (see PixelShaderManager::SetObjectId).
+extern std::atomic<bool> g_object_ids;
 // Exclusive fullscreen wanted right now (display mode Exclusive, fullscreen and
 // focused); the presenter applies changes on the GPU thread.
 extern std::atomic<bool> g_exclusive_fullscreen_wanted;
