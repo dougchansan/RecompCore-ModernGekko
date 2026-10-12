@@ -37,6 +37,23 @@ u32 s_stamps = 0;  // valid stamps in a row (2 = prev and cur usable)
 bool s_stamped_this_frame = false;
 u32 s_unstamped_frames = 0;
 
+// Each game frame restarts the prediction from its new camera. The previous
+// frame's prediction and the new one disagree a little (the game's turn speed
+// follows its own frame time, the look acceleration ramp, the stick sample it
+// read), and showing that difference at once is a visible jump at full turn
+// speed, the more often the more in-between frames (240). The difference is
+// kept as an offset that fades out over a few frames instead.
+struct Smoothing
+{
+  bool valid = false;
+  CameraStamp base;          // the stamp the offset was measured against
+  TimePoint from{};          // when the offset was measured (a display time)
+  double yaw = 0, pitch = 0; // offset at `from`
+};
+Smoothing s_smooth;
+constexpr double kSmoothSeconds = 0.035;  // fade time constant
+constexpr double kSmoothMax = 0.3;        // radians; larger is a cut, not drift
+
 std::atomic<float> s_look_x{0}, s_look_y{0};
 std::atomic<bool> s_enabled{[] {
   const char* env = std::getenv("MODERNGEKKO_CAMERA_WARP");
@@ -248,6 +265,9 @@ void Stamp(u32 words, const u8* be_data)
                    s_look_x.load(std::memory_order_relaxed), s_look_y.load(std::memory_order_relaxed));
     }
   }
+  if (s_trace == 4)
+    std::fprintf(stderr, "[camwarp4] S t=%.6f yaw=%.6f speed=%.3f mode=%u\n",
+                 Seconds(stamp.time.time_since_epoch()), stamp.yaw, stamp.speed, stamp.mode);
   const bool continues = s_stamps > 0 && s_cur.mode == stamp.mode && stamp.mode != 0;
   s_prev = s_cur;
   s_cur = stamp;
@@ -301,6 +321,7 @@ void Reset()
   s_stamped_this_frame = false;
   s_unstamped_frames = 0;
   s_prev = s_cur = {};
+  s_smooth = {};
 }
 
 namespace
@@ -368,6 +389,36 @@ bool GetLayerMatrices(u32 layers, const std::array<std::array<float, 4>, 4>& pro
   const bool orbit = Orbiting(s_cur) && Orbiting(s_prev);
   const double pitch_min = orbit ? std::min<double>(kOrbitPitchMin, s_cur.pitch) : -kPitchLimit;
   const double pitch_max = orbit ? std::max<double>(kOrbitPitchMax, s_cur.pitch) : kPitchLimit;
+  const auto fade = [](double seconds_after) {
+    return std::exp(-std::max(0.0, seconds_after) / kSmoothSeconds);
+  };
+  if (!s_smooth.valid || s_smooth.base.time != s_cur.time)
+  {
+    double yaw_off = 0, pitch_off = 0;
+    if (s_smooth.valid && s_smooth.base.mode == s_cur.mode)
+    {
+      // What the previous prediction would show at `first`, against the new one.
+      const CameraStamp& b = s_smooth.base;
+      const double old_ahead = std::clamp(Seconds(first - b.time), 0.0, 0.1);
+      const double new_ahead = std::clamp(Seconds(first - s_cur.time), 0.0, 0.1);
+      const double kept = fade(Seconds(first - s_smooth.from));
+      const double old_yaw = b.yaw - look_x * b.speed * old_ahead + s_smooth.yaw * kept;
+      const double new_yaw = s_cur.yaw - look_x * s_cur.speed * new_ahead;
+      const double old_pitch = b.pitch + look_y * b.speed * old_ahead * invert + s_smooth.pitch * kept;
+      const double new_pitch = s_cur.pitch + look_y * s_cur.speed * new_ahead * invert;
+      yaw_off = std::remainder(old_yaw - new_yaw, 2 * kPi);
+      pitch_off = old_pitch - new_pitch;
+      if (std::abs(yaw_off) > kSmoothMax || std::abs(pitch_off) > kSmoothMax)
+        yaw_off = pitch_off = 0;
+    }
+    s_smooth.valid = true;
+    s_smooth.base = s_cur;
+    s_smooth.from = first;
+    s_smooth.yaw = yaw_off;
+    s_smooth.pitch = pitch_off;
+  }
+  const double smooth_from = Seconds(s_smooth.from - s_cur.time);
+
   // The orbit center (the player) keeps its last velocity while extrapolated.
   std::array<double, 3> center{}, velocity{};
   Mat4 content_inv{};
@@ -397,9 +448,12 @@ bool GetLayerMatrices(u32 layers, const std::array<std::array<float, 4>, 4>& pro
     const double content_yaw = s_cur.yaw;
     const double content_pitch = s_cur.pitch;
     // Target: the current frame's camera advanced by the stick as the mod would.
-    const double target_yaw = s_cur.yaw - look_x * s_cur.speed * ahead + s_test_yaw;
+    const double kept = fade(shown - smooth_from);
+    const double target_yaw =
+        s_cur.yaw - look_x * s_cur.speed * ahead + s_smooth.yaw * kept + s_test_yaw;
     const double target_pitch =
-        std::clamp(s_cur.pitch + look_y * s_cur.speed * ahead * invert, pitch_min, pitch_max);
+        std::clamp(s_cur.pitch + look_y * s_cur.speed * ahead * invert + s_smooth.pitch * kept,
+                   pitch_min, pitch_max);
     Mat4 delta;
     if (orbit)
     {
@@ -413,6 +467,14 @@ bool GetLayerMatrices(u32 layers, const std::array<std::array<float, 4>, 4>& pro
     {
       delta = Multiply(ViewRotation(target_yaw, target_pitch),
                        Transpose3(ViewRotation(content_yaw, content_pitch)));
+    }
+    if (s_trace == 4)
+    {
+      // Every layer: when it is shown and the yaw it shows (jitter analysis).
+      const auto at = first + std::chrono::duration_cast<DT>(std::chrono::duration<double>(order * step));
+      std::fprintf(stderr, "[camwarp4] L k=%u t=%.6f yaw=%.6f cur=%.6f ct=%.6f speed=%.3f look=%.3f\n", k,
+                   Seconds(at.time_since_epoch()), target_yaw, s_cur.yaw,
+                   Seconds(s_cur.time.time_since_epoch()), s_cur.speed, look_x);
     }
     if (s_trace && k == 1)
     {
