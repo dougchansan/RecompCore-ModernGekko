@@ -809,6 +809,8 @@ std::string GenerateAmbientOcclusionPixelShader()
                "      float qa = INVDEPTH(float3(v_tex0.xy + o, v_tex0.z));\n"
                "      float qb = INVDEPTH(float3(v_tex0.xy - o, v_tex0.z));\n"
                "      float bend = (0.5 * (qa + qb) - q0) / q0;\n"
+               "      float2 pa = v_tex0.xy + o, pb = v_tex0.xy - o;\n"
+               "      if (any(lessThan(min(pa, pb), float2(0.0, 0.0))) || any(greaterThan(max(pa, pb), float2(1.0, 1.0)))) bend = 0.0;\n"
                "      occlusion += 2.0 * clamp((bend - 0.002) / 0.02, 0.0, 1.0) *\n"
                "                   (1.0 - clamp((bend - 0.10) / 0.10, 0.0, 1.0));\n"
                "    }}\n",
@@ -876,7 +878,7 @@ std::string GenerateCinematicPixelShader()
              "  c = mix(float3(luma, luma, luma), c, params2.w);\n"
              "  c *= mix(float3(1.0, 1.0, 1.0), float3(1.04, 1.0, 0.95), smoothstep(0.5, 1.0, luma) * params2.z);\n"
              "  float2 d = v_tex0.xy - float2(0.5, 0.5);\n"
-             "  c *= 1.0 - 0.18 * params2.z * dot(d, d);\n"
+             
              "  ocol0 = float4(clamp(c, 0.0, 1.0), colour.a);\n"
              "}}\n");
   return code.GetBuffer();
