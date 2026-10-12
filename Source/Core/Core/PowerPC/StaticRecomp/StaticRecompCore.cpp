@@ -460,6 +460,20 @@ void StaticRecompCore::LoadModule()
                    missing);
       m_hook_aware_module = false;
     }
+    // Live flags (dolrecomp_hook_live, in the list's order): only the hooks a
+    // loaded mod uses go through the dispatcher; the rest stay direct calls.
+    auto* live = static_cast<u8*>(m_library.GetSymbolAddress("dolrecomp_hook_live"));
+    if (baked && !missing && live)
+    {
+      u32 used = 0;
+      for (std::size_t i = 0; i < listed.size(); ++i)
+      {
+        live[i] = IsHostCallAddress(listed[i]) ? 1 : 0;
+        used += live[i];
+      }
+      std::fprintf(stderr, "[staticrecomp] hook-aware module: %u of %zu built-in hooks in use\n",
+                   used, listed.size());
+    }
   }
   m_native_region_blocked.clear();
   m_effective_chunk_hashes.assign(desc->chunk_hashes,
