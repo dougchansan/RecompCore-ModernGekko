@@ -64,4 +64,15 @@ bool GetViewDelta(std::array<std::array<float, 4>, 3>* out);
 
 // Forget stamps (state loads, video restarts).
 void Reset();
+
+// The latest camera stamp, for the developer info overlay.
+struct DebugInfo
+{
+  bool active = false;  // stamps arriving (the camera mod owns the camera)
+  u32 mode = 0;         // kModeFirstPerson / kModeFree / kModeOrbit
+  float yaw = 0, pitch = 0, speed = 0;
+  std::array<double, 3> eye{};
+  double correction_degrees = 0;  // last prediction correction being faded out
+};
+DebugInfo GetDebugInfo();
 }  // namespace CameraWarp

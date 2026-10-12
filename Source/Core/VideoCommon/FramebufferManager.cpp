@@ -544,7 +544,7 @@ void FramebufferManager::ApplyAmbientOcclusion(int level)
                          bpmem.zcontrol.pixel_format != PixelFormat::RGBA6_Z24 ?
                      1.0f :
                      0.0f,
-                 0, 0}};
+                 static_cast<float>(g_debug_view.load(std::memory_order_relaxed)), 0}};
 
   const MathUtil::Rectangle<int> rect = m_efb_color_texture->GetRect();
   AbstractTexture* const depth = ResolveEFBDepthTexture(rect, true);

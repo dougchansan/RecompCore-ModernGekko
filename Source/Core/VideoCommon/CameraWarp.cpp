@@ -350,6 +350,20 @@ bool GetViewDelta(std::array<std::array<float, 4>, 3>* out)
   return true;
 }
 
+DebugInfo GetDebugInfo()
+{
+  DebugInfo info;
+  const CameraStamp cur = s_cur;
+  info.active = Active(Clock::now());
+  info.mode = cur.mode;
+  info.yaw = cur.yaw;
+  info.pitch = cur.pitch;
+  info.speed = cur.speed;
+  info.eye = cur.eye;
+  info.correction_degrees = s_smooth.yaw * 180.0 / kPi;
+  return info;
+}
+
 bool GetLayerMatrices(u32 layers, const std::array<std::array<float, 4>, 4>& projection,
                       const std::array<float, 4>& pixel_center, bool clip_control,
                       std::array<std::array<float, 4>, 16>* out)

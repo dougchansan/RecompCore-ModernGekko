@@ -438,6 +438,9 @@ extern std::atomic<int> g_ambient_occlusion;
 extern std::atomic<bool> g_object_ids;
 // Visual style post effect on the 3D image: 0 off, 1 vivid, 2 cinematic.
 extern std::atomic<int> g_visual_style;
+// Developer debug view over the scene: 0 off, 1 occlusion mask, 2 depth,
+// 3 object IDs. Pause menu > Developer; MODERNGEKKO_SSAO_DEBUG sets the start.
+extern std::atomic<int> g_debug_view;
 // Exclusive fullscreen wanted right now (display mode Exclusive, fullscreen and
 // focused); the presenter applies changes on the GPU thread.
 extern std::atomic<bool> g_exclusive_fullscreen_wanted;

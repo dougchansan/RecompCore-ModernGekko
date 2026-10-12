@@ -164,8 +164,11 @@ static void XFRegWritten(Core::System& system, XFStateManager& xf_state_manager,
           const char* v = std::getenv("MODERNGEKKO_SSAO");
           return v ? std::clamp(std::atoi(v), 0, 3) : -1;
         }();
-        const int ssao = ssao_override >= 0 ? ssao_override :
-                                              g_ambient_occlusion.load(std::memory_order_relaxed);
+        int ssao = ssao_override >= 0 ? ssao_override :
+                                        g_ambient_occlusion.load(std::memory_order_relaxed);
+        // The developer debug views come out of the occlusion pass.
+        if (ssao == 0 && g_debug_view.load(std::memory_order_relaxed) > 0)
+          ssao = 2;
         g_object_ids.store(ssao > 0, std::memory_order_relaxed);
         if (ssao > 0)
           g_framebuffer_manager->ApplyAmbientOcclusionOnce(ssao);

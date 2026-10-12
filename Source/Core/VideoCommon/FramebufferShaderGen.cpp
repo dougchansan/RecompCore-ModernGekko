@@ -827,14 +827,15 @@ std::string GenerateAmbientOcclusionPixelShader()
              "  float object_id = floor(colour.a * 255.0 + 0.5);\n"
              "  if (params2.y > 0.5 && object_id >= 64.0 && object_id < 128.0) ao = 1.0;\n"
              "  ocol0 = float4(colour.rgb * ao, colour.a);\n");
-  // MODERNGEKKO_SSAO_DEBUG=3: object IDs (red = character, green = object, grey = world).
-  if (const char* debug = std::getenv("MODERNGEKKO_SSAO_DEBUG"); debug && debug[0] == '3')
-    code.Write("  ocol0 = object_id >= 128.0 && object_id < 255.0 ? float4(0.1, 0.9, 0.2, 1.0) : object_id >= 64.0 && object_id < 128.0 ? float4(0.95, 0.2, 0.2, 1.0) : float4(ao * 0.6, ao * 0.6, ao * 0.6, 1.0);\n");
-  if (const char* debug = std::getenv("MODERNGEKKO_SSAO_DEBUG"); debug && debug[0] == '1')
-    code.Write("  ocol0 = float4(ao, ao, ao, 1.0);\n");
-  // MODERNGEKKO_SSAO_DEBUG=2: inverse depth as -log10(q)/6 in red (0 = near, 1 = q of 1e-6), raw depth in green.
-  if (const char* debug = std::getenv("MODERNGEKKO_SSAO_DEBUG"); debug && debug[0] == '2')
-    code.Write("  ocol0 = float4(clamp(-log(max(q0, 1e-9)) / (6.0 * 2.302585), 0.0, 1.0), texture(samp1, v_tex0).r, 0.0, 1.0);\n");
+  // Debug views (params2.z, g_debug_view): 1 the occlusion mask; 2 inverse
+  // depth as -log10(q)/6 in red (0 = near, 1 = q of 1e-6), raw depth in green;
+  // 3 object IDs (red = character, green = object, grey = world).
+  code.Write("  if (params2.z > 2.5)\n"
+             "    ocol0 = object_id >= 128.0 && object_id < 255.0 ? float4(0.1, 0.9, 0.2, 1.0) : object_id >= 64.0 && object_id < 128.0 ? float4(0.95, 0.2, 0.2, 1.0) : float4(ao * 0.6, ao * 0.6, ao * 0.6, 1.0);\n"
+             "  else if (params2.z > 1.5)\n"
+             "    ocol0 = float4(clamp(-log(max(q0, 1e-9)) / (6.0 * 2.302585), 0.0, 1.0), texture(samp1, v_tex0).r, 0.0, 1.0);\n"
+             "  else if (params2.z > 0.5)\n"
+             "    ocol0 = float4(ao, ao, ao, 1.0);\n");
   code.Write("}}\n");
   return code.GetBuffer();
 }
