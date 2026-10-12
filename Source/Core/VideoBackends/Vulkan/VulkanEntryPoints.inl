@@ -73,6 +73,7 @@ VULKAN_INSTANCE_ENTRY_POINT(vkQueueInsertDebugUtilsLabelEXT, false)
 VULKAN_INSTANCE_ENTRY_POINT(vkSetDebugUtilsObjectTagEXT, false)
 VULKAN_INSTANCE_ENTRY_POINT(vkSubmitDebugUtilsMessageEXT, false)
 VULKAN_INSTANCE_ENTRY_POINT(vkGetPhysicalDeviceProperties2, false)
+VULKAN_INSTANCE_ENTRY_POINT(vkGetPhysicalDeviceFeatures2, false)
 VULKAN_INSTANCE_ENTRY_POINT(vkGetPhysicalDeviceSurfaceCapabilities2KHR, false)
 VULKAN_INSTANCE_ENTRY_POINT(vkSetDebugUtilsObjectNameEXT, false)
 
@@ -209,6 +210,12 @@ VULKAN_DEVICE_ENTRY_POINT(vkGetBufferMemoryRequirements2, false)
 VULKAN_DEVICE_ENTRY_POINT(vkGetImageMemoryRequirements2, false)
 VULKAN_DEVICE_ENTRY_POINT(vkBindBufferMemory2, false)
 VULKAN_DEVICE_ENTRY_POINT(vkBindImageMemory2, false)
+// NVIDIA Reflex (VK_NV_low_latency2, VKLowLatency.cpp) and its timeline semaphore wait.
+VULKAN_DEVICE_ENTRY_POINT(vkWaitSemaphores, false)
+VULKAN_DEVICE_ENTRY_POINT(vkSetLatencySleepModeNV, false)
+VULKAN_DEVICE_ENTRY_POINT(vkLatencySleepNV, false)
+VULKAN_DEVICE_ENTRY_POINT(vkSetLatencyMarkerNV, false)
+VULKAN_DEVICE_ENTRY_POINT(vkGetLatencyTimingsNV, false)
 
 #ifdef SUPPORTS_VULKAN_EXCLUSIVE_FULLSCREEN
 VULKAN_DEVICE_ENTRY_POINT(vkAcquireFullScreenExclusiveModeEXT, false)

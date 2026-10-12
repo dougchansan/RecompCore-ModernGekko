@@ -15,6 +15,7 @@
 
 #include "VideoBackends/Vulkan/CommandBufferManager.h"
 #include "VideoBackends/Vulkan/ObjectCache.h"
+#include "VideoBackends/Vulkan/VKLowLatency.h"
 #include "VideoBackends/Vulkan/VKTexture.h"
 #include "VideoBackends/Vulkan/VulkanContext.h"
 #include "VideoCommon/Present.h"
@@ -397,6 +398,8 @@ bool SwapChain::CreateSwapChain()
 
     auto platform_info = g_vulkan_context->GetPlatformExclusiveFullscreenInfo(m_wsi);
     fullscreen_support.pNext = &platform_info;
+    if (void* latency = LowLatency::SwapChainCreateInfo(swap_chain_info.pNext))
+      swap_chain_info.pNext = latency;
 
     res = vkCreateSwapchainKHR(g_vulkan_context->GetDevice(), &swap_chain_info, nullptr,
                                &m_swap_chain);
@@ -413,6 +416,8 @@ bool SwapChain::CreateSwapChain()
 
   if (m_swap_chain == VK_NULL_HANDLE)
   {
+    if (void* latency = LowLatency::SwapChainCreateInfo(swap_chain_info.pNext))
+      swap_chain_info.pNext = latency;
     res = vkCreateSwapchainKHR(g_vulkan_context->GetDevice(), &swap_chain_info, nullptr,
                                &m_swap_chain);
   }
@@ -421,10 +426,12 @@ bool SwapChain::CreateSwapChain()
     LOG_VULKAN_ERROR(res, "vkCreateSwapchainKHR failed: ");
     return false;
   }
+  LowLatency::OnSwapChainCreated(m_swap_chain);
 
   // Now destroy the old swap chain, since it's been recreated.
   // We can do this immediately since all work should have been completed before calling resize.
   if (old_swap_chain != VK_NULL_HANDLE)
+    LowLatency::OnSwapChainDestroyed(old_swap_chain);
     vkDestroySwapchainKHR(g_vulkan_context->GetDevice(), old_swap_chain, nullptr);
 
   m_width = size.width;
@@ -511,6 +518,7 @@ void SwapChain::DestroySwapChain()
   if (m_current_fullscreen_state)
     SetFullscreenState(false);
 
+  LowLatency::OnSwapChainDestroyed(m_swap_chain);
   vkDestroySwapchainKHR(g_vulkan_context->GetDevice(), m_swap_chain, nullptr);
   m_swap_chain = VK_NULL_HANDLE;
 }

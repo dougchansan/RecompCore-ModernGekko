@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "VideoBackends/Vulkan/VKGfx.h"
+#include "VideoBackends/Vulkan/VKLowLatency.h"
 
 #include <cstddef>
 #include <cstdio>
@@ -322,13 +323,16 @@ void VKGfx::PresentBackbuffer()
     // Because this final command buffer is rendering to the swap chain, we need to wait for
     // the available semaphore to be signaled before executing the buffer. This final submission
     // can happen off-thread in the background while we're preparing the next frame.
+    const u64 present_id = LowLatency::BeginPresent();
     g_command_buffer_mgr->SubmitCommandBuffer(true, false, true, m_swap_chain->GetSwapChain(),
-                                              m_swap_chain->GetCurrentImageIndex());
+                                              m_swap_chain->GetCurrentImageIndex(), present_id);
   }
   else
   {
     g_command_buffer_mgr->SubmitCommandBuffer(true, false, true);
   }
+  // NVIDIA Reflex: the next frame starts here (sleeps when the mode is on).
+  LowLatency::FrameStart();
 
   // New cmdbuffer, so invalidate state.
   StateTracker::GetInstance()->InvalidateCachedState();

@@ -79,7 +79,7 @@ public:
   void SubmitCommandBuffer(bool submit_on_worker_thread, bool wait_for_completion,
                            bool advance_to_next_frame = false,
                            VkSwapchainKHR present_swap_chain = VK_NULL_HANDLE,
-                           uint32_t present_image_index = 0xFFFFFFFF);
+                           uint32_t present_image_index = 0xFFFFFFFF, u64 present_id = 0);
 
   // Was the last present submitted to the queue a failure? If so, we must recreate our swapchain.
   bool CheckLastPresentFail() { return m_last_present_failed.TestAndClear(); }
@@ -101,7 +101,7 @@ private:
 
   void WaitForCommandBufferCompletion(u32 command_buffer_index);
   void SubmitCommandBuffer(u32 command_buffer_index, VkSwapchainKHR present_swap_chain,
-                           u32 present_image_index);
+                           u32 present_image_index, u64 present_id);
   void BeginCommandBuffer();
 
   VkDescriptorPool CreateDescriptorPool(u32 descriptor_sizes);
@@ -151,6 +151,7 @@ private:
     VkSwapchainKHR present_swap_chain;
     u32 present_image_index;
     u32 command_buffer_index;
+    u64 present_id;  // NVIDIA Reflex frame (0 = none)
   };
   Common::WorkQueueThreadSP<PendingCommandBufferSubmit> m_submit_thread;
   std::vector<VkSemaphore> m_present_semaphores = {};

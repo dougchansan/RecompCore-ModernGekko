@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "VideoBackends/Vulkan/VulkanContext.h"
+#include "VideoBackends/Vulkan/VKLowLatency.h"
 
 #include <algorithm>
 #include <array>
@@ -134,6 +135,7 @@ VulkanContext::~VulkanContext()
 {
   if (m_allocator != VK_NULL_HANDLE)
     vmaDestroyAllocator(m_allocator);
+  LowLatency::Shutdown();
   if (m_device != VK_NULL_HANDLE)
     vkDestroyDevice(m_device, nullptr);
 
@@ -668,6 +670,17 @@ bool VulkanContext::SelectDeviceExtensions(bool enable_surface)
   AddExtension(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME, false);
   AddExtension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME, false);
 
+  // NVIDIA Reflex (VKLowLatency): needs present IDs as well. Checked against the
+  // device features in CreateDevice.
+  const auto available = [&](const char* name) {
+    return Common::Contains(available_extension_list, std::string_view{name},
+                            &VkExtensionProperties::extensionName);
+  };
+  m_low_latency = enable_surface && available(VK_NV_LOW_LATENCY_2_EXTENSION_NAME) &&
+                  available(VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
+                  AddExtension(VK_KHR_PRESENT_ID_EXTENSION_NAME, false) &&
+                  AddExtension(VK_NV_LOW_LATENCY_2_EXTENSION_NAME, false);
+
   if (!DriverDetails::HasBug(DriverDetails::BUG_BROKEN_DEPTH_CLAMP_CONTROL))
   {
     // Unrestricted depth range is one of the few extensions that changes the behavior
@@ -810,6 +823,27 @@ bool VulkanContext::CreateDevice(VkSurfaceKHR surface, bool enable_validation_la
   VkPhysicalDeviceFeatures device_features = m_device_info.features();
   device_info.pEnabledFeatures = &device_features;
 
+  // Reflex: present IDs and timeline semaphores (core in Vulkan 1.2).
+  VkPhysicalDevicePresentIdFeaturesKHR present_id_features = {
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR};
+  VkPhysicalDeviceTimelineSemaphoreFeatures timeline_features = {
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
+  if (m_low_latency)
+  {
+    VkPhysicalDeviceFeatures2 features2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    InsertIntoChain(&features2, &present_id_features);
+    InsertIntoChain(&features2, &timeline_features);
+    if (m_device_info.apiVersion >= VK_API_VERSION_1_2 && vkGetPhysicalDeviceFeatures2)
+      vkGetPhysicalDeviceFeatures2(m_physical_device, &features2);
+    m_low_latency = present_id_features.presentId && timeline_features.timelineSemaphore;
+    if (m_low_latency)
+    {
+      present_id_features.pNext = const_cast<void*>(device_info.pNext);
+      timeline_features.pNext = &present_id_features;
+      device_info.pNext = &timeline_features;
+    }
+  }
+
   // Enable debug layer on debug builds
   if (enable_validation_layer)
   {
@@ -827,6 +861,8 @@ bool VulkanContext::CreateDevice(VkSurfaceKHR surface, bool enable_validation_la
   // With the device created, we can fill the remaining entry points.
   if (!LoadVulkanDeviceFunctions(m_device))
     return false;
+  if (m_low_latency)
+    LowLatency::Init(m_device);
 
   // Grab the graphics and present queues.
   vkGetDeviceQueue(m_device, m_graphics_queue_family_index, 0, &m_graphics_queue);

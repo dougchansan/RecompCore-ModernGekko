@@ -9,6 +9,7 @@
 #include "Common/Assert.h"
 #include "Common/MsgHandler.h"
 
+#include "VideoBackends/Vulkan/VKLowLatency.h"
 #include "VideoBackends/Vulkan/VulkanContext.h"
 #include "VideoCommon/Constants.h"
 #include "vulkan/vulkan_core.h"
@@ -232,7 +233,7 @@ bool CommandBufferManager::CreateSubmitThread()
 {
   m_submit_thread.Reset("VK submission thread", [this](PendingCommandBufferSubmit submit) {
     SubmitCommandBuffer(submit.command_buffer_index, submit.present_swap_chain,
-                        submit.present_image_index);
+                        submit.present_image_index, submit.present_id);
     CmdBufferResources& resources = m_command_buffers[submit.command_buffer_index];
     resources.waiting_for_submit.store(false, std::memory_order_release);
   });
@@ -311,7 +312,7 @@ void CommandBufferManager::WaitForCommandBufferCompletion(u32 index)
 void CommandBufferManager::SubmitCommandBuffer(bool submit_on_worker_thread,
                                                bool wait_for_completion, bool advance_to_next_frame,
                                                VkSwapchainKHR present_swap_chain,
-                                               uint32_t present_image_index)
+                                               uint32_t present_image_index, u64 present_id)
 {
   // End the current command buffer.
   CmdBufferResources& resources = GetCurrentCmdBufferResources();
@@ -331,14 +332,16 @@ void CommandBufferManager::SubmitCommandBuffer(bool submit_on_worker_thread,
   {
     resources.waiting_for_submit.store(true, std::memory_order_relaxed);
     // Push to the pending submit queue.
-    m_submit_thread.Push({present_swap_chain, present_image_index, m_current_cmd_buffer});
+    m_submit_thread.Push(
+        {present_swap_chain, present_image_index, m_current_cmd_buffer, present_id});
   }
   else
   {
     WaitForWorkerThreadIdle();
 
     // Pass through to normal submission path.
-    SubmitCommandBuffer(m_current_cmd_buffer, present_swap_chain, present_image_index);
+    SubmitCommandBuffer(m_current_cmd_buffer, present_swap_chain, present_image_index,
+                        present_id);
     if (wait_for_completion)
       WaitForCommandBufferCompletion(m_current_cmd_buffer);
   }
@@ -391,7 +394,7 @@ void CommandBufferManager::SubmitCommandBuffer(bool submit_on_worker_thread,
 
 void CommandBufferManager::SubmitCommandBuffer(u32 command_buffer_index,
                                                VkSwapchainKHR present_swap_chain,
-                                               u32 present_image_index)
+                                               u32 present_image_index, u64 present_id)
 {
   CmdBufferResources& resources = m_command_buffers[command_buffer_index];
 
@@ -425,6 +428,11 @@ void CommandBufferManager::SubmitCommandBuffer(u32 command_buffer_index,
     submit_info.signalSemaphoreCount = 1;
     submit_info.pSignalSemaphores = &m_present_semaphores[present_image_index];
   }
+  // NVIDIA Reflex: the submit that ends a frame carries its present ID.
+  VkLatencySubmissionPresentIdNV latency_id = {VK_STRUCTURE_TYPE_LATENCY_SUBMISSION_PRESENT_ID_NV,
+                                               nullptr, present_id};
+  if (present_id != 0)
+    submit_info.pNext = &latency_id;
 
   VkResult res =
       vkQueueSubmit(g_vulkan_context->GetGraphicsQueue(), 1, &submit_info, resources.fence);
@@ -448,7 +456,8 @@ void CommandBufferManager::SubmitCommandBuffer(u32 command_buffer_index,
                                      &present_image_index,
                                      nullptr};
 
-    m_last_present_result = vkQueuePresentKHR(g_vulkan_context->GetPresentQueue(), &present_info);
+    m_last_present_result =
+        LowLatency::Present(g_vulkan_context->GetPresentQueue(), &present_info, present_id);
     if (m_last_present_result != VK_SUCCESS)
     {
       // VK_ERROR_OUT_OF_DATE_KHR is not fatal, just means we need to recreate our swap chain.

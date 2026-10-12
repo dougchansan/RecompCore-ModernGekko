@@ -122,6 +122,8 @@ public:
 
   // Returns true if exclusive fullscreen is supported for the given surface.
   bool SupportsExclusiveFullscreen(const WindowSystemInfo& wsi, VkSurfaceKHR surface);
+  // VK_NV_low_latency2 + present IDs enabled (NVIDIA Reflex, VKLowLatency).
+  bool SupportsLowLatency() const { return m_low_latency; }
 
   VmaAllocator GetMemoryAllocator() const { return m_allocator; }
 
@@ -155,6 +157,7 @@ private:
   VkDebugUtilsMessengerEXT m_debug_utils_messenger = VK_NULL_HANDLE;
 
   PhysicalDeviceInfo m_device_info;
+  bool m_low_latency = false;
 
   std::vector<std::string> m_device_extensions;
 };

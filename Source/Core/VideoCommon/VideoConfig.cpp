@@ -48,6 +48,12 @@ std::atomic<int> g_soft_shadows{0};
 std::atomic<int> g_ambient_occlusion{0};
 std::atomic<bool> g_object_ids{false};
 std::atomic<int> g_visual_style{0};
+std::atomic<int> g_low_latency_mode{[] {
+  const char* env = std::getenv("MODERNGEKKO_REFLEX");
+  return env ? std::clamp(std::atoi(env), 0, 2) : 0;
+}()};
+std::atomic<bool> g_low_latency_supported{false};
+std::atomic<float> g_low_latency_ms{0.0f};
 std::atomic<int> g_debug_view{[] {
   const char* env = std::getenv("MODERNGEKKO_SSAO_DEBUG");
   return env ? std::clamp(std::atoi(env), 0, 3) : 0;

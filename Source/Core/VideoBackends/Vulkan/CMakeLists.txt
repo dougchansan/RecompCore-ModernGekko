@@ -23,6 +23,8 @@ add_library(videovulkan
   VKShader.h
   VKStreamBuffer.cpp
   VKStreamBuffer.h
+  VKLowLatency.cpp
+  VKLowLatency.h
   VKSwapChain.cpp
   VKSwapChain.h
   VKTexture.cpp

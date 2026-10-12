@@ -441,6 +441,12 @@ extern std::atomic<int> g_visual_style;
 // Developer debug view over the scene: 0 off, 1 occlusion mask, 2 depth,
 // 3 object IDs. Pause menu > Developer; MODERNGEKKO_SSAO_DEBUG sets the start.
 extern std::atomic<int> g_debug_view;
+// NVIDIA Reflex low-latency mode (Vulkan, VK_NV_low_latency2): 0 off, 1 on,
+// 2 on + boost. Supported is set by the backend; ms is the measured mean
+// simulation-start to GPU-render-end latency. MODERNGEKKO_REFLEX sets the start.
+extern std::atomic<int> g_low_latency_mode;
+extern std::atomic<bool> g_low_latency_supported;
+extern std::atomic<float> g_low_latency_ms;
 // Exclusive fullscreen wanted right now (display mode Exclusive, fullscreen and
 // focused); the presenter applies changes on the GPU thread.
 extern std::atomic<bool> g_exclusive_fullscreen_wanted;
