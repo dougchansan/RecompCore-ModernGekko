@@ -11,6 +11,8 @@
        already (GXRuntime marks it visibility("default")); only this version
        script was hiding it on Linux. */
     ppc_set_mem_write_journal;
+    /* Hook-aware modules (make_hook_aware_module.py): StaticRecompCore checks it. */
+    dolrecomp_hook_aware_calls;
   local:
     *;
 };
