@@ -617,7 +617,7 @@ void FramebufferManager::ApplyCinematic(int level)
     float params2[4];
   } uniforms = {{1.0f / static_cast<float>(width), 1.0f / static_cast<float>(height),
                  (cinematic ? 14.0f : 10.0f) * resolution_scale, cinematic ? 0.9f : 0.5f},
-                {far_is_one, 0.0f /* haze: depth scale still to be measured */, cinematic ? 0.85f : 0.5f,
+                {far_is_one, cinematic ? 0.35f : 0.0f, cinematic ? 0.85f : 0.5f,
                  cinematic ? 1.12f : 1.15f}};
 
   const MathUtil::Rectangle<int> rect = m_efb_color_texture->GetRect();

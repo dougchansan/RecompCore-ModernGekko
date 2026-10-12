@@ -794,7 +794,7 @@ std::string GenerateAmbientOcclusionPixelShader()
              "  float4 colour = texture(samp0, v_tex0);\n"
              "  float q0 = INVDEPTH(v_tex0);\n"
              "  float occlusion = 0.0;\n"
-             "  if (q0 > 1e-5)\n"
+             "  if (q0 > 1.2e-4)  // the sky dome sits near q = 5.5e-5\n"
              "  {{\n"
              "    float2 radius = params.xy * params.z;\n");
   // Opposite pairs: inverse depth is affine across a flat surface in screen
@@ -812,7 +812,7 @@ std::string GenerateAmbientOcclusionPixelShader()
                "      float2 pa = v_tex0.xy + o, pb = v_tex0.xy - o;\n"
                "      if (any(lessThan(min(pa, pb), float2(0.0, 0.0))) || any(greaterThan(max(pa, pb), float2(1.0, 1.0)))) bend = 0.0;\n"
                "      occlusion += 2.0 * clamp((bend - 0.002) / 0.02, 0.0, 1.0) *\n"
-               "                   (1.0 - clamp((bend - 0.10) / 0.10, 0.0, 1.0));\n"
+               "                   (1.0 - clamp((bend - 0.05) / 0.05, 0.0, 1.0));\n"
                "    }}\n",
                tap[0], tap[1]);
   }
@@ -825,6 +825,9 @@ std::string GenerateAmbientOcclusionPixelShader()
              "  ocol0 = float4(colour.rgb * ao, colour.a);\n");
   if (const char* debug = std::getenv("MODERNGEKKO_SSAO_DEBUG"); debug && debug[0] == '1')
     code.Write("  ocol0 = float4(ao, ao, ao, 1.0);\n");
+  // MODERNGEKKO_SSAO_DEBUG=2: inverse depth as -log10(q)/6 in red (0 = near, 1 = q of 1e-6), raw depth in green.
+  if (const char* debug = std::getenv("MODERNGEKKO_SSAO_DEBUG"); debug && debug[0] == '2')
+    code.Write("  ocol0 = float4(clamp(-log(max(q0, 1e-9)) / (6.0 * 2.302585), 0.0, 1.0), texture(samp1, v_tex0).r, 0.0, 1.0);\n");
   code.Write("}}\n");
   return code.GetBuffer();
 }
@@ -859,16 +862,19 @@ std::string GenerateCinematicPixelShader()
   {
     for (const auto& p : kRing)
     {
-      code.Write("  {{ float3 s = texture(samp0, float3(v_tex0.xy + float2({:.3f}, {:.3f}) * r, v_tex0.z)).rgb;\n"
-                 "    bloom += max(s - float3(0.75, 0.75, 0.75), float3(0.0, 0.0, 0.0)); }}\n",
+      code.Write("  {{ float3 uv = float3(v_tex0.xy + float2({:.3f}, {:.3f}) * r, v_tex0.z);\n"
+                 "    float3 s = texture(samp0, uv).rgb;\n"
+                 "    float sky = abs(params2.x - texture(samp1, uv).r) > 1.2e-4 ? 1.0 : 0.0;\n"
+                 "    bloom += sky * max(s - float3(0.75, 0.75, 0.75), float3(0.0, 0.0, 0.0)); }}\n",
                  p[0] * scale, p[1] * scale);
     }
   }
-  code.Write("  c += bloom * (params.w * 3.0 / 24.0);\n"
+  code.Write("  float self_q = abs(params2.x - texture(samp1, v_tex0).r);\n"
+             "  c += bloom * (params.w * 3.0 / 24.0) * (self_q > 1.2e-4 ? 1.0 : 0.0);\n"
              // Haze: q = inverse distance (raw depth from the far end); the sky
              // (q ~ 0) is left alone.
              "  float q = abs(params2.x - texture(samp1, v_tex0).r);\n"
-             "  float far_amount = q > 1e-5 ? clamp(1.0 - q * 250.0, 0.0, 1.0) : 0.0;\n"
+             "  float far_amount = q > 1.2e-4 ? clamp((8e-4 - q) / 6e-4, 0.0, 1.0) : 0.0;\n"
              "  c = mix(c, float3(0.86, 0.80, 0.70), far_amount * far_amount * params2.y);\n"
              // Filmic curve (ACES fit) with a little exposure, blended by grade.
              "  float3 x = c * 1.25;\n"
