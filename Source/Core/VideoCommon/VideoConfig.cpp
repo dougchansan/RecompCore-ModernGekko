@@ -47,6 +47,7 @@ std::atomic<int> g_world_tint_milli[3] = {1000, 1000, 1000};
 std::atomic<int> g_soft_shadows{0};
 std::atomic<int> g_ambient_occlusion{0};
 std::atomic<bool> g_object_ids{false};
+std::atomic<int> g_visual_style{0};
 std::atomic<bool> g_exclusive_fullscreen_wanted{false};
 VideoConfig g_Config;
 VideoConfig g_ActiveConfig;

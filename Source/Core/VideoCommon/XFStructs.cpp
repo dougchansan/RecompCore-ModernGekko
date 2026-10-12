@@ -169,11 +169,14 @@ static void XFRegWritten(Core::System& system, XFStateManager& xf_state_manager,
         g_object_ids.store(ssao > 0, std::memory_order_relaxed);
         if (ssao > 0)
           g_framebuffer_manager->ApplyAmbientOcclusionOnce(ssao);
-        // Cinematic look after occlusion (test hook MODERNGEKKO_CINE=1 vivid, 2 cinematic).
-        static const int cine = [] {
+        // Visual style after occlusion: the pause menu's choice; the test hook
+        // MODERNGEKKO_CINE=0..2 overrides it.
+        static const int cine_override = [] {
           const char* v = std::getenv("MODERNGEKKO_CINE");
-          return v ? std::clamp(std::atoi(v), 0, 2) : 0;
+          return v ? std::clamp(std::atoi(v), 0, 2) : -1;
         }();
+        const int cine = cine_override >= 0 ? cine_override :
+                                              g_visual_style.load(std::memory_order_relaxed);
         if (cine > 0)
           g_framebuffer_manager->ApplyCinematicOnce(cine);
         if (const int dof = g_depth_of_field_level.load(std::memory_order_relaxed); dof > 0)

@@ -436,6 +436,8 @@ extern std::atomic<int> g_ambient_occlusion;
 // Object IDs in the EFB alpha channel (formats without alpha only): set
 // while a post effect reads them (see PixelShaderManager::SetObjectId).
 extern std::atomic<bool> g_object_ids;
+// Visual style post effect on the 3D image: 0 off, 1 vivid, 2 cinematic.
+extern std::atomic<int> g_visual_style;
 // Exclusive fullscreen wanted right now (display mode Exclusive, fullscreen and
 // focused); the presenter applies changes on the GPU thread.
 extern std::atomic<bool> g_exclusive_fullscreen_wanted;
