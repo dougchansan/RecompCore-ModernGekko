@@ -5,6 +5,7 @@
 
 #include <span>
 #include <string>
+#include <vector>
 
 #include "Common/Buffer.h"
 #include "Common/CommonTypes.h"
@@ -12,6 +13,10 @@
 namespace Common
 {
 bool LoadPNG(std::span<const u8> input, Common::UniqueBuffer<u8>* data_out, u32* width_out,
+             u32* height_out);
+// The same into a std::vector: for callers built with other libc++ settings,
+// where UniqueBuffer's ABI-tagged template argument does not link (macOS).
+bool LoadPNG(std::span<const u8> input, std::vector<u8>* data_out, u32* width_out,
              u32* height_out);
 
 enum class ImageByteFormat
