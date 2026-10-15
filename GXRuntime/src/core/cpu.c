@@ -43,7 +43,8 @@ static uintptr_t g_dolrecomp_fm_code_lo, g_dolrecomp_fm_code_hi;
    (beyond main RAM, a stray pointer, a page between DBAT updates). Decode
    the faulting instruction - only the forms the cpu.h accessors emit:
    [66] [REX] 8B/89/88 or 0F B6/B7 with a memory ModRM - do the access
-   through external_read/external_write as the ordinary path would, update
+   through the checked accessors, exactly as with fastmem off (a RAM alias
+   the view has not mapped yet still reaches RAM), update
    the destination register and step over the instruction. regs is the 16
    general registers in encoding order (rax, rcx, rdx, rbx, rsp, rbp, rsi,
    rdi, r8..r15). Returns 0 when this is not one of ours. */
@@ -106,10 +107,20 @@ static int dolrecomp_fastmem_emulate(uintptr_t rip, u64* regs[16]) {
             raw = *regs[reg];
         u64 value = size == 8 ? bswap64(raw) : size == 4 ? bswap32((u32)raw)
                   : size == 2 ? bswap16((u16)raw) : (raw & 0xFF);
-        if (cpu->external_write)
-            cpu->external_write(cpu, guest, value, (u8)size);
+        switch (size) {
+        case 1: dolrecomp_mem_write8_slow(cpu, guest, (u8)value); break;
+        case 2: dolrecomp_mem_write16_slow(cpu, guest, (u16)value); break;
+        case 4: dolrecomp_mem_write32_slow(cpu, guest, (u32)value); break;
+        default: dolrecomp_mem_write64_slow(cpu, guest, value); break;
+        }
     } else {
-        u64 value = cpu->external_read ? cpu->external_read(cpu, guest, (u8)size) : 0;
+        u64 value;
+        switch (size) {
+        case 1: value = dolrecomp_mem_read8_slow(cpu, guest); break;
+        case 2: value = dolrecomp_mem_read16_slow(cpu, guest); break;
+        case 4: value = dolrecomp_mem_read32_slow(cpu, guest); break;
+        default: value = dolrecomp_mem_read64_slow(cpu, guest); break;
+        }
         u64 raw = size == 8 ? bswap64(value) : size == 4 ? bswap32((u32)value)
                 : size == 2 ? bswap16((u16)value) : (value & 0xFF);
         *regs[reg] = zext32 ? (u32)raw : raw;
@@ -119,6 +130,13 @@ static int dolrecomp_fastmem_emulate(uintptr_t rip, u64* regs[16]) {
 
 #if defined(_WIN32)
 #include <windows.h>
+static PVOID g_dolrecomp_fm_handler;
+/* The module can be unloaded while the emulator lives on; do not leave a
+   process-wide handler pointing into its unmapped image. */
+static void __attribute__((destructor)) dolrecomp_fastmem_uninstall(void) {
+    if (g_dolrecomp_fm_handler)
+        RemoveVectoredExceptionHandler(g_dolrecomp_fm_handler);
+}
 static LONG CALLBACK dolrecomp_fastmem_fault(EXCEPTION_POINTERS* ep) {
     const EXCEPTION_RECORD* er = ep->ExceptionRecord;
     if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2)
@@ -146,7 +164,8 @@ static int dolrecomp_fastmem_install(void) {
     const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)((const u8*)self + dos->e_lfanew);
     g_dolrecomp_fm_code_lo = (uintptr_t)self;
     g_dolrecomp_fm_code_hi = (uintptr_t)self + nt->OptionalHeader.SizeOfImage;
-    return AddVectoredExceptionHandler(1, dolrecomp_fastmem_fault) != NULL;
+    g_dolrecomp_fm_handler = AddVectoredExceptionHandler(1, dolrecomp_fastmem_fault);
+    return g_dolrecomp_fm_handler != NULL;
 }
 #elif defined(__linux__)
 #include <dlfcn.h>
@@ -154,6 +173,13 @@ static int dolrecomp_fastmem_install(void) {
 #include <signal.h>
 #include <ucontext.h>
 static struct sigaction g_dolrecomp_fm_prev;
+static int g_dolrecomp_fm_installed;
+/* Unloading the module puts the previous SIGSEGV action back (see the
+   Windows branch). */
+static void __attribute__((destructor)) dolrecomp_fastmem_uninstall(void) {
+    if (g_dolrecomp_fm_installed)
+        sigaction(SIGSEGV, &g_dolrecomp_fm_prev, NULL);
+}
 static void dolrecomp_fastmem_fault(int sig, siginfo_t* info, void* raw) {
     ucontext_t* uc = (ucontext_t*)raw;
     const uintptr_t fault = (uintptr_t)info->si_addr;
@@ -202,7 +228,8 @@ static int dolrecomp_fastmem_install(void) {
     sa.sa_sigaction = dolrecomp_fastmem_fault;
     sa.sa_flags = SA_SIGINFO | SA_NODEFER;
     sigemptyset(&sa.sa_mask);
-    return sigaction(SIGSEGV, &sa, &g_dolrecomp_fm_prev) == 0;
+    g_dolrecomp_fm_installed = sigaction(SIGSEGV, &sa, &g_dolrecomp_fm_prev) == 0;
+    return g_dolrecomp_fm_installed;
 }
 #else
 static int dolrecomp_fastmem_install(void) { return 0; }
