@@ -265,7 +265,12 @@ void dolrecomp_fastmem_query(CPUState* cpu) {
     fprintf(stderr, "[fastmem] module guest accesses use the logical view at %p\n", (void*)base);
 }
 #endif
-__attribute__((visibility("default"))) void ppc_set_mem_write_journal(PPCMemWriteJournal fn, void* user) {
+#if defined(_WIN32)
+__declspec(dllexport)
+#else
+__attribute__((visibility("default")))
+#endif
+void ppc_set_mem_write_journal(PPCMemWriteJournal fn, void* user) {
     g_mem_write_journal = fn;
     g_mem_write_journal_user = user;
 }
