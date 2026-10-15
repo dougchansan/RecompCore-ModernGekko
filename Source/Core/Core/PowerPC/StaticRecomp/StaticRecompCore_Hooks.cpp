@@ -279,6 +279,23 @@ void* StaticRecompCore::HookExternalPointer(CPUState* cpu, u32 ea, u32 size)
     return &ppc.gather_pipe_ptr;
   }
   auto& memory = core->m_system.GetMemory();
+  // Logical-view query (size 0 at 0xFFFFF000): the base of Dolphin's 4 GiB
+  // fastmem view of effective addresses, built on first request. The MMU
+  // keeps it in step with the DBATs from then on, the same way it does for
+  // the JIT; pages no BAT maps stay reserved (an access there faults).
+  // Not under lockstep: direct stores would bypass its write journal.
+  if (ea == 0xFFFFF000u && size == 0)
+  {
+    if (core->m_lockstep_verifier->IsEnabled() || std::getenv("DOLRECOMP_NO_FASTMEM"))
+      return nullptr;
+    if (!memory.GetLogicalBase())
+    {
+      if (!memory.InitFastmemArena())
+        return nullptr;
+      core->m_system.GetMMU().DBATUpdated();
+    }
+    return memory.GetLogicalBase();
+  }
   if (ea >= LOCKED_CACHE_BASE && size != 0 &&
       (ea - LOCKED_CACHE_BASE) + size <= memory.GetL1CacheSize())
   {

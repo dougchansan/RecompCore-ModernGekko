@@ -292,7 +292,72 @@ static GXRUNTIME_ALWAYS_INLINE void clear_matching_reservation(CPUState* cpu, u3
         cpu->reserve_valid = false;
 }
 
-static GXRUNTIME_ALWAYS_INLINE u64 mem_read64(CPUState* cpu, u32 addr) {
+/* Fastmem. The runtime can hand out the base of Dolphin's 4 GiB view of
+   effective addresses (external_pointer(0xFFFFF000, 0)), in which every
+   DBAT-mapped page - main RAM at 0x80000000 and 0xC0000000, the locked
+   cache - is real memory. A guest access is then one host access at
+   base + ea instead of the window tests in get_ram_ptr.
+
+   Only the MMIO pages (0xC8000000-0xCDFFFFFF: EFB, CP/PE/VI/PI/MI/DSP/DI/SI/
+   EXI/AI, the write-gather pipe) are excluded up front. Anything else that
+   is not mapped faults; dolrecomp_fastmem_fault (cpu.c, a vectored
+   exception handler) decodes the faulting instruction, performs the access
+   through external_read/external_write and resumes. To keep that decoder
+   small, the raw accesses below are inline asm with a fixed opcode per size
+   (mov / movzx); the memory operand still tells the compiler what is read
+   or written, so ordering against other guest accesses is preserved.
+
+   g_dolrecomp_fm_min is 0x06000000 when fastmem is on and 2^32 otherwise,
+   which folds "is fastmem available" into the range test. It starts off;
+   the first access through the ordinary path asks the runtime. The write
+   journal (lockstep) and fastmem are exclusive: the runtime refuses the
+   query when lockstep is on. */
+#if (defined(__clang__) || defined(__GNUC__)) && defined(__x86_64__) && !defined(DOLRECOMP_NO_FASTMEM)
+#define DOLRECOMP_FASTMEM 1
+extern u8* g_dolrecomp_fm_base;
+extern u64 g_dolrecomp_fm_min;
+extern int g_dolrecomp_fm_queried;
+void dolrecomp_fastmem_query(CPUState* cpu);
+
+#define DOLRECOMP_FM_HIT(addr) \
+    (__builtin_expect((u64)(u32)((addr) - 0xC8000000u) >= g_dolrecomp_fm_min, 1))
+#define DOLRECOMP_FM_PTR(addr) (g_dolrecomp_fm_base + (u32)(addr))
+
+static GXRUNTIME_ALWAYS_INLINE u64 dolrecomp_fm_ld64(const u8* p) {
+    u64 v; __asm__("movq %1, %0" : "=r"(v) : "m"(*(const u64*)p)); return v;
+}
+static GXRUNTIME_ALWAYS_INLINE u32 dolrecomp_fm_ld32(const u8* p) {
+    u32 v; __asm__("movl %1, %0" : "=r"(v) : "m"(*(const u32*)p)); return v;
+}
+static GXRUNTIME_ALWAYS_INLINE u32 dolrecomp_fm_ld16(const u8* p) {
+    u32 v; __asm__("movzwl %1, %0" : "=r"(v) : "m"(*(const u16*)p)); return v;
+}
+static GXRUNTIME_ALWAYS_INLINE u32 dolrecomp_fm_ld8(const u8* p) {
+    u32 v; __asm__("movzbl %1, %0" : "=r"(v) : "m"(*(const u8*)p)); return v;
+}
+static GXRUNTIME_ALWAYS_INLINE void dolrecomp_fm_st64(u8* p, u64 v) {
+    __asm__("movq %1, %0" : "=m"(*(u64*)p) : "r"(v));
+}
+static GXRUNTIME_ALWAYS_INLINE void dolrecomp_fm_st32(u8* p, u32 v) {
+    __asm__("movl %1, %0" : "=m"(*(u32*)p) : "r"(v));
+}
+static GXRUNTIME_ALWAYS_INLINE void dolrecomp_fm_st16(u8* p, u16 v) {
+    __asm__("movw %1, %0" : "=m"(*(u16*)p) : "r"(v));
+}
+static GXRUNTIME_ALWAYS_INLINE void dolrecomp_fm_st8(u8* p, u8 v) {
+    __asm__("movb %1, %0" : "=m"(*(u8*)p) : "q"(v));
+}
+#define DOLRECOMP_FM_MAYBE_QUERY(cpu) \
+    do { if (__builtin_expect(!g_dolrecomp_fm_queried, 0)) dolrecomp_fastmem_query(cpu); } while (0)
+#else
+#define DOLRECOMP_FASTMEM 0
+#define DOLRECOMP_FM_MAYBE_QUERY(cpu) ((void)0)
+#endif
+
+
+#if DOLRECOMP_FASTMEM
+static DOLRECOMP_NOINLINE u64 dolrecomp_mem_read64_slow(CPUState* cpu, u32 addr) {
+    DOLRECOMP_FM_MAYBE_QUERY(cpu);
     u8* ptr = get_ram_ptr(cpu, addr, 8, NULL);
     if (ptr == NULL) {
         if (cpu->external_read)
@@ -302,7 +367,26 @@ static GXRUNTIME_ALWAYS_INLINE u64 mem_read64(CPUState* cpu, u32 addr) {
     return read_be64(ptr);
 }
 
-static GXRUNTIME_ALWAYS_INLINE void mem_write64(CPUState* cpu, u32 addr, u64 value) {
+static GXRUNTIME_ALWAYS_INLINE u64 mem_read64(CPUState* cpu, u32 addr) {
+    if (DOLRECOMP_FM_HIT(addr))
+        return bswap64((u64)dolrecomp_fm_ld64(DOLRECOMP_FM_PTR(addr)));
+    return dolrecomp_mem_read64_slow(cpu, addr);
+}
+#else
+static GXRUNTIME_ALWAYS_INLINE u64 mem_read64(CPUState* cpu, u32 addr) {
+    u8* ptr = get_ram_ptr(cpu, addr, 8, NULL);
+    if (ptr == NULL) {
+        if (cpu->external_read)
+            return cpu->external_read(cpu, addr, 8);
+        return 0;
+    }
+    return read_be64(ptr);
+}
+#endif
+
+#if DOLRECOMP_FASTMEM
+static DOLRECOMP_NOINLINE void dolrecomp_mem_write64_slow(CPUState* cpu, u32 addr, u64 value) {
+    DOLRECOMP_FM_MAYBE_QUERY(cpu);
     u32 offset;
     u8* ptr = get_ram_ptr(cpu, addr, 8, &offset);
     if (ptr == NULL) {
@@ -317,7 +401,35 @@ static GXRUNTIME_ALWAYS_INLINE void mem_write64(CPUState* cpu, u32 addr, u64 val
     write_be64(ptr, value);
 }
 
-static GXRUNTIME_ALWAYS_INLINE u32 mem_read32(CPUState* cpu, u32 addr) {
+static GXRUNTIME_ALWAYS_INLINE void mem_write64(CPUState* cpu, u32 addr, u64 value) {
+    if (DOLRECOMP_FM_HIT(addr)) {
+        if (__builtin_expect(cpu->reserve_valid, 0))
+            clear_matching_reservation(cpu, addr);
+        dolrecomp_fm_st64(DOLRECOMP_FM_PTR(addr), bswap64(value));
+        return;
+    }
+    dolrecomp_mem_write64_slow(cpu, addr, value);
+}
+#else
+static GXRUNTIME_ALWAYS_INLINE void mem_write64(CPUState* cpu, u32 addr, u64 value) {
+    u32 offset;
+    u8* ptr = get_ram_ptr(cpu, addr, 8, &offset);
+    if (ptr == NULL) {
+        if (dolrecomp_gp_write(cpu, addr, value, 8)) return;
+        if (cpu->external_write) {
+            cpu->external_write(cpu, addr, value, 8);
+        }
+        return;
+    }
+    clear_matching_reservation(cpu, addr);
+    if (g_mem_write_journal && offset != (u32)-1) g_mem_write_journal(offset, 8, g_mem_write_journal_user);
+    write_be64(ptr, value);
+}
+#endif
+
+#if DOLRECOMP_FASTMEM
+static DOLRECOMP_NOINLINE u32 dolrecomp_mem_read32_slow(CPUState* cpu, u32 addr) {
+    DOLRECOMP_FM_MAYBE_QUERY(cpu);
     u8* ptr = get_ram_ptr(cpu, addr, 4, NULL);
     if (ptr == NULL) {
         if (cpu->external_read)
@@ -327,7 +439,26 @@ static GXRUNTIME_ALWAYS_INLINE u32 mem_read32(CPUState* cpu, u32 addr) {
     return read_be32(ptr);
 }
 
-static GXRUNTIME_ALWAYS_INLINE void mem_write32(CPUState* cpu, u32 addr, u32 value) {
+static GXRUNTIME_ALWAYS_INLINE u32 mem_read32(CPUState* cpu, u32 addr) {
+    if (DOLRECOMP_FM_HIT(addr))
+        return bswap32((u32)dolrecomp_fm_ld32(DOLRECOMP_FM_PTR(addr)));
+    return dolrecomp_mem_read32_slow(cpu, addr);
+}
+#else
+static GXRUNTIME_ALWAYS_INLINE u32 mem_read32(CPUState* cpu, u32 addr) {
+    u8* ptr = get_ram_ptr(cpu, addr, 4, NULL);
+    if (ptr == NULL) {
+        if (cpu->external_read)
+            return (u32)cpu->external_read(cpu, addr, 4);
+        return 0;
+    }
+    return read_be32(ptr);
+}
+#endif
+
+#if DOLRECOMP_FASTMEM
+static DOLRECOMP_NOINLINE void dolrecomp_mem_write32_slow(CPUState* cpu, u32 addr, u32 value) {
+    DOLRECOMP_FM_MAYBE_QUERY(cpu);
     u32 offset;
     u8* ptr = get_ram_ptr(cpu, addr, 4, &offset);
     if (ptr == NULL) {
@@ -342,7 +473,35 @@ static GXRUNTIME_ALWAYS_INLINE void mem_write32(CPUState* cpu, u32 addr, u32 val
     write_be32(ptr, value);
 }
 
-static GXRUNTIME_ALWAYS_INLINE u16 mem_read16(CPUState* cpu, u32 addr) {
+static GXRUNTIME_ALWAYS_INLINE void mem_write32(CPUState* cpu, u32 addr, u32 value) {
+    if (DOLRECOMP_FM_HIT(addr)) {
+        if (__builtin_expect(cpu->reserve_valid, 0))
+            clear_matching_reservation(cpu, addr);
+        dolrecomp_fm_st32(DOLRECOMP_FM_PTR(addr), bswap32(value));
+        return;
+    }
+    dolrecomp_mem_write32_slow(cpu, addr, value);
+}
+#else
+static GXRUNTIME_ALWAYS_INLINE void mem_write32(CPUState* cpu, u32 addr, u32 value) {
+    u32 offset;
+    u8* ptr = get_ram_ptr(cpu, addr, 4, &offset);
+    if (ptr == NULL) {
+        if (dolrecomp_gp_write(cpu, addr, value, 4)) return;
+        if (cpu->external_write) {
+            cpu->external_write(cpu, addr, value, 4);
+        }
+        return;
+    }
+    clear_matching_reservation(cpu, addr);
+    if (g_mem_write_journal && offset != (u32)-1) g_mem_write_journal(offset, 4, g_mem_write_journal_user);
+    write_be32(ptr, value);
+}
+#endif
+
+#if DOLRECOMP_FASTMEM
+static DOLRECOMP_NOINLINE u16 dolrecomp_mem_read16_slow(CPUState* cpu, u32 addr) {
+    DOLRECOMP_FM_MAYBE_QUERY(cpu);
     u8* ptr = get_ram_ptr(cpu, addr, 2, NULL);
     if (ptr == NULL) {
         if (cpu->external_read)
@@ -352,7 +511,26 @@ static GXRUNTIME_ALWAYS_INLINE u16 mem_read16(CPUState* cpu, u32 addr) {
     return read_be16(ptr);
 }
 
-static GXRUNTIME_ALWAYS_INLINE void mem_write16(CPUState* cpu, u32 addr, u16 value) {
+static GXRUNTIME_ALWAYS_INLINE u16 mem_read16(CPUState* cpu, u32 addr) {
+    if (DOLRECOMP_FM_HIT(addr))
+        return bswap16((u16)dolrecomp_fm_ld16(DOLRECOMP_FM_PTR(addr)));
+    return dolrecomp_mem_read16_slow(cpu, addr);
+}
+#else
+static GXRUNTIME_ALWAYS_INLINE u16 mem_read16(CPUState* cpu, u32 addr) {
+    u8* ptr = get_ram_ptr(cpu, addr, 2, NULL);
+    if (ptr == NULL) {
+        if (cpu->external_read)
+            return (u16)cpu->external_read(cpu, addr, 2);
+        return 0;
+    }
+    return read_be16(ptr);
+}
+#endif
+
+#if DOLRECOMP_FASTMEM
+static DOLRECOMP_NOINLINE void dolrecomp_mem_write16_slow(CPUState* cpu, u32 addr, u16 value) {
+    DOLRECOMP_FM_MAYBE_QUERY(cpu);
     u32 offset;
     u8* ptr = get_ram_ptr(cpu, addr, 2, &offset);
     if (ptr == NULL) {
@@ -367,7 +545,35 @@ static GXRUNTIME_ALWAYS_INLINE void mem_write16(CPUState* cpu, u32 addr, u16 val
     write_be16(ptr, value);
 }
 
-static GXRUNTIME_ALWAYS_INLINE u8 mem_read8(CPUState* cpu, u32 addr) {
+static GXRUNTIME_ALWAYS_INLINE void mem_write16(CPUState* cpu, u32 addr, u16 value) {
+    if (DOLRECOMP_FM_HIT(addr)) {
+        if (__builtin_expect(cpu->reserve_valid, 0))
+            clear_matching_reservation(cpu, addr);
+        dolrecomp_fm_st16(DOLRECOMP_FM_PTR(addr), bswap16(value));
+        return;
+    }
+    dolrecomp_mem_write16_slow(cpu, addr, value);
+}
+#else
+static GXRUNTIME_ALWAYS_INLINE void mem_write16(CPUState* cpu, u32 addr, u16 value) {
+    u32 offset;
+    u8* ptr = get_ram_ptr(cpu, addr, 2, &offset);
+    if (ptr == NULL) {
+        if (dolrecomp_gp_write(cpu, addr, value, 2)) return;
+        if (cpu->external_write) {
+            cpu->external_write(cpu, addr, value, 2);
+        }
+        return;
+    }
+    clear_matching_reservation(cpu, addr);
+    if (g_mem_write_journal && offset != (u32)-1) g_mem_write_journal(offset, 2, g_mem_write_journal_user);
+    write_be16(ptr, value);
+}
+#endif
+
+#if DOLRECOMP_FASTMEM
+static DOLRECOMP_NOINLINE u8 dolrecomp_mem_read8_slow(CPUState* cpu, u32 addr) {
+    DOLRECOMP_FM_MAYBE_QUERY(cpu);
     u8* ptr = get_ram_ptr(cpu, addr, 1, NULL);
     if (ptr == NULL) {
         if (cpu->external_read)
@@ -377,6 +583,50 @@ static GXRUNTIME_ALWAYS_INLINE u8 mem_read8(CPUState* cpu, u32 addr) {
     return *ptr;
 }
 
+static GXRUNTIME_ALWAYS_INLINE u8 mem_read8(CPUState* cpu, u32 addr) {
+    if (DOLRECOMP_FM_HIT(addr))
+        return (u8)dolrecomp_fm_ld8(DOLRECOMP_FM_PTR(addr));
+    return dolrecomp_mem_read8_slow(cpu, addr);
+}
+#else
+static GXRUNTIME_ALWAYS_INLINE u8 mem_read8(CPUState* cpu, u32 addr) {
+    u8* ptr = get_ram_ptr(cpu, addr, 1, NULL);
+    if (ptr == NULL) {
+        if (cpu->external_read)
+            return (u8)cpu->external_read(cpu, addr, 1);
+        return 0;
+    }
+    return *ptr;
+}
+#endif
+
+#if DOLRECOMP_FASTMEM
+static DOLRECOMP_NOINLINE void dolrecomp_mem_write8_slow(CPUState* cpu, u32 addr, u8 value) {
+    DOLRECOMP_FM_MAYBE_QUERY(cpu);
+    u32 offset;
+    u8* ptr = get_ram_ptr(cpu, addr, 1, &offset);
+    if (ptr == NULL) {
+        if (dolrecomp_gp_write(cpu, addr, value, 1)) return;
+        if (cpu->external_write) {
+            cpu->external_write(cpu, addr, value, 1);
+        }
+        return;
+    }
+    clear_matching_reservation(cpu, addr);
+    if (g_mem_write_journal && offset != (u32)-1) g_mem_write_journal(offset, 1, g_mem_write_journal_user);
+    *ptr = value;
+}
+
+static GXRUNTIME_ALWAYS_INLINE void mem_write8(CPUState* cpu, u32 addr, u8 value) {
+    if (DOLRECOMP_FM_HIT(addr)) {
+        if (__builtin_expect(cpu->reserve_valid, 0))
+            clear_matching_reservation(cpu, addr);
+        dolrecomp_fm_st8(DOLRECOMP_FM_PTR(addr), value);
+        return;
+    }
+    dolrecomp_mem_write8_slow(cpu, addr, value);
+}
+#else
 static GXRUNTIME_ALWAYS_INLINE void mem_write8(CPUState* cpu, u32 addr, u8 value) {
     u32 offset;
     u8* ptr = get_ram_ptr(cpu, addr, 1, &offset);
@@ -391,6 +641,7 @@ static GXRUNTIME_ALWAYS_INLINE void mem_write8(CPUState* cpu, u32 addr, u8 value
     if (g_mem_write_journal && offset != (u32)-1) g_mem_write_journal(offset, 1, g_mem_write_journal_user);
     *ptr = value;
 }
+#endif
 
 #undef GXRUNTIME_ALWAYS_INLINE
 
