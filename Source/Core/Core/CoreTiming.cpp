@@ -31,6 +31,7 @@
 #include "VideoCommon/VideoBackendBase.h"
 #include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/VideoEvents.h"
+#include "VideoCommon/WaitStats.h"
 
 namespace CoreTiming
 {
@@ -491,6 +492,7 @@ void CoreTimingManager::Throttle(const s64 target_cycle)
 
   UpdateVISkip(time, target_time);
 
+  const WaitStats::Scope wait(WaitStats::Kind::Throttle);
   SleepUntil(target_time);
 }
 

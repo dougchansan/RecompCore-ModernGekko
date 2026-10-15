@@ -36,6 +36,7 @@
 #include "VideoCommon/VideoBackendBase.h"
 #include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/VideoEvents.h"
+#include "VideoCommon/WaitStats.h"
 
 namespace VideoInterface
 {
@@ -714,6 +715,7 @@ void VideoInterfaceManager::Update(u64 ticks)
     // next (the field's XFB, if any, was queued earlier, at EndField).
     if (auto* const low_latency = g_low_latency_field_hook.load(std::memory_order_acquire))
       low_latency(ticks);
+    WaitStats::MaybeReport();
     Core::Callback_NewField(m_system);
   }
 

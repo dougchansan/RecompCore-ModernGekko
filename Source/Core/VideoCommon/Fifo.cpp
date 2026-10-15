@@ -32,6 +32,7 @@
 #include "VideoCommon/VertexLoaderManager.h"
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/VideoBackendBase.h"
+#include "VideoCommon/WaitStats.h"
 
 namespace Fifo
 {
@@ -149,7 +150,10 @@ void FifoManager::SyncGPU(SyncGPUReason reason, bool may_move_read_ptr)
 {
   if (m_use_deterministic_gpu_thread)
   {
-    m_gpu_mainloop.Wait();
+    {
+      const WaitStats::Scope wait(WaitStats::Kind::SyncGPU);
+      m_gpu_mainloop.Wait();
+    }
     if (!m_gpu_mainloop.IsRunning())
       return;
 
@@ -402,6 +406,7 @@ void FifoManager::FlushGpu()
   if (!m_system.IsDualCoreMode() || m_use_deterministic_gpu_thread)
     return;
 
+  const WaitStats::Scope wait(WaitStats::Kind::FlushGpu);
   m_gpu_mainloop.Wait();
 }
 
@@ -560,7 +565,10 @@ int FifoManager::WaitForGpuThread(int ticks)
 
   // Wait for GPU
   if (now >= m_config_sync_gpu_max_distance)
+  {
+    const WaitStats::Scope wait(WaitStats::Kind::WaitForGpuThread);
     m_sync_wakeup_event.Wait();
+  }
 
   return GPU_TIME_SLOT_SIZE;
 }

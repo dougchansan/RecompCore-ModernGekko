@@ -9,6 +9,7 @@
 
 #include "Common/Functional.h"
 #include "Common/SPSCQueue.h"
+#include "VideoCommon/WaitStats.h"
 
 struct EfbPokeData;
 class PointerWrap;
@@ -43,6 +44,7 @@ public:
       return std::invoke(std::forward<F>(callback));
 
     std::packaged_task task{std::forward<F>(callback)};
+    const WaitStats::Scope wait(WaitStats::Kind::BlockingEvent);
     QueueEvent(Event{[&] { task(); }});
 
     return task.get_future().get();

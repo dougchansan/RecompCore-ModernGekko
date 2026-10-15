@@ -10,8 +10,33 @@
 #include "Common/Event.h"
 #include "Common/Flag.h"
 
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+#include <immintrin.h>
+#elif defined(_M_ARM64) && defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
 namespace Common
 {
+// A short spin-wait backoff for the busy loop: the processor's pause / yield
+// hint, about 0.5-1 us for 32. Without it an idle worker re-runs its payload
+// back to back, re-reading the state the producing thread is updating; on the
+// GPU loop that steady cache-line traffic slowed every gather-pipe burst on the
+// emulation thread.
+inline void BusyLoopBackoff()
+{
+  for (int i = 0; i < 32; ++i)
+  {
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    _mm_pause();
+#elif defined(_M_ARM64) && defined(_MSC_VER)
+    __yield();
+#elif defined(__aarch64__) || defined(__arm__)
+    __asm__ __volatile__("yield");
+#endif
+  }
+}
+
 // This class provides a synchronized loop.
 // It's a thread-safe way to trigger a new iteration without busy loops.
 // It's optimized for high-usage iterations which usually are already running while it's triggered
@@ -170,7 +195,8 @@ public:
         }
         else
         {
-          // Busy loop.
+          // Busy loop, with a short backoff between payload runs.
+          BusyLoopBackoff();
           break;
         }
         [[fallthrough]];
