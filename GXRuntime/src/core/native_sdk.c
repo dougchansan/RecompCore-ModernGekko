@@ -61,12 +61,16 @@ enum {
   DOLRECOMP_SUBST_MTX_IDENTITY,
   DOLRECOMP_SUBST_MTX_MULT_VEC,
   DOLRECOMP_SUBST_DCFLUSHRANGE,
+  DOLRECOMP_SUBST_GX_POS_MTX,
+  DOLRECOMP_SUBST_GX_NRM_MTX,
+  DOLRECOMP_SUBST_GX_TEX_MTX,
   DOLRECOMP_SUBST_COUNT
 };
 
 static const char *const dolrecomp_subst_names[DOLRECOMP_SUBST_COUNT] = {
     "memcpy", "memset", "HSD_MtxScaledAdd", "PSMTXConcat",
-    "PSMTXCopy", "PSMTXIdentity", "PSMTXMultVec"};
+    "PSMTXCopy", "PSMTXIdentity", "PSMTXMultVec", "DCFlushRange",
+    "GXLoadPosMtxImm", "GXLoadNrmMtxImm", "GXLoadTexMtxImm"};
 
 static unsigned long long dolrecomp_subst_handled[DOLRECOMP_SUBST_COUNT];
 static unsigned long long dolrecomp_subst_declined[DOLRECOMP_SUBST_COUNT];
@@ -430,4 +434,134 @@ int dolrecomp_native_psmtx_mult_vec(CPUState *ctx) {
 
   ctx->pc = ctx->lr;
   return dolrecomp_handled(DOLRECOMP_SUBST_MTX_MULT_VEC);
+}
+
+
+// ---------------------------------------------------------------------------
+// Native GX command writers.
+//
+// GXLoadPosMtxImm / GXLoadNrmMtxImm / GXLoadTexMtxImm only stream a command
+// byte, a register word and a matrix into the write-gather pipe. The native
+// versions build the identical byte stream and append it straight to the
+// gather-pipe buffer (see dolrecomp_gp_write in cpu.h), handing only the last
+// word to external_write so GPFifo flushes every completed 32-byte burst
+// exactly as the per-store guest code would have.
+//
+// Exactness: each matrix word goes through the same conversion the generated
+// code applies - psq_l/psq_st (GQR type 0) is convert_to_double followed by
+// convert_to_single_ftz, which flushes single denormals; lfs/stfs round-trips
+// bit for bit. Anything the guest code would have handled differently
+// (lazy-FP unavailable, a quantising GQR0, LSQE clear, an unreachable matrix
+// pointer, no gather-pipe pointer from the runtime) declines before any side
+// effect. Only volatile registers (r0, r4, r5, f0-f5) differ afterwards, which
+// the ABI leaves undefined.
+
+static inline int dolrecomp_gx_ps_ok(CPUState *ctx) {
+  if (g_ppc_lazy_fp_enabled && !(ctx->msr & PPC_MSR_FP))
+    return 0;
+  if ((ctx->hid2 & PPC_HID2_LSQE) == 0u)
+    return 0;
+  const uint32_t gqr0 = ctx->gqr[0];
+  return ((gqr0 >> 16) & 7u) == 0u && (gqr0 & 7u) == 0u;
+}
+
+static inline uint32_t dolrecomp_gx_ps_word(const uint8_t *p) {
+  return convert_to_single_ftz(convert_to_double(read_be32(p)));
+}
+
+// Append `n` (>= 5) bytes of an already-big-endian command stream. Returns 0,
+// touching nothing, if the runtime gave no gather-pipe pointer.
+static inline int dolrecomp_gx_emit(CPUState *ctx, const uint8_t *bytes, uint32_t n) {
+  uint8_t **gp = g_dolrecomp_gather_pipe ? g_dolrecomp_gather_pipe
+                                         : dolrecomp_gather_pipe_slow(ctx);
+  if (gp == (uint8_t **)1 || !ctx->external_write)
+    return 0;
+  uint8_t *p = gp[0];
+  const size_t queued = (size_t)(p - gp[1]);
+  // GPFifo keeps 16 bursts of slack beyond the 32-byte window; stay well
+  // inside it (callers emit at most 53 bytes onto fewer than 32 queued).
+  if (queued + n > 32u * 8u)
+    return 0;
+  memcpy(p, bytes, n - 4u);
+  p += n - 4u;
+  const uint32_t last = read_be32(bytes + n - 4u);
+  if (queued + n < 32u) {
+    write_be32(p, last);
+    gp[0] = p + 4;
+  } else {
+    gp[0] = p;
+    ctx->external_write(ctx, DOLRECOMP_GATHER_PIPE_PAGE, last, 4);
+  }
+  return 1;
+}
+
+// void GXLoadPosMtxImm(Mtx mtx, u32 id)   0x800BD4B4
+int dolrecomp_native_gx_load_pos_mtx_imm(CPUState *ctx) {
+  if (!dolrecomp_subst_enabled())
+    return 0;
+  if (!dolrecomp_gx_ps_ok(ctx))
+    return dolrecomp_declined(DOLRECOMP_SUBST_GX_POS_MTX);
+  const uint8_t *m = dolrecomp_guest_bytes_ext(ctx, (uint32_t)ctx->gpr[3], 48u);
+  if (!m)
+    return dolrecomp_declined(DOLRECOMP_SUBST_GX_POS_MTX);
+  uint8_t s[53];
+  s[0] = 0x10;
+  write_be32(s + 1, (((uint32_t)ctx->gpr[4]) << 2) | 0x000B0000u);
+  for (int i = 0; i < 12; i++)
+    write_be32(s + 5 + 4 * i, dolrecomp_gx_ps_word(m + 4 * i));
+  if (!dolrecomp_gx_emit(ctx, s, sizeof(s)))
+    return dolrecomp_declined(DOLRECOMP_SUBST_GX_POS_MTX);
+  ctx->pc = ctx->lr;
+  return dolrecomp_handled(DOLRECOMP_SUBST_GX_POS_MTX);
+}
+
+// void GXLoadNrmMtxImm(Mtx mtx, u32 id)   0x800BD504
+// Columns 0-1 of each row go through psq, column 2 through lfs/stfs.
+int dolrecomp_native_gx_load_nrm_mtx_imm(CPUState *ctx) {
+  if (!dolrecomp_subst_enabled())
+    return 0;
+  if (!dolrecomp_gx_ps_ok(ctx))
+    return dolrecomp_declined(DOLRECOMP_SUBST_GX_NRM_MTX);
+  const uint8_t *m = dolrecomp_guest_bytes_ext(ctx, (uint32_t)ctx->gpr[3], 44u);
+  if (!m)
+    return dolrecomp_declined(DOLRECOMP_SUBST_GX_NRM_MTX);
+  uint8_t s[41];
+  s[0] = 0x10;
+  write_be32(s + 1, ((uint32_t)ctx->gpr[4] * 3u + 0x400u) | 0x00080000u);
+  for (int row = 0; row < 3; row++) {
+    const uint8_t *r = m + 16 * row;
+    write_be32(s + 5 + 12 * row + 0, dolrecomp_gx_ps_word(r + 0));
+    write_be32(s + 5 + 12 * row + 4, dolrecomp_gx_ps_word(r + 4));
+    memcpy(s + 5 + 12 * row + 8, r + 8, 4);
+  }
+  if (!dolrecomp_gx_emit(ctx, s, sizeof(s)))
+    return dolrecomp_declined(DOLRECOMP_SUBST_GX_NRM_MTX);
+  ctx->pc = ctx->lr;
+  return dolrecomp_handled(DOLRECOMP_SUBST_GX_NRM_MTX);
+}
+
+// void GXLoadTexMtxImm(Mtx mtx, u32 id, GXTexMtxType type)   0x800BD58C
+// Register count is 8 for type 1 else 12; the copy is 4x3 only for type 0.
+int dolrecomp_native_gx_load_tex_mtx_imm(CPUState *ctx) {
+  if (!dolrecomp_subst_enabled())
+    return 0;
+  if (!dolrecomp_gx_ps_ok(ctx))
+    return dolrecomp_declined(DOLRECOMP_SUBST_GX_TEX_MTX);
+  const uint32_t id = (uint32_t)ctx->gpr[4];
+  const uint32_t type = (uint32_t)ctx->gpr[5];
+  const uint32_t words = type == 0u ? 12u : 8u;
+  const uint8_t *m = dolrecomp_guest_bytes_ext(ctx, (uint32_t)ctx->gpr[3], words * 4u);
+  if (!m)
+    return dolrecomp_declined(DOLRECOMP_SUBST_GX_TEX_MTX);
+  const uint32_t addr = id >= 0x40u ? (id - 0x40u) * 4u + 0x500u : id * 4u;
+  const uint32_t count = type == 1u ? 8u : 12u;
+  uint8_t s[53];
+  s[0] = 0x10;
+  write_be32(s + 1, addr | ((count - 1u) << 16));
+  for (uint32_t i = 0; i < words; i++)
+    write_be32(s + 5 + 4 * i, dolrecomp_gx_ps_word(m + 4 * i));
+  if (!dolrecomp_gx_emit(ctx, s, 5u + words * 4u))
+    return dolrecomp_declined(DOLRECOMP_SUBST_GX_TEX_MTX);
+  ctx->pc = ctx->lr;
+  return dolrecomp_handled(DOLRECOMP_SUBST_GX_TEX_MTX);
 }

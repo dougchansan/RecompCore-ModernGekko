@@ -193,26 +193,96 @@ typedef void (*PPCMemWriteJournal)(u32 offset, u32 size, void* user);
 extern PPCMemWriteJournal g_mem_write_journal;
 extern void* g_mem_write_journal_user;
 
+// Host pointer to the GameCube L1 locked cache (guest 0xE0000000, 16 KB),
+// fetched once through external_pointer. Colosseum keeps hot per-frame state
+// there; without this every access took the external hook + full MMU path
+// (~10M accesses/s in battle).
+extern u8* g_dolrecomp_locked_cache;
+#define DOLRECOMP_LOCKED_CACHE_BASE 0xE0000000u
+#define DOLRECOMP_LOCKED_CACHE_SIZE 0x4000u
+
+#if defined(_MSC_VER)
+#define DOLRECOMP_NOINLINE __declspec(noinline)
+#else
+#define DOLRECOMP_NOINLINE __attribute__((noinline))
+#endif
+
+static DOLRECOMP_NOINLINE u8* dolrecomp_locked_cache_slow(CPUState* cpu) {
+    if (!g_dolrecomp_locked_cache && cpu->external_pointer)
+        g_dolrecomp_locked_cache = (u8*)cpu->external_pointer(
+            cpu, DOLRECOMP_LOCKED_CACHE_BASE, DOLRECOMP_LOCKED_CACHE_SIZE);
+    return g_dolrecomp_locked_cache;
+}
+
 static GXRUNTIME_ALWAYS_INLINE u8* get_ram_ptr(CPUState* cpu, u32 addr, u32 size, u32* out_offset) {
     u32 masked_addr = addr & ~0x40000000u;
-    
-    // Check MEM2 (EXRAM) first as it is much more common in Wii titles
-    if (cpu->exram) {
-        u32 offset = masked_addr - 0x90000000u;
-        if (offset <= cpu->exram_size - size) {
-            if (out_offset) *out_offset = (u32)-1;
-            return cpu->exram + offset;
-        }
-    }
-    
-    // Check MEM1
+
+    // Check MEM1 first: GameCube titles have no MEM2 (exram is NULL), and the
+    // ranges are disjoint, so the order does not change any result.
     u32 offset = masked_addr - 0x80000000u;
     if (offset <= cpu->ram_size - size) {
         if (out_offset) *out_offset = offset;
         return cpu->ram + offset;
     }
-    
+
+    // MEM2 (EXRAM), Wii titles only.
+    if (cpu->exram) {
+        u32 ex_offset = masked_addr - 0x90000000u;
+        if (ex_offset <= cpu->exram_size - size) {
+            if (out_offset) *out_offset = (u32)-1;
+            return cpu->exram + ex_offset;
+        }
+    }
+
+    // L1 locked cache, tested on the unmasked address (bit 30 is part of it).
+    u32 lc_offset = addr - DOLRECOMP_LOCKED_CACHE_BASE;
+    if (lc_offset <= DOLRECOMP_LOCKED_CACHE_SIZE - size) {
+        u8* lc = g_dolrecomp_locked_cache ? g_dolrecomp_locked_cache
+                                          : dolrecomp_locked_cache_slow(cpu);
+        if (lc) {
+            if (out_offset) *out_offset = (u32)-1;
+            return lc + lc_offset;
+        }
+    }
+
     return NULL;
+}
+
+// Write-gather pipe (guest page 0xCC008000) fast path. The runtime hands out
+// &ppc_state.gather_pipe_ptr (immediately followed by gather_pipe_base_ptr)
+// through external_pointer(0xCC008000, 0). A store that leaves fewer than 32
+// bytes queued is exactly GPFifo::FastWrite (its CheckGatherPipe would be a
+// no-op), so it is done here; the store that completes a 32-byte burst takes
+// the external_write path, which writes it and flushes. An older runtime
+// returns NULL and every store keeps the external path.
+#define DOLRECOMP_GATHER_PIPE_PAGE 0xCC008000u
+extern u8** g_dolrecomp_gather_pipe;  // NULL = not queried, (u8**)1 = unavailable
+
+static DOLRECOMP_NOINLINE u8** dolrecomp_gather_pipe_slow(CPUState* cpu) {
+    if (!g_dolrecomp_gather_pipe) {
+        void* p = cpu->external_pointer ? cpu->external_pointer(cpu, DOLRECOMP_GATHER_PIPE_PAGE, 0) : NULL;
+        g_dolrecomp_gather_pipe = p ? (u8**)p : (u8**)1;
+    }
+    return g_dolrecomp_gather_pipe;
+}
+
+static GXRUNTIME_ALWAYS_INLINE int dolrecomp_gp_write(CPUState* cpu, u32 addr, u64 value, u32 size) {
+    if ((addr & 0xFFFFF000u) != DOLRECOMP_GATHER_PIPE_PAGE)
+        return 0;
+    u8** gp = g_dolrecomp_gather_pipe ? g_dolrecomp_gather_pipe : dolrecomp_gather_pipe_slow(cpu);
+    if (gp == (u8**)1)
+        return 0;
+    u8* p = gp[0];
+    if ((size_t)(p - gp[1]) + size >= 32u)
+        return 0;
+    switch (size) {
+    case 1: p[0] = (u8)value; break;
+    case 2: write_be16(p, (u16)value); break;
+    case 4: write_be32(p, (u32)value); break;
+    default: write_be64(p, value); break;
+    }
+    gp[0] = p + size;
+    return 1;
 }
 
 static GXRUNTIME_ALWAYS_INLINE void clear_matching_reservation(CPUState* cpu, u32 addr) {
@@ -236,6 +306,7 @@ static GXRUNTIME_ALWAYS_INLINE void mem_write64(CPUState* cpu, u32 addr, u64 val
     u32 offset;
     u8* ptr = get_ram_ptr(cpu, addr, 8, &offset);
     if (ptr == NULL) {
+        if (dolrecomp_gp_write(cpu, addr, value, 8)) return;
         if (cpu->external_write) {
             cpu->external_write(cpu, addr, value, 8);
         }
@@ -260,6 +331,7 @@ static GXRUNTIME_ALWAYS_INLINE void mem_write32(CPUState* cpu, u32 addr, u32 val
     u32 offset;
     u8* ptr = get_ram_ptr(cpu, addr, 4, &offset);
     if (ptr == NULL) {
+        if (dolrecomp_gp_write(cpu, addr, value, 4)) return;
         if (cpu->external_write) {
             cpu->external_write(cpu, addr, value, 4);
         }
@@ -284,6 +356,7 @@ static GXRUNTIME_ALWAYS_INLINE void mem_write16(CPUState* cpu, u32 addr, u16 val
     u32 offset;
     u8* ptr = get_ram_ptr(cpu, addr, 2, &offset);
     if (ptr == NULL) {
+        if (dolrecomp_gp_write(cpu, addr, value, 2)) return;
         if (cpu->external_write) {
             cpu->external_write(cpu, addr, value, 2);
         }
@@ -308,6 +381,7 @@ static GXRUNTIME_ALWAYS_INLINE void mem_write8(CPUState* cpu, u32 addr, u8 value
     u32 offset;
     u8* ptr = get_ram_ptr(cpu, addr, 1, &offset);
     if (ptr == NULL) {
+        if (dolrecomp_gp_write(cpu, addr, value, 1)) return;
         if (cpu->external_write) {
             cpu->external_write(cpu, addr, value, 1);
         }

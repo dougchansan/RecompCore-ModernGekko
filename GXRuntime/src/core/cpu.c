@@ -24,6 +24,9 @@
  * offset (into cpu->ram) about to be written, `size` the width in bytes. */
 PPCMemWriteJournal g_mem_write_journal = NULL;
 void* g_mem_write_journal_user = NULL;
+/* See get_ram_ptr in cpu.h. */
+u8* g_dolrecomp_locked_cache = NULL;
+u8** g_dolrecomp_gather_pipe = NULL;
 #if defined(_MSC_VER)
 __declspec(dllexport) void ppc_set_mem_write_journal(PPCMemWriteJournal fn, void* user) {
 #else
