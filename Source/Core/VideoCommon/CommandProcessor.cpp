@@ -361,14 +361,19 @@ void CommandProcessorManager::GatherPipeBursted()
   }
 
   // update the fifo pointer
-  if (m_fifo.CPWritePointer.load(std::memory_order_relaxed) ==
-      m_fifo.CPEnd.load(std::memory_order_relaxed))
+  // Only the CPU thread writes CPWritePointer (here, the CP register MMIO
+  // handlers and savestates), so a plain load and store is the same as the
+  // relaxed fetch_add - minus the locked RMW, which runs once per 32-byte
+  // burst on a cache line the GPU thread keeps pulling back.
+  const u32 write_pointer = m_fifo.CPWritePointer.load(std::memory_order_relaxed);
+  if (write_pointer == m_fifo.CPEnd.load(std::memory_order_relaxed))
   {
     m_fifo.CPWritePointer.store(m_fifo.CPBase, std::memory_order_relaxed);
   }
   else
   {
-    m_fifo.CPWritePointer.fetch_add(GPFifo::GATHER_PIPE_SIZE, std::memory_order_relaxed);
+    m_fifo.CPWritePointer.store(write_pointer + GPFifo::GATHER_PIPE_SIZE,
+                                std::memory_order_relaxed);
   }
 
   if (m_cp_ctrl_reg.GPReadEnable && m_cp_ctrl_reg.GPLinkEnable)
@@ -514,12 +519,18 @@ void CommandProcessorManager::SetCPStatusFromGPU()
 void CommandProcessorManager::SetCPStatusFromCPU()
 {
   // overflow & underflow check
-  m_fifo.bFF_HiWatermark.store(
-      (m_fifo.CPReadWriteDistance.load(std::memory_order_relaxed) > m_fifo.CPHiWatermark),
-      std::memory_order_relaxed);
-  m_fifo.bFF_LoWatermark.store(
-      (m_fifo.CPReadWriteDistance.load(std::memory_order_relaxed) < m_fifo.CPLoWatermark),
-      std::memory_order_relaxed);
+  // This runs for every 32-byte gather-pipe burst. The flags almost never
+  // change, and an unconditional store takes the cache line away from the
+  // GPU thread each time, so store only on a change. The GPU thread updates
+  // the same flags; skipping an equal store is one of the interleavings the
+  // unconditional version already allowed.
+  const u32 distance = m_fifo.CPReadWriteDistance.load(std::memory_order_relaxed);
+  const u32 hi = distance > m_fifo.CPHiWatermark;
+  const u32 lo = distance < m_fifo.CPLoWatermark;
+  if (m_fifo.bFF_HiWatermark.load(std::memory_order_relaxed) != hi)
+    m_fifo.bFF_HiWatermark.store(hi, std::memory_order_relaxed);
+  if (m_fifo.bFF_LoWatermark.load(std::memory_order_relaxed) != lo)
+    m_fifo.bFF_LoWatermark.store(lo, std::memory_order_relaxed);
 
   bool bpInt = m_fifo.bFF_Breakpoint.load(std::memory_order_relaxed) &&
                m_fifo.bFF_BPInt.load(std::memory_order_relaxed);
