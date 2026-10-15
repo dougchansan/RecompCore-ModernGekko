@@ -65,6 +65,9 @@ enum {
   DOLRECOMP_SUBST_GX_NRM_MTX,
   DOLRECOMP_SUBST_GX_TEX_MTX,
   DOLRECOMP_SUBST_GS_QUEUE_COMMAND,
+  DOLRECOMP_SUBST_GX_SET_PROJECTION,
+  DOLRECOMP_SUBST_GX_SET_MATRIX_INDEX,
+  DOLRECOMP_SUBST_GX_SET_CURRENT_MTX,
   DOLRECOMP_SUBST_COUNT
 };
 
@@ -72,7 +75,7 @@ static const char *const dolrecomp_subst_names[DOLRECOMP_SUBST_COUNT] = {
     "memcpy", "memset", "HSD_MtxScaledAdd", "PSMTXConcat",
     "PSMTXCopy", "PSMTXIdentity", "PSMTXMultVec", "DCFlushRange",
     "GXLoadPosMtxImm", "GXLoadNrmMtxImm", "GXLoadTexMtxImm",
-    "GSQueueCommand"};
+    "GSQueueCommand", "GXSetProjection", "__GXSetMatrixIndex", "GXSetCurrentMtx"};
 
 static unsigned long long dolrecomp_subst_handled[DOLRECOMP_SUBST_COUNT];
 static unsigned long long dolrecomp_subst_declined[DOLRECOMP_SUBST_COUNT];
@@ -749,6 +752,110 @@ int dolrecomp_native_gs_queue_command(CPUState *ctx) {
     }
   }
   write_be32(wp, cmd_addr + span);
+  ctx->pc = ctx->lr;
+  return dolrecomp_handled(which);
+}
+
+// ---------------------------------------------------------------------------
+// More GX writers. Same contract as the matrix loads above: the identical
+// command stream, declines before any side effect.
+
+// True when dolrecomp_gx_emit(ctx, ., n) is certain to succeed, so a writer
+// that also updates __GXData can check before changing anything.
+static inline int dolrecomp_gx_emit_ok(CPUState *ctx, uint32_t n) {
+  uint8_t **gp = g_dolrecomp_gather_pipe ? g_dolrecomp_gather_pipe
+                                         : dolrecomp_gather_pipe_slow(ctx);
+  if (gp == (uint8_t **)1 || !ctx->external_write)
+    return 0;
+  return (size_t)(gp[0] - gp[1]) + n <= 32u * 8u;
+}
+
+// void GXSetProjection(Mtx44 mtx, GXProjectionType type)   0x800BD2E0
+//
+// Caches the six projection terms and the type in __GXData (+1056..+1080)
+// and streams them as one XF write (register 0x1020, 7 words). lfs/stfs
+// round-trips every word bit for bit, so the terms are copied verbatim.
+int dolrecomp_native_gx_set_projection(CPUState *ctx) {
+  if (!dolrecomp_subst_enabled())
+    return 0;
+  const int which = DOLRECOMP_SUBST_GX_SET_PROJECTION;
+  if (g_ppc_lazy_fp_enabled && !(ctx->msr & PPC_MSR_FP))
+    return dolrecomp_declined(which);
+  const uint8_t *gxp = dolrecomp_guest_bytes_ext(ctx, (uint32_t)ctx->gpr[2] - 29632u, 4u);
+  const uint8_t *m = dolrecomp_guest_bytes_ext(ctx, (uint32_t)ctx->gpr[3], 48u);
+  if (!gxp || !m)
+    return dolrecomp_declined(which);
+  uint8_t *gx = dolrecomp_guest_bytes_ext(ctx, read_be32(gxp), 1084u);
+  if (!gx || dolrecomp_ranges_overlap(gx + 1056, 28u, m, 48u) ||
+      dolrecomp_ranges_overlap(gx + 1056, 28u, gxp, 4u))
+    return dolrecomp_declined(which);
+  const uint32_t type = (uint32_t)ctx->gpr[4];
+  const int ortho = type == 1u;
+  uint8_t s[33];
+  s[0] = 0x10;
+  write_be32(s + 1, 0x00061020u);
+  memcpy(s + 5, m + 0, 4);                // [0][0]
+  memcpy(s + 9, m + (ortho ? 12 : 8), 4);  // [0][3] or [0][2]
+  memcpy(s + 13, m + 20, 4);              // [1][1]
+  memcpy(s + 17, m + (ortho ? 28 : 24), 4);
+  memcpy(s + 21, m + 40, 4);              // [2][2]
+  memcpy(s + 25, m + 44, 4);              // [2][3]
+  write_be32(s + 29, type);
+  // Pipe space is checked before __GXData changes, so a decline leaves both.
+  if (!dolrecomp_gx_emit_ok(ctx, sizeof(s)))
+    return dolrecomp_declined(which);
+  write_be32(gx + 1056, type);
+  memcpy(gx + 1060, s + 5, 24);
+  dolrecomp_gx_emit(ctx, s, sizeof(s));
+  write_be16(gx + 2, 1);  // bpSentNot
+  ctx->pc = ctx->lr;
+  return dolrecomp_handled(which);
+}
+
+// void __GXSetMatrixIndex(GXAttr index)   0x800BD898
+// Below GX_VA_TEX4MTXIDX (5) the CP/XF pair is MATINDEX_A (CP 0x30, XF
+// 0x1018) from __GXData+128, otherwise MATINDEX_B (0x40, 0x1019) from +132.
+static int dolrecomp_gx_matrix_index(CPUState *ctx, uint8_t *gx, int32_t index) {
+  const int b = index >= 5;
+  const uint32_t word = read_be32(gx + (b ? 132 : 128));
+  uint8_t s[15];
+  s[0] = 0x08;
+  s[1] = b ? 0x40 : 0x30;
+  write_be32(s + 2, word);
+  s[6] = 0x10;
+  write_be32(s + 7, b ? 0x1019u : 0x1018u);
+  write_be32(s + 11, word);
+  if (!dolrecomp_gx_emit(ctx, s, sizeof(s)))
+    return 0;
+  write_be16(gx + 2, 1);  // bpSentNot
+  return 1;
+}
+
+int dolrecomp_native_gx_set_matrix_index(CPUState *ctx) {
+  if (!dolrecomp_subst_enabled())
+    return 0;
+  const int which = DOLRECOMP_SUBST_GX_SET_MATRIX_INDEX;
+  const uint8_t *gxp = dolrecomp_guest_bytes_ext(ctx, (uint32_t)ctx->gpr[2] - 29632u, 4u);
+  uint8_t *gx = gxp ? dolrecomp_guest_bytes_ext(ctx, read_be32(gxp), 136u) : 0;
+  if (!gx || !dolrecomp_gx_matrix_index(ctx, gx, (int32_t)ctx->gpr[3]))
+    return dolrecomp_declined(which);
+  ctx->pc = ctx->lr;
+  return dolrecomp_handled(which);
+}
+
+// void GXSetCurrentMtx(u32 id)   0x800BD554
+// Replaces the low six bits of MATINDEX_A (the full id is ORed in, as the
+// SDK does) and sends it through __GXSetMatrixIndex(GX_VA_PNMTXIDX).
+int dolrecomp_native_gx_set_current_mtx(CPUState *ctx) {
+  if (!dolrecomp_subst_enabled())
+    return 0;
+  const int which = DOLRECOMP_SUBST_GX_SET_CURRENT_MTX;
+  const uint8_t *gxp = dolrecomp_guest_bytes_ext(ctx, (uint32_t)ctx->gpr[2] - 29632u, 4u);
+  uint8_t *gx = gxp ? dolrecomp_guest_bytes_ext(ctx, read_be32(gxp), 136u) : 0;
+  if (!gx || dolrecomp_ranges_overlap(gx + 128, 4u, gxp, 4u) || !dolrecomp_gx_emit_ok(ctx, 15u))
+    return dolrecomp_declined(which);
+  write_be32(gx + 128, (read_be32(gx + 128) & 0xFFFFFFC0u) | (uint32_t)ctx->gpr[3]);
+  dolrecomp_gx_matrix_index(ctx, gx, 0);
   ctx->pc = ctx->lr;
   return dolrecomp_handled(which);
 }
