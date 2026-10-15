@@ -64,13 +64,15 @@ enum {
   DOLRECOMP_SUBST_GX_POS_MTX,
   DOLRECOMP_SUBST_GX_NRM_MTX,
   DOLRECOMP_SUBST_GX_TEX_MTX,
+  DOLRECOMP_SUBST_GS_QUEUE_COMMAND,
   DOLRECOMP_SUBST_COUNT
 };
 
 static const char *const dolrecomp_subst_names[DOLRECOMP_SUBST_COUNT] = {
     "memcpy", "memset", "HSD_MtxScaledAdd", "PSMTXConcat",
     "PSMTXCopy", "PSMTXIdentity", "PSMTXMultVec", "DCFlushRange",
-    "GXLoadPosMtxImm", "GXLoadNrmMtxImm", "GXLoadTexMtxImm"};
+    "GXLoadPosMtxImm", "GXLoadNrmMtxImm", "GXLoadTexMtxImm",
+    "GSQueueCommand"};
 
 static unsigned long long dolrecomp_subst_handled[DOLRECOMP_SUBST_COUNT];
 static unsigned long long dolrecomp_subst_declined[DOLRECOMP_SUBST_COUNT];
@@ -564,4 +566,189 @@ int dolrecomp_native_gx_load_tex_mtx_imm(CPUState *ctx) {
     return dolrecomp_declined(DOLRECOMP_SUBST_GX_TEX_MTX);
   ctx->pc = ctx->lr;
   return dolrecomp_handled(DOLRECOMP_SUBST_GX_TEX_MTX);
+}
+
+
+// ---------------------------------------------------------------------------
+// GS command recorder.
+//
+// void fn_800D4F98(u32 opcode, u32 paramCount, ...)   0x800D4F98
+//
+// Colosseum's GS layer records most rendering calls into a command buffer
+// (replayed later by fn_800D461C): the opcode, then paramCount's arguments
+// fetched through __va_arg. Each call pays a 144-byte frame, the register
+// save area and one __va_arg call per argument.
+//
+// The varargs walk is the SDK's (gs_range_800C45A0.c): GPR class from
+// r5..r10 then the caller's overflow area (r1 + 8), FPR class from f1..f8
+// then the overflow area aligned to 8. Floats are recorded as the guest does
+// it - stfd of the register, lfd, frsp, stfs - so ppc_frsp runs on f0 in the
+// same order and leaves the same f0 and FPSCR. Everything is read and
+// resolved first; an unreachable pointer, a float taken from f1..f8 without
+// CR6 set (the guest would read a stale stack slot), or a command buffer that
+// overlaps anything read declines before any side effect. Only the callee's
+// dead stack frame and volatile registers other than f0 differ.
+
+enum { GSQ_WORD, GSQ_FLOAT, GSQ_DEREF, GSQ_COPY };
+typedef struct {
+  uint8_t op;
+  uint8_t bytes;    // GSQ_COPY length
+  uint8_t advance;  // GSQ_COPY write-pointer step
+} DolrecompGsqStep;
+
+// paramCount 1..10 record that many words, 11..14 that many minus 10 floats;
+// 0 and anything above 20 record only the opcode.
+static const DolrecompGsqStep dolrecomp_gsq_special[6][4] = {
+    /* 15 */ {{GSQ_WORD, 0, 0}, {GSQ_FLOAT, 0, 0}, {GSQ_FLOAT, 0, 0}},
+    /* 16 */ {{GSQ_COPY, 0x30, 0x30}},
+    /* 17 */ {{GSQ_WORD, 0, 0}, {GSQ_COPY, 0x30, 0x30}},
+    /* 18 */ {{GSQ_WORD, 0, 0}, {GSQ_COPY, 0x18, 0x60}, {GSQ_WORD, 0, 0}},
+    /* 19 */ {{GSQ_WORD, 0, 0}, {GSQ_WORD, 0, 0}, {GSQ_WORD, 0, 0}, {GSQ_COPY, 0x30, 0x30}},
+    /* 20 */ {{GSQ_WORD, 0, 0}, {GSQ_DEREF, 0, 0}},
+};
+static const uint8_t dolrecomp_gsq_special_len[6] = {3, 1, 2, 3, 4, 2};
+
+typedef struct {
+  uint8_t op;
+  uint32_t word;       // GSQ_WORD / GSQ_DEREF value
+  uint64_t dbits;      // GSQ_FLOAT: the stfd image
+  const uint8_t *src;  // GSQ_COPY source
+  uint32_t bytes, advance;
+} DolrecompGsqItem;
+
+static inline int dolrecomp_ranges_overlap(const uint8_t *a, uint32_t an,
+                                           const uint8_t *b, uint32_t bn) {
+  return a < b + bn && b < a + an;
+}
+
+int dolrecomp_native_gs_queue_command(CPUState *ctx) {
+  if (!dolrecomp_subst_enabled())
+    return 0;
+  const int which = DOLRECOMP_SUBST_GS_QUEUE_COMMAND;
+  const uint32_t opcode = (uint32_t)ctx->gpr[3];
+  const uint32_t count = (uint32_t)ctx->gpr[4];
+  const int cr6 = (ctx->cr & 0x02000000u) != 0;
+  const int fp_ok = !g_ppc_lazy_fp_enabled || (ctx->msr & PPC_MSR_FP);
+  if (cr6 && !fp_ok)  // the prologue's stfd f1..f8 would trap
+    return dolrecomp_declined(which);
+
+  DolrecompGsqStep script[10];
+  uint32_t steps = 0;
+  if (count >= 1 && count <= 10) {
+    for (; steps < count; steps++)
+      script[steps] = (DolrecompGsqStep){GSQ_WORD, 0, 0};
+  } else if (count >= 11 && count <= 14) {
+    for (; steps < count - 10; steps++)
+      script[steps] = (DolrecompGsqStep){GSQ_FLOAT, 0, 0};
+  } else if (count >= 15 && count <= 20) {
+    for (; steps < dolrecomp_gsq_special_len[count - 15]; steps++)
+      script[steps] = dolrecomp_gsq_special[count - 15][steps];
+  }
+
+  // Phase 1: fetch every argument the way __va_arg would.
+  const uint8_t *reads[12];
+  uint32_t read_bytes[12];
+  uint32_t nreads = 0;
+  DolrecompGsqItem items[10];
+  uint32_t gpr = 2, fpr = 0;
+  uint32_t overflow = (uint32_t)ctx->gpr[1] + 8u;
+  uint32_t span = 4;  // the opcode
+  for (uint32_t i = 0; i < steps; i++) {
+    DolrecompGsqItem *it = &items[i];
+    it->op = script[i].op;
+    if (it->op == GSQ_FLOAT) {
+      if (!fp_ok)
+        return dolrecomp_declined(which);
+      if (fpr < 8) {
+        if (!cr6)
+          return dolrecomp_declined(which);
+        it->dbits = f64_bits(ctx->fpr[1 + fpr]);
+        fpr++;
+      } else {
+        overflow = (overflow + 7u) & ~7u;
+        const uint8_t *p = dolrecomp_guest_bytes_ext(ctx, overflow, 8u);
+        if (!p)
+          return dolrecomp_declined(which);
+        it->dbits = read_be64(p);
+        reads[nreads] = p;
+        read_bytes[nreads++] = 8;
+        overflow += 8u;
+      }
+      span += 4;
+      continue;
+    }
+    uint32_t value;
+    if (gpr < 8) {
+      value = (uint32_t)ctx->gpr[3 + gpr];
+      gpr++;
+    } else {
+      const uint8_t *p = dolrecomp_guest_bytes_ext(ctx, overflow, 4u);
+      if (!p)
+        return dolrecomp_declined(which);
+      value = read_be32(p);
+      reads[nreads] = p;
+      read_bytes[nreads++] = 4;
+      overflow += 4u;
+    }
+    if (it->op == GSQ_WORD) {
+      it->word = value;
+      span += 4;
+    } else if (it->op == GSQ_DEREF) {
+      const uint8_t *p = dolrecomp_guest_bytes_ext(ctx, value, 4u);
+      if (!p)
+        return dolrecomp_declined(which);
+      it->word = read_be32(p);
+      reads[nreads] = p;
+      read_bytes[nreads++] = 4;
+      span += 4;
+    } else {
+      it->bytes = script[i].bytes;
+      it->advance = script[i].advance;
+      it->src = dolrecomp_guest_bytes_ext(ctx, value, it->bytes);
+      if (!it->src)
+        return dolrecomp_declined(which);
+      reads[nreads] = it->src;
+      read_bytes[nreads++] = it->bytes;
+      span += it->advance;
+    }
+  }
+
+  // The GS state block (r13 - 23968) and its command write pointer (+0x494).
+  const uint8_t *sp = dolrecomp_guest_bytes_ext(ctx, (uint32_t)ctx->gpr[13] - 23968u, 4u);
+  if (!sp)
+    return dolrecomp_declined(which);
+  uint8_t *wp = dolrecomp_guest_bytes_ext(ctx, read_be32(sp) + 0x494u, 4u);
+  if (!wp)
+    return dolrecomp_declined(which);
+  const uint32_t cmd_addr = read_be32(wp);
+  uint8_t *cmd = dolrecomp_guest_bytes_ext(ctx, cmd_addr, span);
+  if (!cmd || dolrecomp_ranges_overlap(cmd, span, wp, 4u) ||
+      dolrecomp_ranges_overlap(cmd, span, sp, 4u))
+    return dolrecomp_declined(which);
+  for (uint32_t i = 0; i < nreads; i++)
+    if (dolrecomp_ranges_overlap(cmd, span, reads[i], read_bytes[i]))
+      return dolrecomp_declined(which);
+
+  // Phase 2: record.
+  uint8_t *out = cmd;
+  write_be32(out, opcode);
+  out += 4;
+  for (uint32_t i = 0; i < steps; i++) {
+    const DolrecompGsqItem *it = &items[i];
+    if (it->op == GSQ_FLOAT) {
+      ctx->fpr[0] = f64_value(it->dbits);
+      ppc_frsp(ctx, 0, 0);
+      write_be32(out, convert_to_single(f64_bits(ctx->fpr[0])));
+      out += 4;
+    } else if (it->op == GSQ_COPY) {
+      memmove(out, it->src, it->bytes);
+      out += it->advance;
+    } else {
+      write_be32(out, it->word);
+      out += 4;
+    }
+  }
+  write_be32(wp, cmd_addr + span);
+  ctx->pc = ctx->lr;
+  return dolrecomp_handled(which);
 }
