@@ -192,7 +192,8 @@ static GXRUNTIME_ALWAYS_INLINE u8* get_ram_ptr(CPUState* cpu, u32 addr, u32 size
    the first access through the ordinary path asks the runtime. The write
    journal (lockstep) and fastmem are exclusive: the runtime refuses the
    query when lockstep is on. */
-#if (defined(__clang__) || defined(__GNUC__)) && defined(__x86_64__) && !defined(DOLRECOMP_NO_FASTMEM)
+#if (defined(__clang__) || defined(__GNUC__)) && defined(__x86_64__) && \
+    (defined(_WIN32) || defined(__linux__)) && !defined(DOLRECOMP_NO_FASTMEM)
 #define DOLRECOMP_FASTMEM 1
 #define DOLRECOMP_FM_NOINLINE __attribute__((noinline))
 extern u8* g_dolrecomp_fm_base;

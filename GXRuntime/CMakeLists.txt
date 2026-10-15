@@ -45,6 +45,9 @@ target_include_directories(gxruntime
         "$<INSTALL_INTERFACE:include>"
 )
 
+# Fastmem module discovery uses dladdr/dlopen/dlinfo on Linux.
+target_link_libraries(gxruntime PUBLIC ${CMAKE_DL_LIBS})
+
 include(CheckLibraryExists)
 check_library_exists(m sqrt "" GXRUNTIME_HAVE_LIBM)
 if(GXRUNTIME_HAVE_LIBM)

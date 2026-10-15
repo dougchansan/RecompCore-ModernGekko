@@ -177,10 +177,13 @@ static int dolrecomp_fastmem_install(void) {
 #include <ucontext.h>
 static struct sigaction g_dolrecomp_fm_prev;
 static int g_dolrecomp_fm_installed;
+static void dolrecomp_fastmem_fault(int sig, siginfo_t* info, void* raw);
 /* Unloading the module puts the previous SIGSEGV action back (see the
    Windows branch). */
 static void __attribute__((destructor)) dolrecomp_fastmem_uninstall(void) {
-    if (g_dolrecomp_fm_installed)
+    struct sigaction current;
+    if (g_dolrecomp_fm_installed && sigaction(SIGSEGV, NULL, &current) == 0 &&
+        (current.sa_flags & SA_SIGINFO) && current.sa_sigaction == dolrecomp_fastmem_fault)
         sigaction(SIGSEGV, &g_dolrecomp_fm_prev, NULL);
 }
 static void dolrecomp_fastmem_fault(int sig, siginfo_t* info, void* raw) {

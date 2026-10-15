@@ -67,7 +67,7 @@ target_include_directories(${MODULE_NAME} PRIVATE
   "${CHASSIS_ABI_DIR}"
   "${CMAKE_CURRENT_BINARY_DIR}")
 
-target_link_libraries(${MODULE_NAME} PRIVATE m)
+target_link_libraries(${MODULE_NAME} PRIVATE m ${CMAKE_DL_LIBS})
 
 # ThinLTO so the GXRuntime cpu.c helpers inline into the generated chunk
 # call sites; semantics unchanged (no -ffast-math, FP stays bit-exact).
