@@ -447,6 +447,12 @@ extern std::atomic<int> g_debug_view;
 extern std::atomic<int> g_low_latency_mode;
 extern std::atomic<bool> g_low_latency_supported;
 extern std::atomic<float> g_low_latency_ms;
+// Reflex's CPU-thread half, set by the backend that implements it: called on the
+// emulation thread at every emulated field boundary with its CoreTiming ticks
+// (a field's XFB is queued earlier, at the end of its active video). The game
+// simulation is the emulation thread, so the latency sleep and the simulation
+// markers belong there.
+extern std::atomic<void (*)(u64 ticks)> g_low_latency_field_hook;
 // Exclusive fullscreen wanted right now (display mode Exclusive, fullscreen and
 // focused); the presenter applies changes on the GPU thread.
 extern std::atomic<bool> g_exclusive_fullscreen_wanted;

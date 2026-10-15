@@ -54,6 +54,7 @@ std::atomic<int> g_low_latency_mode{[] {
 }()};
 std::atomic<bool> g_low_latency_supported{false};
 std::atomic<float> g_low_latency_ms{0.0f};
+std::atomic<void (*)(u64 ticks)> g_low_latency_field_hook{nullptr};
 std::atomic<int> g_debug_view{[] {
   const char* env = std::getenv("MODERNGEKKO_SSAO_DEBUG");
   return env ? std::clamp(std::atoi(env), 0, 3) : 0;

@@ -323,7 +323,9 @@ void VKGfx::PresentBackbuffer()
     // Because this final command buffer is rendering to the swap chain, we need to wait for
     // the available semaphore to be signaled before executing the buffer. This final submission
     // can happen off-thread in the background while we're preparing the next frame.
-    const u64 present_id = LowLatency::BeginPresent();
+    // NVIDIA Reflex: tag the present with the emulated frame of the XFB shown.
+    const u64 present_id =
+        LowLatency::BeginPresent(g_presenter ? g_presenter->m_last_xfb_ticks : 0);
     g_command_buffer_mgr->SubmitCommandBuffer(true, false, true, m_swap_chain->GetSwapChain(),
                                               m_swap_chain->GetCurrentImageIndex(), present_id);
   }
@@ -331,9 +333,6 @@ void VKGfx::PresentBackbuffer()
   {
     g_command_buffer_mgr->SubmitCommandBuffer(true, false, true);
   }
-  // NVIDIA Reflex: the next frame starts here (sleeps when the mode is on).
-  LowLatency::FrameStart();
-
   // New cmdbuffer, so invalidate state.
   StateTracker::GetInstance()->InvalidateCachedState();
 }

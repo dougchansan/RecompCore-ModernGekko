@@ -709,7 +709,13 @@ void VideoInterfaceManager::Update(u64 ticks)
   // dealing with SI polls, but after potentially sending a swap request to the GPU thread
 
   if (is_at_field_boundary)
+  {
+    // NVIDIA Reflex: end of this field's simulation, latency sleep, start of the
+    // next (the field's XFB, if any, was queued earlier, at EndField).
+    if (auto* const low_latency = g_low_latency_field_hook.load(std::memory_order_acquire))
+      low_latency(ticks);
     Core::Callback_NewField(m_system);
+  }
 
   auto& core_timing = m_system.GetCoreTiming();
 

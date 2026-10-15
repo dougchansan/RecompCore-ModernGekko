@@ -18,11 +18,27 @@ VkDevice s_device = VK_NULL_HANDLE;
 VkSwapchainKHR s_swap_chain = VK_NULL_HANDLE;
 VkSemaphore s_semaphore = VK_NULL_HANDLE;  // timeline, signalled by vkLatencySleepNV
 u64 s_semaphore_value = 0;
-u64 s_frame = 0;          // present ID of the frame being built (video thread)
-int s_applied_mode = -1;  // last vkSetLatencySleepModeNV
+u64 s_sim_frame = 0;         // ID of the emulated frame being simulated (emulation thread)
+u64 s_last_presented = 0;    // highest ID tagged on a present (video thread)
+int s_applied_mode = -1;     // last vkSetLatencySleepModeNV
 u32 s_frames_since_report = 0;
-// Swapchain calls (present, sleep, markers) need external synchronization; the
-// present can run on the submission thread.
+// Each frame's simulation start (field boundary ticks) -> its ID. An XFB is
+// queued at the end of the field's active video, before the boundary, so it
+// belongs to the frame with the latest start at or before its ticks. A ring of
+// recent frames; the video thread trails the emulation thread by a few frames.
+struct FieldFrame
+{
+  u64 ticks = 0;
+  u64 frame = 0;
+};
+std::array<FieldFrame, 32> s_fields{};
+u32 s_field_next = 0;
+// Since the last report: presents tagged / not tagged, and the last ticks seen
+// on each side (logged when the driver returns no usable timings).
+u32 s_tagged = 0, s_untagged = 0;
+u64 s_last_field_ticks = 0, s_last_xfb_ticks = 0;
+// Swapchain calls (present, sleep, markers) need external synchronization; they
+// come from the emulation thread, the video thread and the submission thread.
 std::mutex s_mutex;
 VkSwapchainLatencyCreateInfoNV s_create_info = {VK_STRUCTURE_TYPE_SWAPCHAIN_LATENCY_CREATE_INFO_NV,
                                                 nullptr, VK_TRUE};
@@ -71,12 +87,64 @@ void Report(int mode)
     ++count;
   }
   if (count == 0)
+  {
+    std::fprintf(stderr,
+                 "[reflex] mode=%d no timings (driver reports %u; presents tagged %u untagged %u; "
+                 "field ticks %llu xfb ticks %llu)\n",
+                 mode, info.timingCount, s_tagged, s_untagged,
+                 static_cast<unsigned long long>(s_last_field_ticks),
+                 static_cast<unsigned long long>(s_last_xfb_ticks));
+    s_tagged = s_untagged = 0;
     return;
+  }
+  s_tagged = s_untagged = 0;
   const double present_ms = present_sum / count / 1000.0, gpu_ms = gpu_sum / count / 1000.0;
   g_low_latency_ms.store(static_cast<float>(gpu_ms), std::memory_order_relaxed);
   std::fprintf(stderr,
                "[reflex] mode=%d frames=%u sim->gpu-end %.2f ms sim->present-end %.2f ms\n", mode,
                count, gpu_ms, present_ms);
+}
+
+// Emulation thread, at every emulated field boundary.
+void FieldBoundary(u64 ticks)
+{
+  const int mode = g_low_latency_mode.load(std::memory_order_relaxed);
+  bool wait = false;
+  {
+    std::lock_guard lock(s_mutex);
+    if (s_swap_chain == VK_NULL_HANDLE)
+      return;
+    if (s_sim_frame != 0)
+      Marker(s_sim_frame, VK_LATENCY_MARKER_SIMULATION_END_NV);
+    s_last_field_ticks = ticks;
+    ApplyMode(mode);
+    if (++s_frames_since_report >= 240)
+    {
+      s_frames_since_report = 0;
+      Report(mode);
+    }
+    if (mode > 0)
+    {
+      const VkLatencySleepInfoNV info = {VK_STRUCTURE_TYPE_LATENCY_SLEEP_INFO_NV, nullptr,
+                                         s_semaphore, ++s_semaphore_value};
+      wait = vkLatencySleepNV(s_device, s_swap_chain, &info) == VK_SUCCESS;
+    }
+  }
+  if (wait)
+  {
+    const VkSemaphoreWaitInfo info = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, nullptr, 0, 1,
+                                      &s_semaphore, &s_semaphore_value};
+    vkWaitSemaphores(s_device, &info, 100'000'000);  // at most 100 ms
+  }
+  std::lock_guard lock(s_mutex);
+  if (s_swap_chain == VK_NULL_HANDLE)
+    return;
+  ++s_sim_frame;
+  s_fields[s_field_next] = {ticks, s_sim_frame};
+  s_field_next = (s_field_next + 1) % s_fields.size();
+  Marker(s_sim_frame, VK_LATENCY_MARKER_SIMULATION_START_NV);
+  // Controllers are polled during the field (SI), after this point.
+  Marker(s_sim_frame, VK_LATENCY_MARKER_INPUT_SAMPLE_NV);
 }
 }  // namespace
 
@@ -94,13 +162,19 @@ void Init(VkDevice device)
   }
   s_device = device;
   s_semaphore_value = 0;
+  s_sim_frame = 0;
+  s_last_presented = 0;
+  s_fields = {};
   s_enabled = true;
   g_low_latency_supported.store(true, std::memory_order_relaxed);
+  g_low_latency_field_hook.store(&FieldBoundary, std::memory_order_release);
   std::fprintf(stderr, "[reflex] VK_NV_low_latency2 available\n");
 }
 
 void Shutdown()
 {
+  g_low_latency_field_hook.store(nullptr, std::memory_order_release);
+  std::lock_guard lock(s_mutex);
   if (s_semaphore != VK_NULL_HANDLE)
     vkDestroySemaphore(s_device, s_semaphore, nullptr);
   s_semaphore = VK_NULL_HANDLE;
@@ -129,6 +203,8 @@ void OnSwapChainCreated(VkSwapchainKHR swap_chain)
   std::lock_guard lock(s_mutex);
   s_swap_chain = swap_chain;
   s_applied_mode = -1;
+  // Present IDs restart with a new swapchain; frame IDs keep increasing, which
+  // VkPresentIdKHR allows.
 }
 
 void OnSwapChainDestroyed(VkSwapchainKHR swap_chain)
@@ -138,52 +214,34 @@ void OnSwapChainDestroyed(VkSwapchainKHR swap_chain)
     s_swap_chain = VK_NULL_HANDLE;
 }
 
-void FrameStart()
-{
-  if (!s_enabled)
-    return;
-  const int mode = g_low_latency_mode.load(std::memory_order_relaxed);
-  bool wait = false;
-  {
-    std::lock_guard lock(s_mutex);
-    if (s_swap_chain == VK_NULL_HANDLE)
-      return;
-    ApplyMode(mode);
-    if (++s_frames_since_report >= 240)
-    {
-      s_frames_since_report = 0;
-      Report(mode);
-    }
-    ++s_frame;
-    if (mode > 0)
-    {
-      const VkLatencySleepInfoNV info = {VK_STRUCTURE_TYPE_LATENCY_SLEEP_INFO_NV, nullptr,
-                                         s_semaphore, ++s_semaphore_value};
-      wait = vkLatencySleepNV(s_device, s_swap_chain, &info) == VK_SUCCESS;
-    }
-  }
-  if (wait)
-  {
-    const VkSemaphoreWaitInfo info = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, nullptr, 0, 1,
-                                      &s_semaphore, &s_semaphore_value};
-    vkWaitSemaphores(s_device, &info, 100'000'000);  // at most 100 ms
-  }
-  std::lock_guard lock(s_mutex);
-  if (s_swap_chain != VK_NULL_HANDLE)
-    Marker(s_frame, VK_LATENCY_MARKER_SIMULATION_START_NV);
-}
-
-u64 BeginPresent()
+u64 BeginPresent(u64 xfb_ticks)
 {
   if (!s_enabled)
     return 0;
   std::lock_guard lock(s_mutex);
-  if (s_swap_chain == VK_NULL_HANDLE || s_frame == 0)
+  if (s_swap_chain == VK_NULL_HANDLE)
     return 0;
-  Marker(s_frame, VK_LATENCY_MARKER_SIMULATION_END_NV);
-  Marker(s_frame, VK_LATENCY_MARKER_RENDERSUBMIT_START_NV);
-  Marker(s_frame, VK_LATENCY_MARKER_RENDERSUBMIT_END_NV);
-  return s_frame;
+  u64 frame = 0, start = 0;
+  for (const FieldFrame& field : s_fields)
+  {
+    if (field.frame != 0 && field.ticks <= xfb_ticks && field.ticks >= start)
+    {
+      frame = field.frame;
+      start = field.ticks;
+    }
+  }
+  s_last_xfb_ticks = xfb_ticks;
+  // Present IDs must increase: only the first present of a frame is tagged.
+  if (frame == 0 || frame <= s_last_presented)
+  {
+    ++s_untagged;
+    return 0;
+  }
+  ++s_tagged;
+  s_last_presented = frame;
+  Marker(frame, VK_LATENCY_MARKER_RENDERSUBMIT_START_NV);
+  Marker(frame, VK_LATENCY_MARKER_RENDERSUBMIT_END_NV);
+  return frame;
 }
 
 VkResult Present(VkQueue queue, VkPresentInfoKHR* info, u64 present_id)
