@@ -40,6 +40,7 @@ void AsyncRequests::QueueEvent(Event&& event)
 
 void AsyncRequests::WaitForEmptyQueue()
 {
+  const WaitStats::Scope wait(WaitStats::Kind::EmptyQueue);
   m_queue.WaitForEmpty();
 }
 
