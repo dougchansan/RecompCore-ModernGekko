@@ -132,8 +132,10 @@ static int dolrecomp_fastmem_emulate(uintptr_t rip, u64* regs[16]) {
 #include <windows.h>
 static PVOID g_dolrecomp_fm_handler;
 /* The module can be unloaded while the emulator lives on; do not leave a
-   process-wide handler pointing into its unmapped image. */
-static void __attribute__((destructor)) dolrecomp_fastmem_uninstall(void) {
+   process-wide handler pointing into its unmapped image. Registered with the
+   module's CRT atexit, which runs at DLL unload with the static and the
+   dynamic CRT alike; a compiler destructor did not run under /MD. */
+static void dolrecomp_fastmem_uninstall(void) {
     if (g_dolrecomp_fm_handler)
         RemoveVectoredExceptionHandler(g_dolrecomp_fm_handler);
 }
@@ -165,6 +167,10 @@ static int dolrecomp_fastmem_install(void) {
     g_dolrecomp_fm_code_lo = (uintptr_t)self;
     g_dolrecomp_fm_code_hi = (uintptr_t)self + nt->OptionalHeader.SizeOfImage;
     g_dolrecomp_fm_handler = AddVectoredExceptionHandler(1, dolrecomp_fastmem_fault);
+    if (g_dolrecomp_fm_handler && atexit(dolrecomp_fastmem_uninstall) != 0) {
+        dolrecomp_fastmem_uninstall();
+        g_dolrecomp_fm_handler = NULL;
+    }
     return g_dolrecomp_fm_handler != NULL;
 }
 #elif defined(__linux__)
@@ -176,8 +182,13 @@ static struct sigaction g_dolrecomp_fm_prev;
 static int g_dolrecomp_fm_installed;
 /* Unloading the module puts the previous SIGSEGV action back (see the
    Windows branch). */
+static void dolrecomp_fastmem_fault(int sig, siginfo_t* info, void* raw);
 static void __attribute__((destructor)) dolrecomp_fastmem_uninstall(void) {
-    if (g_dolrecomp_fm_installed)
+    /* Only if ours is still the installed action: someone may have chained
+       over it since. */
+    struct sigaction current;
+    if (g_dolrecomp_fm_installed && sigaction(SIGSEGV, NULL, &current) == 0 &&
+        (current.sa_flags & SA_SIGINFO) && current.sa_sigaction == dolrecomp_fastmem_fault)
         sigaction(SIGSEGV, &g_dolrecomp_fm_prev, NULL);
 }
 static void dolrecomp_fastmem_fault(int sig, siginfo_t* info, void* raw) {
@@ -213,14 +224,19 @@ static int dolrecomp_fastmem_install(void) {
     /* The module's mapped extent: the span of its PT_LOAD segments. */
     struct link_map* lm = NULL;
     void* h = dlopen(dl.dli_fname, RTLD_NOW | RTLD_NOLOAD);
-    if (!h || dlinfo(h, RTLD_DI_LINKMAP, &lm) != 0 || !lm)
+    if (!h)
         return 0;
+    if (dlinfo(h, RTLD_DI_LINKMAP, &lm) != 0 || !lm) {
+        dlclose(h);
+        return 0;
+    }
     const ElfW(Ehdr)* eh = (const ElfW(Ehdr)*)dl.dli_fbase;
     const ElfW(Phdr)* ph = (const ElfW(Phdr)*)((const u8*)eh + eh->e_phoff);
     uintptr_t hi = 0;
     for (int k = 0; k < eh->e_phnum; k++)
         if (ph[k].p_type == PT_LOAD && lm->l_addr + ph[k].p_vaddr + ph[k].p_memsz > hi)
             hi = lm->l_addr + ph[k].p_vaddr + ph[k].p_memsz;
+    dlclose(h);  /* RTLD_NOLOAD took a reference; the module stays loaded */
     g_dolrecomp_fm_code_lo = (uintptr_t)dl.dli_fbase;
     g_dolrecomp_fm_code_hi = hi;
     struct sigaction sa;
