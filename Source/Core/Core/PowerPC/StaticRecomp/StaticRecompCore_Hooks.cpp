@@ -171,6 +171,15 @@ void StaticRecompCore::HookExternalWrite(CPUState* cpu, u32 ea, u64 value, u8 si
   // special case without an MMU round trip. Keying on the effective page is
   // the same shortcut Dolphin's JITs take (optimizeGatherPipe). GPFifo
   // maintains ppc_state.gather_pipe_ptr internally.
+  //
+  // FastWrite + FastCheckGatherPipe rather than Write*: Write* also calls
+  // JitInterface::CompileExceptionCheck, which teaches the JIT to recompile
+  // the storing block with an inline FIFO check. These stores come from the
+  // static module, which that never applies to - and ppc_state.pc does not
+  // name the store here, so every burst paid for an instruction fetch and
+  // decode, and could invalidate an unrelated fallback block. The FIFO work
+  // is unchanged; an 8-byte store flushes once instead of after each byte,
+  // which leaves the same pipe and FIFO state.
   if ((ea & 0xFFFFF000) == 0xCC008000u)
   {
     if (core->m_lockstep_verifier->m_ls_journaling)
@@ -179,22 +188,20 @@ void StaticRecompCore::HookExternalWrite(CPUState* cpu, u32 ea, u64 value, u8 si
     switch (size)
     {
     case 1:
-      gpfifo.Write8(static_cast<u8>(value));
-      return;
+      gpfifo.FastWrite8(static_cast<u8>(value));
+      break;
     case 2:
-      gpfifo.Write16(static_cast<u16>(value));
-      return;
+      gpfifo.FastWrite16(static_cast<u16>(value));
+      break;
     case 4:
-      gpfifo.Write32(static_cast<u32>(value));
-      return;
+      gpfifo.FastWrite32(static_cast<u32>(value));
+      break;
     default:
-      for (u32 i = size * 8u; i > 0;)
-      {
-        i -= 8;
-        gpfifo.Write8(static_cast<u8>(value >> i));
-      }
-      return;
+      gpfifo.FastWrite64(value);
+      break;
     }
+    gpfifo.FastCheckGatherPipe();
+    return;
   }
 
   core->PropagateGuestMSR();
