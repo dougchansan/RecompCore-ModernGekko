@@ -293,11 +293,15 @@ void NetPlayClient::OnSyncSaveDataWii(sf::Packet& packet)
 
 void NetPlayClient::OnSyncSaveDataGBA(sf::Packet& packet)
 {
-  int device_number;
+  // The server sends the slot as a u8 (NetPlayServer::SyncSaveData); reading
+  // an int here took three bytes of the save's size along with it, and the
+  // decompressor then failed with "LZO error - input is too large".
+  u8 device_number;
   packet >> device_number;
 
-  const std::string path = File::GetUserPath(D_GBAUSER_IDX) + GC_MEMCARD_NETPLAY +
-                           fmt::format("GBA_{}.sav", device_number);
+  // Where the GBA core looks for it (GetGBASavePath), not a name of its own.
+  const std::string path = fmt::format("{}{}{}.sav", File::GetUserPath(D_GBAUSER_IDX),
+                                       GBA_SAVE_NETPLAY, device_number + 1);
   if (File::Exists(path) && !File::Delete(path))
   {
     PanicAlertFmtT("Failed to delete NetPlay GBA save. Verify your write permissions.");

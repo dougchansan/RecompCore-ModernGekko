@@ -44,6 +44,8 @@ private:
   EBufferCommands m_last_cmd{};
   u64 m_timestamp_sent = 0;
   u16 m_keys = 0;
+  // When the buttons were last read (emulated ticks), see RunBuffer.
+  u64 m_last_input_ticks = 0;
 
   std::shared_ptr<HW::GBA::Core> m_core;
   std::shared_ptr<GBAHostInterface> m_gbahost;

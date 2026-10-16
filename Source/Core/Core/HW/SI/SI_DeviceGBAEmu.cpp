@@ -59,6 +59,20 @@ int CSIDevice_GBAEmu::RunBuffer(u8* buffer, int request_length)
 #endif
     m_last_cmd = static_cast<EBufferCommands>(buffer[0]);
     m_timestamp_sent = m_system.GetCoreTiming().GetTicks();
+
+    // A game that talks to its GBAs only over the link (Pokemon Colosseum)
+    // never polls them as controllers until a battle starts, so their
+    // buttons, and the power switch that rides on them (PAD_BUTTON_X), went
+    // unread: the GBA could not be turned on at the connect screen, and over
+    // netplay not at all. Read them here too, at most once a frame. Every
+    // netplay peer runs this at the same emulated moment, so the inputs stay
+    // in lockstep.
+    if (m_timestamp_sent - m_last_input_ticks >=
+        m_system.GetSystemTimers().GetTicksPerSecond() / 60)
+    {
+      u32 hi, low;
+      GetData(hi, low);
+    }
     m_core->SendJoybusCommand(m_timestamp_sent, TransferInterval(), buffer, m_keys);
 
     auto& si = m_system.GetSerialInterface();
@@ -122,6 +136,7 @@ int CSIDevice_GBAEmu::TransferInterval()
 
 DataResponse CSIDevice_GBAEmu::GetData(u32& hi, u32& low)
 {
+  m_last_input_ticks = m_system.GetCoreTiming().GetTicks();
   GCPadStatus pad_status{};
   if (!NetPlay::IsNetPlayRunning())
     pad_status = Pad::GetGBAStatus(m_device_number);
