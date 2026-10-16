@@ -60,6 +60,12 @@ bool Host_IsSixtyFpsEnabled();
 void Host_ToggleSixtyFps();
 bool Host_IsAutosaveEnabled();
 void Host_ToggleAutosave();
+// The Players and Audio menus open panels drawn by the runtime.
+void Host_OpenPlayersPanel();
+void Host_OpenAudioMixer();
+bool Host_IsGbaPlayerNumbersShown();
+void Host_ToggleGbaPlayerNumbers();
+bool Host_WantsMouse();
 
 // The frontend keeps the camera mod's view next to the state (<state>.camera).
 void Host_SaveCameraForState(const std::string& state_path);
@@ -88,6 +94,9 @@ constexpr UINT ID_NAV_FAST_FORWARD = 41022;
 constexpr UINT ID_NAV_AUTOSAVE = 41023;
 constexpr UINT ID_NAV_SIXTY_FPS = 41024;
 constexpr UINT ID_NAV_COMMUNITY_HD_TEXTURE_PACK = 41025;
+constexpr UINT ID_PLAYERS_PANEL = 41026;
+constexpr UINT ID_GBA_NUMBERS = 41027;
+constexpr UINT ID_AUDIO_MIXER = 41028;
 constexpr UINT ID_LOAD_STATE_FIRST = 41100;
 constexpr UINT ID_LOAD_STATE_LAST = 41199;
 
@@ -145,6 +154,8 @@ private:
   HMENU m_load_menu{};
   HMENU m_view_menu{};
   HMENU m_ultrawide_quality_menu{};
+  HMENU m_players_menu{};
+  HMENU m_audio_menu{};
   // Parallel to the Load State menu entries, rebuilt whenever it opens.
   std::vector<std::string> m_load_state_paths;
   std::time_t m_last_save_time{};
@@ -243,8 +254,10 @@ bool PlatformWin32::CreateMenus()
   m_load_menu = CreatePopupMenu();
   m_view_menu = CreatePopupMenu();
   m_ultrawide_quality_menu = CreatePopupMenu();
+  m_players_menu = CreatePopupMenu();
+  m_audio_menu = CreatePopupMenu();
   if (!m_menu || !m_file_menu || !m_load_menu || !m_view_menu ||
-      !m_ultrawide_quality_menu)
+      !m_ultrawide_quality_menu || !m_players_menu || !m_audio_menu)
     return false;
 
   AppendMenuW(m_file_menu, MF_STRING, ID_SAVE_STATE, L"&Save State\tF1");
@@ -258,8 +271,6 @@ bool PlatformWin32::CreateMenus()
   AppendMenuW(m_file_menu, MF_STRING, ID_NAV_AUTOSAVE, L"Rotating &Autosaves");
 
   AppendMenuW(m_view_menu, MF_STRING, ID_FULLSCREEN, L"&Fullscreen\tAlt+Enter");
-  AppendMenuW(m_view_menu, MF_STRING, ID_MUTE, L"&Mute Audio");
-  AppendMenuW(m_view_menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(m_view_menu, MF_STRING, ID_NAV_TOGGLE_MAP, L"&Show Navigation Map");
   AppendMenuW(m_view_menu, MF_STRING, ID_NAV_FIT_MAP, L"&Fit Map Bounds");
   AppendMenuW(m_view_menu, MF_SEPARATOR, 0, nullptr);
@@ -290,7 +301,15 @@ bool PlatformWin32::CreateMenus()
   AppendMenuW(m_view_menu, MF_STRING, ID_NAV_FAST_FORWARD,
               L"Hold Space to &Fast-Forward");
   AppendMenuW(m_menu, MF_POPUP, reinterpret_cast<UINT_PTR>(m_file_menu), L"&File");
+  AppendMenuW(m_players_menu, MF_STRING, ID_PLAYERS_PANEL, L"&Controllers and GBAs...");
+  AppendMenuW(m_players_menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(m_players_menu, MF_STRING, ID_GBA_NUMBERS, L"Show GBA &Player Numbers");
+  AppendMenuW(m_audio_menu, MF_STRING, ID_AUDIO_MIXER, L"Volume &Mixer...");
+  AppendMenuW(m_audio_menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(m_audio_menu, MF_STRING, ID_MUTE, L"&Mute Audio");
   AppendMenuW(m_menu, MF_POPUP, reinterpret_cast<UINT_PTR>(m_view_menu), L"&View");
+  AppendMenuW(m_menu, MF_POPUP, reinterpret_cast<UINT_PTR>(m_players_menu), L"&Players");
+  AppendMenuW(m_menu, MF_POPUP, reinterpret_cast<UINT_PTR>(m_audio_menu), L"&Audio");
   return SetMenu(m_hwnd, m_menu) != FALSE;
 }
 
@@ -309,11 +328,24 @@ void PlatformWin32::RefreshMenu(const HMENU menu)
     return;
   }
 
-  if (menu == m_view_menu)
+  if (menu == m_audio_menu)
   {
-    CheckMenuItem(m_view_menu, ID_MUTE,
+    CheckMenuItem(m_audio_menu, ID_MUTE,
                   MF_BYCOMMAND |
                       (Config::Get(Config::MAIN_AUDIO_MUTED) ? MF_CHECKED : MF_UNCHECKED));
+    return;
+  }
+
+  if (menu == m_players_menu)
+  {
+    CheckMenuItem(m_players_menu, ID_GBA_NUMBERS,
+                  MF_BYCOMMAND |
+                      (Host_IsGbaPlayerNumbersShown() ? MF_CHECKED : MF_UNCHECKED));
+    return;
+  }
+
+  if (menu == m_view_menu)
+  {
     CheckMenuItem(m_view_menu, ID_NAV_TOGGLE_MAP,
                   MF_BYCOMMAND |
                       (Host_IsNavigationOverlayVisible() ? MF_CHECKED :
@@ -670,7 +702,9 @@ LRESULT PlatformWin32::WndProc(const HWND hwnd, const UINT msg, const WPARAM wPa
     break;
 
   case WM_MOUSEMOVE:
-    if (Host_IsPauseMenuOpen() && g_presenter)
+    // Always tracked: the GBA screens and panels need to know when the mouse is
+    // over them, not only the pause menu.
+    if (g_presenter)
       g_presenter->SetMousePos(static_cast<float>(GET_X_LPARAM(lParam)),
                                static_cast<float>(GET_Y_LPARAM(lParam)));
     break;
@@ -679,7 +713,8 @@ LRESULT PlatformWin32::WndProc(const HWND hwnd, const UINT msg, const WPARAM wPa
   case WM_RBUTTONDOWN:
   case WM_RBUTTONUP:
     if (platform && g_presenter &&
-        (Host_IsPauseMenuOpen() || msg == WM_LBUTTONUP || msg == WM_RBUTTONUP))
+        (Host_IsPauseMenuOpen() || Host_WantsMouse() || msg == WM_LBUTTONUP ||
+         msg == WM_RBUTTONUP))
     {
       const u32 bit = (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP) ? 1u : 2u;
       if (msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN)
@@ -721,6 +756,18 @@ LRESULT PlatformWin32::WndProc(const HWND hwnd, const UINT msg, const WPARAM wPa
     else if (command == ID_MUTE)
     {
       Config::SetCurrent(Config::MAIN_AUDIO_MUTED, !Config::Get(Config::MAIN_AUDIO_MUTED));
+    }
+    else if (command == ID_PLAYERS_PANEL)
+    {
+      Host_OpenPlayersPanel();
+    }
+    else if (command == ID_GBA_NUMBERS)
+    {
+      Host_ToggleGbaPlayerNumbers();
+    }
+    else if (command == ID_AUDIO_MIXER)
+    {
+      Host_OpenAudioMixer();
     }
     else if (command == ID_FULLSCREEN)
     {
