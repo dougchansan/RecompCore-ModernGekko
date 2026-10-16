@@ -40,6 +40,7 @@ struct CodeOp  // 16B
   BitSet8 crOut;
   bool branchUsesCtr = false;
   bool branchIsIdleLoop = false;
+  bool conditionalContinue = false;
   BitSet8 wantsCR;
   bool wantsFPRF = false;
   bool wantsCA = false;
@@ -171,6 +172,10 @@ public:
 
     // Reorder cror instructions next to their associated fcmp.
     OPTION_CROR_MERGE = (1 << 6),
+
+    // Static fallback must dispatch every guest call and indirect return so
+    // entry and pending-return hooks cannot be hidden inside a JIT block.
+    OPTION_PRESERVE_CALL_BOUNDARIES = (1 << 7),
   };
 
   // Option setting/getting
@@ -181,6 +186,7 @@ public:
   void SetBranchFollowingEnabled(bool enabled) { m_enable_branch_following = enabled; }
   void SetFloatExceptionsEnabled(bool enabled) { m_enable_float_exceptions = enabled; }
   void SetDivByZeroExceptionsEnabled(bool enabled) { m_enable_div_by_zero_exceptions = enabled; }
+  void SetCompileBoundaryPredicate(int (*predicate)(u32)) { m_compile_boundary_predicate = predicate; }
   u32 Analyze(u32 address, CodeBlock* block, CodeBuffer* buffer, std::size_t block_size) const;
 
 private:
@@ -205,6 +211,7 @@ private:
   bool m_enable_branch_following = false;
   bool m_enable_float_exceptions = false;
   bool m_enable_div_by_zero_exceptions = false;
+  int (*m_compile_boundary_predicate)(u32) = nullptr;
 };
 
 void FindFunctions(const Core::CPUThreadGuard& guard, u32 startAddr, u32 endAddr,

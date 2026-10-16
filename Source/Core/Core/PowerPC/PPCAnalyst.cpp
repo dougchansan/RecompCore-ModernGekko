@@ -661,11 +661,16 @@ u32 PPCAnalyzer::Analyze(u32 address, CodeBlock* block, CodeBuffer* buffer,
   u32 num_inst = 0;
 
   const bool enable_follow = m_enable_branch_following;
+  const bool preserve_calls = HasOption(OPTION_PRESERVE_CALL_BOUNDARIES);
 
   auto& system = Core::System::GetInstance();
   auto& mmu = system.GetMMU();
   for (std::size_t i = 0; i < block_size; ++i)
   {
+    // The dispatcher already handled a hook at the entry instruction. Any
+    // later entry/return hook must regain control before that instruction.
+    if (i != 0 && m_compile_boundary_predicate && m_compile_boundary_predicate(address))
+      break;
     auto result = mmu.TryReadInstruction(address);
     if (!result.valid)
     {
@@ -699,7 +704,7 @@ u32 PPCAnalyzer::Analyze(u32 address, CodeBlock* block, CodeBuffer* buffer,
     //       cache clearning will happen many times.
     if (enable_follow && HasOption(OPTION_BRANCH_FOLLOW))
     {
-      if (inst.OPCD == 18 && block_size > 1)
+      if (inst.OPCD == 18 && block_size > 1 && (!preserve_calls || !inst.LK))
       {
         // Always follow BX instructions.
         follow = true;
@@ -710,7 +715,8 @@ u32 PPCAnalyzer::Analyze(u32 address, CodeBlock* block, CodeBuffer* buffer,
         }
       }
       else if (inst.OPCD == 16 && (inst.BO & BO_DONT_DECREMENT_FLAG) &&
-               (inst.BO & BO_DONT_CHECK_CONDITION) && block_size > 1)
+               (inst.BO & BO_DONT_CHECK_CONDITION) && block_size > 1 &&
+               (!preserve_calls || !inst.LK))
       {
         // Always follow unconditional BCX instructions, but they are very rare.
         follow = true;
@@ -720,7 +726,7 @@ u32 PPCAnalyzer::Analyze(u32 address, CodeBlock* block, CodeBuffer* buffer,
           caller = i;
         }
       }
-      else if (inst.OPCD == 19 && inst.SUBOP10 == 16 && !inst.LK && found_call)
+      else if (!preserve_calls && inst.OPCD == 19 && inst.SUBOP10 == 16 && !inst.LK && found_call)
       {
         code[i].branchTo = code[caller].address + 4;
         if ((inst.BO & BO_DONT_DECREMENT_FLAG) && (inst.BO & BO_DONT_CHECK_CONDITION) &&
@@ -749,13 +755,13 @@ u32 PPCAnalyzer::Analyze(u32 address, CodeBlock* block, CodeBuffer* buffer,
 
     if (HasOption(OPTION_CONDITIONAL_CONTINUE))
     {
-      if (inst.OPCD == 16 &&
+      if (inst.OPCD == 16 && (!preserve_calls || !inst.LK) &&
           ((inst.BO & BO_DONT_DECREMENT_FLAG) == 0 || (inst.BO & BO_DONT_CHECK_CONDITION) == 0))
       {
         // bcx with conditional branch
         conditional_continue = true;
       }
-      else if (inst.OPCD == 19 && inst.SUBOP10 == 16 &&
+      else if (!preserve_calls && inst.OPCD == 19 && inst.SUBOP10 == 16 &&
                ((inst.BO & BO_DONT_DECREMENT_FLAG) == 0 ||
                 (inst.BO & BO_DONT_CHECK_CONDITION) == 0))
       {
@@ -767,13 +773,18 @@ u32 PPCAnalyzer::Analyze(u32 address, CodeBlock* block, CodeBuffer* buffer,
         // tw/twi tests and raises an exception
         conditional_continue = true;
       }
-      else if (inst.OPCD == 19 && inst.SUBOP10 == 528 && (inst.BO_2 & BO_DONT_CHECK_CONDITION) == 0)
+      else if (!preserve_calls && inst.OPCD == 19 && inst.SUBOP10 == 528 &&
+               (inst.BO_2 & BO_DONT_CHECK_CONDITION) == 0)
       {
         // Rare bcctrx with conditional branch
         // Seen in NES games
         conditional_continue = true;
       }
     }
+
+    code[i].conditionalContinue = conditional_continue;
+    if (follow && m_compile_boundary_predicate && m_compile_boundary_predicate(code[i].branchTo))
+      follow = false;
 
     code[i].branchIsIdleLoop =
         code[i].branchTo == block->m_address && IsBusyWaitLoop(block, code, i);

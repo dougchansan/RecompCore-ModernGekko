@@ -46,9 +46,17 @@
 #include "Core/PowerPC/MMU.h"
 #include "Core/PowerPC/PPCAnalyst.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/PowerPC/StaticRecomp/StaticRecompCore.h"
 #include "Core/System.h"
 
 using namespace Gen;
+
+// TEMPORARY local stub for a debug build: the definition was not committed in
+// fb2e1319df. false keeps the pre-commit behaviour (every exit is linkable).
+static bool StaticRecompCompileBoundary(u32)
+{
+  return false;
+}
 using namespace PowerPC;
 
 // Dolphin's PowerPC->x86_64 JIT dynamic recompiler
@@ -410,7 +418,10 @@ void Jit64::JustWriteExit(u32 destination, bool bl, u32 after)
     JMP(asm_routines.dispatcher_no_timing_check, true);
   }
 
-  b->linkData.push_back(linkData);
+  // A hook destination must keep its dispatcher exit permanently: recording
+  // an unlinked exit would let the cache link it when another block appears.
+  if (!IsStaticRecompFallback() || !StaticRecompCompileBoundary(destination))
+    b->linkData.push_back(linkData);
 }
 
 void Jit64::WriteExitDestInRSCRATCH(bool bl, u32 after)

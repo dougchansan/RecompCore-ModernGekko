@@ -196,9 +196,12 @@ void StaticRecompCore::Init()
       if (interval_ms <= 0)
         interval_ms = 5;
       const int per_report = std::max(1, 2000 / interval_ms);
+      // STATICRECOMP_PC_SAMPLES_PPC samples the interpreter's pc instead, for
+      // code forced onto the interpreter with STATICRECOMP_FALLBACK_RANGES.
+      const bool sample_ppc = std::getenv("STATICRECOMP_PC_SAMPLES_PPC") != nullptr;
       while (m_pc_sampling.load(std::memory_order_relaxed))
       {
-        ++hits[m_guest.pc];
+        ++hits[sample_ppc ? m_system.GetPPCState().pc : m_guest.pc];
         std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
         if (++since_report < per_report)
           continue;
