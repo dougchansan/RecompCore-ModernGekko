@@ -345,41 +345,33 @@ std::string GenerateTextSharpenPixelShader()
   EmitSamplerDeclarations(code, 0, 1, false);
   EmitPixelMainDeclaration(code, 1, 0);
   code.Write("{{\n"
-             // Reconstruct a rounded silhouette from a compact, center-weighted footprint in
-             // native texel space. The small radius smooths curved shoulders while preserving
-             // the one-pixel counters in lowercase e and other narrow Colosseum glyphs.
-             "  float2 texel = float2(1.0f / 512.0f, 1.0f / 512.0f);\n"
-             "  float2 radius = texel * {:.3f}f;\n"
-             "  float center = ",
-             ColosseumTextUpscale::RECONSTRUCTION_RADIUS);
-  EmitSampleTexture(code, 0, "v_tex0");
+             // Rebuild the glyph edges from a Gaussian-weighted sum of the 4x4 native texels
+             // around this point (see ColosseumTextUpscale.h), then cut the smooth field with
+             // a narrow antialiased ramp: straight diagonals and round curves, open counters.
+             "  float2 p = v_tex0.xy * 512.0f;\n"
+             "  float2 base = floor(p - 0.5f);\n"
+             "  float field = 0.0f;\n"
+             "  float weights = 0.0f;\n"
+             "  for (int j = -1; j <= 2; j++)\n"
+             "  {{\n"
+             "    for (int i = -1; i <= 2; i++)\n"
+             "    {{\n"
+             "      float2 c = base + float2(float(i), float(j)) + 0.5f;\n"
+             "      float2 d = c - p;\n"
+             "      float w = exp(-dot(d, d) * {:.4f}f);\n"
+             "      field += w * ",
+             1.0f / (2.0f * ColosseumTextUpscale::SMOOTH_SIGMA *
+                     ColosseumTextUpscale::SMOOTH_SIGMA));
+  EmitSampleTexture(code, 0, "float3(c / 512.0f, v_tex0.z)");
   code.Write(".a;\n"
-             "  float axial = ");
-  EmitSampleTexture(code, 0, "float3(v_tex0.xy + float2(radius.x, 0.0f), v_tex0.z)");
-  code.Write(".a + ");
-  EmitSampleTexture(code, 0, "float3(v_tex0.xy - float2(radius.x, 0.0f), v_tex0.z)");
-  code.Write(".a + ");
-  EmitSampleTexture(code, 0, "float3(v_tex0.xy + float2(0.0f, radius.y), v_tex0.z)");
-  code.Write(".a + ");
-  EmitSampleTexture(code, 0, "float3(v_tex0.xy - float2(0.0f, radius.y), v_tex0.z)");
-  code.Write(".a;\n"
-             "  float diagonal = ");
-  EmitSampleTexture(code, 0, "float3(v_tex0.xy + radius, v_tex0.z)");
-  code.Write(".a + ");
-  EmitSampleTexture(code, 0, "float3(v_tex0.xy - radius, v_tex0.z)");
-  code.Write(".a + ");
-  EmitSampleTexture(code, 0, "float3(v_tex0.xy + float2(radius.x, -radius.y), v_tex0.z)");
-  code.Write(".a + ");
-  EmitSampleTexture(code, 0, "float3(v_tex0.xy + float2(-radius.x, radius.y), v_tex0.z)");
-  code.Write(".a;\n"
-             "  float reconstructed = center * {:.3f}f + axial * {:.3f}f + "
-             "diagonal * {:.3f}f;\n"
-             "  float coverage = smoothstep({:.2f}f, {:.2f}f, reconstructed);\n"
+             "      weights += w;\n"
+             "    }}\n"
+             "  }}\n"
+             "  float coverage = smoothstep({:.3f}f, {:.3f}f, field / weights);\n"
              "  ocol0 = float4(coverage, coverage, coverage, coverage);\n"
              "}}\n",
-             ColosseumTextUpscale::CENTER_WEIGHT, ColosseumTextUpscale::AXIAL_WEIGHT,
-             ColosseumTextUpscale::DIAGONAL_WEIGHT, ColosseumTextUpscale::COVERAGE_LOW,
-             ColosseumTextUpscale::COVERAGE_HIGH);
+             ColosseumTextUpscale::EDGE_LEVEL - ColosseumTextUpscale::EDGE_HALF_WIDTH,
+             ColosseumTextUpscale::EDGE_LEVEL + ColosseumTextUpscale::EDGE_HALF_WIDTH);
   return code.GetBuffer();
 }
 
