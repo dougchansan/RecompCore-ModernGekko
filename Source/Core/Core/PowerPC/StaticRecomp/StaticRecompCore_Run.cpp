@@ -13,9 +13,14 @@
 #include "Core/Config/ConfigManager.h"
 #include "Core/HW/SystemTimers.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <memory>
+#include <sstream>
+#include <string>
+#include <unordered_set>
 
 namespace
 {
@@ -51,6 +56,94 @@ bool GuestRead8(const u8* ram, u32 ram_size, u32 address, u8* out)
     return false;
   *out = ram[offset];
   return true;
+}
+
+// STATICRECOMP_WATCH_PCS=addr,addr,... prints the argument registers whenever
+// execution is about to run one of those guest addresses, plus the C string at
+// r3/r4 when either points into RAM. Combine with STATICRECOMP_FALLBACK_RANGES
+// so calls into the watched functions reach the dispatcher instead of staying
+// inside a native chunk. Unset, this costs one branch per dispatch.
+const std::unordered_set<u32>& WatchedPcs()
+{
+  static const std::unordered_set<u32> pcs = [] {
+    std::unordered_set<u32> parsed;
+    const char* setting = std::getenv("STATICRECOMP_WATCH_PCS");
+    std::istringstream list(setting ? setting : "");
+    std::string item;
+    while (std::getline(list, item, ','))
+    {
+      unsigned int value = 0;
+      if (std::sscanf(item.c_str(), "%x", &value) == 1)
+        parsed.insert(value);
+    }
+    return parsed;
+  }();
+  return pcs;
+}
+
+void PrintGuestString(const u8* ram, u32 ram_size, u32 address)
+{
+  if (address < 0x80000000u || address - 0x80000000u >= ram_size)
+    return;
+  const u32 offset = address - 0x80000000u;
+  const u8 first = ram[offset];
+  if (first < 0x20 || first >= 0x7F)
+    return;
+  std::fprintf(stderr, " \"");
+  for (u32 i = 0; i < 160 && offset + i < ram_size; ++i)
+  {
+    const u8 c = ram[offset + i];
+    if (c == 0)
+      break;
+    if (c == '\n')
+      std::fprintf(stderr, "\\n");
+    else if (c >= 0x20 && c < 0x7F)
+      std::fputc(c, stderr);
+    else
+      std::fprintf(stderr, "\\x%02x", c);
+  }
+  std::fprintf(stderr, "\"");
+}
+
+// STATICRECOMP_WATCH_GATE=<file>: report only while that file exists (checked
+// at most every ~16 ms), so a capture can be switched on around one scene.
+bool WatchGateOpen()
+{
+  static const char* gate = std::getenv("STATICRECOMP_WATCH_GATE");
+  if (!gate || !*gate)
+    return true;
+  static auto last = std::chrono::steady_clock::time_point{};
+  static bool open = false;
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last > std::chrono::milliseconds(16))
+  {
+    last = now;
+    std::error_code ec;
+    open = std::filesystem::exists(gate, ec);
+  }
+  return open;
+}
+
+void ReportWatchedPc(const char* path, u32 pc, u32 lr, const u32* gpr, const u8* ram,
+                     u32 ram_size)
+{
+  if (!WatchGateOpen())
+    return;
+  std::fprintf(stderr,
+               "[watch] %s pc=%08x lr=%08x r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x r8=%08x",
+               path, pc, lr, gpr[3], gpr[4], gpr[5], gpr[6], gpr[7], gpr[8]);
+  PrintGuestString(ram, ram_size, gpr[3]);
+  PrintGuestString(ram, ram_size, gpr[4]);
+  // The 32 bytes at r3 (an object pointer for most HSD calls).
+  if (gpr[3] >= 0x80000000u && gpr[3] - 0x80000000u + 32 <= ram_size)
+  {
+    std::fprintf(stderr, " [r3:");
+    for (u32 i = 0; i < 32; i += 4)
+      std::fprintf(stderr, " %08x", Common::swap32(&ram[gpr[3] - 0x80000000u + i]));
+    std::fprintf(stderr, "]");
+  }
+  std::fprintf(stderr, "\n");
+  std::fflush(stderr);
 }
 
 constexpr u32 SYNC_EXCEPTION_MASK = ~static_cast<u32>(
@@ -140,6 +233,8 @@ void StaticRecompCore::Run()
   auto& memory = m_system.GetMemory();
   const CPU::State* state_ptr = m_system.GetCPU().GetStatePtr();
   FilePtr dispatch_trace = OpenDispatchTrace();
+  const std::unordered_set<u32>& watched = WatchedPcs();
+  const bool watching = !watched.empty();
 
   m_guest.ram = memory.GetRAM();
   m_guest.ram_size = memory.GetRamSizeReal();
@@ -220,6 +315,9 @@ void StaticRecompCore::Run()
 
           if (m_collect_dispatch_samples && (m_native_dispatches & 4095u) == 0)
             ++m_dispatch_samples[m_guest.pc];
+          if (watching && watched.count(m_guest.pc) != 0)
+            ReportWatchedPc("native", m_guest.pc, m_guest.lr, m_guest.gpr, m_guest.ram,
+                            m_guest.ram_size);
           const u32 runtime_dispatch_address = m_guest.pc;
           u32 linked_dispatch_address = runtime_dispatch_address;
           if (m_has_rel_modules)
@@ -349,6 +447,8 @@ void StaticRecompCore::Run()
         // interrupts are delivered at slice start, as in Interpreter::Run.
         if (m_module_active && IsForcedFallbackAddress(ppc.pc))
         {
+          if (watching && watched.count(ppc.pc) != 0)
+            ReportWatchedPc("interp", ppc.pc, LR(ppc), ppc.gpr, m_guest.ram, m_guest.ram_size);
           ppc.downcount -= interpreter.SingleStepInner();
           ++m_fallback_steps;
         }
