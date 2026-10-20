@@ -294,13 +294,15 @@ void StaticRecompCore::Shutdown()
   std::fprintf(stderr,
                "[staticrecomp] shutdown: native=%llu fallback=%llu native_exc=%llu hook_fb=%llu "
                "zero_cb=%llu smc_failed=%u verifications=%llu reverify_events=%llu bursts=%llu "
-               "cycles=%llu\n",
+               "cycles=%llu zero_charge=%llu idle_skips=%llu\n",
                (unsigned long long)m_native_dispatches, (unsigned long long)m_fallback_steps,
                (unsigned long long)m_native_exceptions,
                (unsigned long long)m_hook_fallback_instructions,
                (unsigned long long)m_recovered_zero_callbacks, m_failed_chunks,
                (unsigned long long)m_verifications, (unsigned long long)m_reverify_events,
-               (unsigned long long)m_bursts, (unsigned long long)m_charged_cycles);
+               (unsigned long long)m_bursts, (unsigned long long)m_charged_cycles,
+               (unsigned long long)m_zero_charge_dispatches,
+               (unsigned long long)m_idle_skips);
   std::vector<std::pair<u32, u64>> host_call_sites(m_host_call_sites.begin(),
                                                    m_host_call_sites.end());
   std::sort(host_call_sites.begin(), host_call_sites.end(),

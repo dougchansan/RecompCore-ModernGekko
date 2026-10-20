@@ -343,6 +343,8 @@ void StaticRecompCore::Run()
           const s64 charge = -m_guest.downcount;
           m_guest.downcount = 0;
           const u64 effective_charge = static_cast<u64>(charge > 0 ? charge : 1);
+          if (charge <= 0)
+            ++m_zero_charge_dispatches;
           ppc.downcount -= static_cast<int>(effective_charge);
           m_charged_cycles += effective_charge;
           AdvanceGuestTimebase(effective_charge);
@@ -369,6 +371,7 @@ void StaticRecompCore::Run()
               std::fflush(dispatch_trace.get());
             }
             m_system.GetCoreTiming().Idle();
+            ++m_idle_skips;
           }
 
           // Second idle trigger, for a loop whose back edge never reaches the
@@ -388,6 +391,7 @@ void StaticRecompCore::Run()
               std::fflush(dispatch_trace.get());
             }
             m_system.GetCoreTiming().Idle();
+            ++m_idle_skips;
           }
 
           // ctx->timebase is refreshed at burst start (SyncIn), and here we
@@ -431,6 +435,8 @@ void StaticRecompCore::Run()
             const s64 charge = -m_guest.downcount;
             m_guest.downcount = 0;
             const u64 effective_charge = static_cast<u64>(charge > 0 ? charge : 1);
+          if (charge <= 0)
+            ++m_zero_charge_dispatches;
             ppc.downcount -= static_cast<int>(effective_charge);
             AdvanceGuestTimebase(effective_charge);
             SyncOut();

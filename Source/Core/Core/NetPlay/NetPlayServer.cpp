@@ -1162,10 +1162,18 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
           }();
           if (ignore_timebase)
           {
+            u64 lo = timebases[0].second;
+            u64 hi = lo;
+            for (const auto& entry : timebases)
+            {
+              lo = std::min(lo, entry.second);
+              hi = std::max(hi, entry.second);
+            }
             WARN_LOG_FMT(NETPLAY,
-                         "Timebase mismatch at frame {} (blaming player {}); "
-                         "ignoring, MODERNGEKKO_NETPLAY_IGNORE_TIMEBASE is set",
-                         frame, pid_to_blame);
+                         "Timebase mismatch at frame {} (blaming player {}): "
+                         "spread {} ticks, lo {} hi {}; ignoring, "
+                         "MODERNGEKKO_NETPLAY_IGNORE_TIMEBASE is set",
+                         frame, pid_to_blame, hi - lo, lo, hi);
             m_desync_mismatch_count = 0;
           }
           else

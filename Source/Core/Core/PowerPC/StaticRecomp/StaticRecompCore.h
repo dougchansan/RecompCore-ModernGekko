@@ -208,6 +208,11 @@ private:
   std::unordered_map<u32, u64> m_host_call_sites;
   u64 m_bursts = 0;          // SyncIn..SyncOut native runs (diagnostic)
   u64 m_charged_cycles = 0;  // cycles flushed from module charges (diagnostic)
+  // Ticks CoreTiming received that no guest instruction paid for: the
+  // minimum-1 per dispatcher visit. Host-dependent, and it reaches
+  // GetFakeTimeBase(), which netplay compares. Diagnostic.
+  u64 m_zero_charge_dispatches = 0;
+  u64 m_idle_skips = 0;  // CoreTiming::Idle() calls (diagnostic)
 
   // D4 guard state: parallel to m_module->chunk_ranges.
   std::vector<u8> m_chunk_state;
