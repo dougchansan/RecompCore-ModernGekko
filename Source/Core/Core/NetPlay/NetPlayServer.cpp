@@ -1128,6 +1128,34 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
     {
       // we have all records for this frame
 
+      // Two peers in lockstep advance identically but need not start from the
+      // same origin, so compare ticks elapsed since a common instant: the
+      // first frame on which everyone reported. Comparing the absolute values
+      // turns a fixed offset into a permanent desync - measured at ~1,013,510
+      // ticks between a Mac host and a Windows client, steady over hundreds of
+      // frames, which killed every cross-platform session within seconds.
+      bool anchored = true;
+      for (const auto& entry : timebases)
+      {
+        if (!m_timebase_origin.contains(entry.first))
+        {
+          anchored = false;
+          break;
+        }
+      }
+      if (!anchored)
+      {
+        // Someone new: re-anchor everyone here and judge nothing this frame.
+        m_timebase_origin.clear();
+        for (const auto& entry : timebases)
+          m_timebase_origin.emplace(entry.first, entry.second);
+        m_desync_mismatch_count = 0;
+        m_timebase_by_frame.erase(frame);
+        break;
+      }
+      for (auto& entry : timebases)
+        entry.second -= m_timebase_origin[entry.first];
+
       if (!std::ranges::all_of(timebases, [&](std::pair<PlayerId, u64> pair) {
             return pair.second == timebases[0].second;
           }))
@@ -1671,6 +1699,7 @@ bool NetPlayServer::StartGame()
   INFO_LOG_FMT(NETPLAY, "Starting game.");
 
   m_timebase_by_frame.clear();
+  m_timebase_origin.clear();
   m_desync_detected = false;
   m_desync_mismatch_count = 0;
   std::lock_guard lkg(m_crit.game);

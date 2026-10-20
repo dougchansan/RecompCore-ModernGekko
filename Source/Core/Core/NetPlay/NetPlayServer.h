@@ -199,6 +199,9 @@ private:
   std::map<PlayerId, Client> m_players;
 
   std::unordered_map<u32, std::vector<std::pair<PlayerId, u64>>> m_timebase_by_frame;
+  // Each player's timebase on the first frame all of them reported this
+  // session; comparisons are on ticks elapsed since then, not absolute values.
+  std::unordered_map<PlayerId, u64> m_timebase_origin;
   bool m_desync_detected = false;
   unsigned int m_desync_mismatch_count = 0;
 
