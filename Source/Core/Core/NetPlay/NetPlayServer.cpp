@@ -3,6 +3,8 @@
 
 #include "Core/NetPlay/NetPlayServer.h"
 
+#include <cstdlib>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -1145,13 +1147,37 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
             }
           }
 
-          sf::Packet spac;
-          spac << MessageID::DesyncDetected;
-          spac << pid_to_blame;
-          spac << frame;
-          SendToClients(spac);
+          // Static recompilation derives the guest timebase from reported
+          // execution cycles (StaticRecompCore::AdvanceGuestTimebase), and two
+          // instances need not account native, fallback and interpreter
+          // execution identically - so this check can fire on a pair whose
+          // game state is actually in step. Setting
+          // MODERNGEKKO_NETPLAY_IGNORE_TIMEBASE=1 reports the mismatch and
+          // keeps playing, which is how you tell the two apart. It disables
+          // the only desync detector there is, so it is a diagnostic, not a
+          // setting to ship.
+          static const bool ignore_timebase = [] {
+            const char* value = std::getenv("MODERNGEKKO_NETPLAY_IGNORE_TIMEBASE");
+            return value && *value && *value != '0';
+          }();
+          if (ignore_timebase)
+          {
+            WARN_LOG_FMT(NETPLAY,
+                         "Timebase mismatch at frame {} (blaming player {}); "
+                         "ignoring, MODERNGEKKO_NETPLAY_IGNORE_TIMEBASE is set",
+                         frame, pid_to_blame);
+            m_desync_mismatch_count = 0;
+          }
+          else
+          {
+            sf::Packet spac;
+            spac << MessageID::DesyncDetected;
+            spac << pid_to_blame;
+            spac << frame;
+            SendToClients(spac);
 
-          m_desync_detected = true;
+            m_desync_detected = true;
+          }
         }
       }
       else
