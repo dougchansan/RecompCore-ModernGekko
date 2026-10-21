@@ -3,6 +3,8 @@
 
 #include "VideoCommon/TextureCacheBase.h"
 
+#include "VideoCommon/GXCensus.h"
+
 #include <cstdio>
 #include <cstdlib>
 
@@ -1317,6 +1319,8 @@ TCacheEntry* TextureCacheBase::LoadImpl(u32 stage, bool force_reload)
   }
 
   const TextureInfo texture_info = TextureInfo::FromStage(stage);
+  if (GXCensus::On())
+    GXCensus::OnTextureLoad(texture_info);
   auto entry = GetTexture(g_ActiveConfig.iSafeTextureCache_ColorSamples, texture_info);
 
   if (!entry)

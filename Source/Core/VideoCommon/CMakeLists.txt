@@ -74,6 +74,8 @@ add_library(videocommon
   FreeLookCamera.h
   GeometryShaderGen.cpp
   GeometryShaderGen.h
+  GXCensus.cpp
+  GXCensus.h
   GeometryShaderManager.cpp
   GeometryShaderManager.h
   GraphicsModSystem/Config/GraphicsMod.cpp

@@ -3,6 +3,8 @@
 
 #include "VideoCommon/VertexManagerBase.h"
 
+#include "VideoCommon/GXCensus.h"
+
 #include <array>
 #include <cmath>
 #include <memory>
@@ -467,6 +469,12 @@ void VertexManagerBase::Flush()
     }
 
     return;
+  }
+
+  if (GXCensus::On())
+  {
+    GXCensus::OnDraw(static_cast<u8>(m_current_primitive_type),
+                     m_index_generator.GetIndexLen());
   }
 
 #if defined(_DEBUG) || defined(DEBUGFAST)

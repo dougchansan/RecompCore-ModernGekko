@@ -24,6 +24,7 @@
 #include "VideoCommon/CommandProcessor.h"
 #include "VideoCommon/DataReader.h"
 #include "VideoCommon/Fifo.h"
+#include "VideoCommon/GXCensus.h"
 #include "VideoCommon/Statistics.h"
 #include "VideoCommon/VertexLoaderBase.h"
 #include "VideoCommon/VertexLoaderManager.h"
@@ -45,6 +46,8 @@ public:
     if constexpr (!is_preprocess)
     {
       LoadXFReg(address, count, data);
+      if (GXCensus::On())
+        GXCensus::OnXF(address, count, m_in_display_list);
 
       INCSTAT(g_stats.this_frame.num_xf_loads);
     }
@@ -84,6 +87,8 @@ public:
         VertexLoaderManager::g_bases_dirty = true;
       }
 
+      if (GXCensus::On())
+        GXCensus::OnCP(command, value, m_in_display_list);
       INCSTAT(g_stats.this_frame.num_cp_loads);
     }
     else if constexpr (is_preprocess)
@@ -110,6 +115,8 @@ public:
     }
     else
     {
+      if (GXCensus::On())
+        GXCensus::OnBP(command, value, m_in_display_list);
       LoadBPReg(command, value, m_cycles);
       INCSTAT(g_stats.this_frame.num_bp_loads);
     }
@@ -121,13 +128,22 @@ public:
     if constexpr (is_preprocess)
       PreprocessIndexedXF(array, index, address, size);
     else
+    {
+      if (GXCensus::On())
+        GXCensus::OnIndexedLoad(static_cast<u8>(array), address, size, m_in_display_list);
       LoadIndexedXF(array, index, address, size);
+    }
   }
   OPCODE_CALLBACK(void OnPrimitiveCommand(OpcodeDecoder::Primitive primitive, u8 vat,
                                           u32 vertex_size, u16 num_vertices, const u8* vertex_data))
   {
     // load vertices
     const u32 size = vertex_size * num_vertices;
+    if constexpr (!is_preprocess)
+    {
+      if (GXCensus::On())
+        GXCensus::OnPrimitive(static_cast<u8>(primitive), vat, num_vertices, m_in_display_list);
+    }
 
     const u32 bytes =
         VertexLoaderManager::RunVertices<is_preprocess>(vat, primitive, num_vertices, vertex_data);
@@ -181,6 +197,9 @@ public:
           start_address = memory.GetPointerForRange(address, size);
         }
 
+        if (GXCensus::On())
+          GXCensus::OnDisplayList(address, size);
+
         // Avoid the crash if memory.GetPointerForRange failed ..
         if (start_address != nullptr)
         {
@@ -218,6 +237,11 @@ public:
     }
     else
     {
+      if constexpr (!is_preprocess)
+      {
+        if (GXCensus::On())
+          GXCensus::OnUnknownOpcode(opcode);
+      }
       auto& system = Core::System::GetInstance();
       system.GetCommandProcessor().HandleUnknownOpcode(opcode, data, is_preprocess);
       m_cycles += 1;

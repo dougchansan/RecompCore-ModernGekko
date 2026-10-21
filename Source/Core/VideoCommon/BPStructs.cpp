@@ -3,6 +3,8 @@
 
 #include "VideoCommon/BPStructs.h"
 
+#include "VideoCommon/GXCensus.h"
+
 #include <algorithm>
 #include <cstring>
 #include <string>
@@ -188,6 +190,8 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
     {
     case 0x02:
     {
+      if (GXCensus::On())
+        GXCensus::OnDrawDone();
       INCSTAT(g_stats.this_frame.num_draw_done);
       g_texture_cache->FlushEFBCopies();
       g_texture_cache->FlushStaleBinds();
@@ -207,6 +211,8 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
     return;
   case BPMEM_PE_TOKEN_ID:  // Pixel Engine Token ID
   {
+    if (GXCensus::On())
+      GXCensus::OnPeToken(false);
     INCSTAT(g_stats.this_frame.num_token);
     g_texture_cache->FlushEFBCopies();
     g_texture_cache->FlushStaleBinds();
@@ -223,6 +229,8 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
   }
   case BPMEM_PE_TOKEN_INT_ID:  // Pixel Engine Interrupt Token ID
   {
+    if (GXCensus::On())
+      GXCensus::OnPeToken(true);
     INCSTAT(g_stats.this_frame.num_token_int);
     g_texture_cache->FlushEFBCopies();
     g_texture_cache->FlushStaleBinds();
@@ -312,6 +320,13 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
         // bpmem.zcontrol.pixel_format to PixelFormat::Z24 is when the game wants to copy from
         // ZBuffer (Zbuffer uses 24-bit Format)
         bool is_depth_copy = bpmem.zcontrol.pixel_format == PixelFormat::Z24;
+        if (GXCensus::On())
+        {
+          GXCensus::OnEfbCopy(false, static_cast<u32>(PE_copy.tp_realFormat()), is_depth_copy,
+                              copy_width, copy_height, PE_copy.half_scale,
+                              PE_copy.intensity_fmt && PE_copy.auto_conv, PE_copy.clear,
+                              static_cast<u32>(PE_copy.gamma.Value()));
+        }
         g_texture_cache->CopyRenderTargetToTexture(
             destAddr, PE_copy.tp_realFormat(), copy_width, copy_height, destStride, is_depth_copy,
             srcRect, PE_copy.intensity_fmt && PE_copy.auto_conv, PE_copy.half_scale, 1.0f,
@@ -342,6 +357,12 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
                       bpmem.copyTexSrcWH.x + 1, destStride, height, yScale);
 
         bool is_depth_copy = bpmem.zcontrol.pixel_format == PixelFormat::Z24;
+        if (GXCensus::On())
+        {
+          GXCensus::OnEfbCopy(true, 0, is_depth_copy, copy_width, height, false, false,
+                              PE_copy.clear, static_cast<u32>(PE_copy.gamma.Value()));
+          GXCensus::OnFrame();
+        }
         g_texture_cache->CopyRenderTargetToTexture(
             destAddr, EFBCopyFormat::XFB, copy_width, height, destStride, is_depth_copy, srcRect,
             false, false, yScale, s_gammaLUT[PE_copy.gamma], bpmem.triggerEFBCopy.clamp_top,

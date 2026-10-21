@@ -58,6 +58,7 @@
 #include "Core/System.h"
 
 #include "VideoCommon/EFBInterface.h"
+#include "VideoCommon/GXCensus.h"
 
 namespace PowerPC
 {
@@ -120,11 +121,15 @@ u32 EFB_Read(const u32 addr)
   }
   else if (addr & 0x00400000)
   {
+    if (GXCensus::On())
+      GXCensus::OnEfbPeek(true);
     var = g_efb_interface->PeekDepth(x, y);
     DEBUG_LOG_FMT(MEMMAP, "EFB Z Read @ {}, {}\t= {:#010x}", x, y, var);
   }
   else
   {
+    if (GXCensus::On())
+      GXCensus::OnEfbPeek(false);
     var = g_efb_interface->PeekColor(x, y);
     DEBUG_LOG_FMT(MEMMAP, "EFB Color Read @ {}, {}\t= {:#010x}", x, y, var);
   }
@@ -145,11 +150,15 @@ void EFB_Write(u32 data, u32 addr)
   }
   else if (addr & 0x00400000)
   {
+    if (GXCensus::On())
+      GXCensus::OnEfbPoke(true);
     g_efb_interface->PokeDepth(x, y, data);
     DEBUG_LOG_FMT(MEMMAP, "EFB Z Write {:08x} @ {}, {}", data, x, y);
   }
   else
   {
+    if (GXCensus::On())
+      GXCensus::OnEfbPoke(false);
     g_efb_interface->PokeColor(x, y, data);
     DEBUG_LOG_FMT(MEMMAP, "EFB Color Write {:08x} @ {}, {}", data, x, y);
   }
