@@ -337,6 +337,15 @@ void VKGfx::PresentBackbuffer()
   StateTracker::GetInstance()->InvalidateCachedState();
 }
 
+void VKGfx::PresentHeadless()
+{
+  // What PresentBackbuffer does when it has no swap-chain image: end the frame,
+  // which advances the per-frame resources and resets their descriptor pools.
+  StateTracker::GetInstance()->EndRenderPass();
+  g_command_buffer_mgr->SubmitCommandBuffer(true, false, true);
+  StateTracker::GetInstance()->InvalidateCachedState();
+}
+
 void VKGfx::SetFullscreen(bool enable_fullscreen)
 {
   if (!m_swap_chain->IsFullscreenSupported())

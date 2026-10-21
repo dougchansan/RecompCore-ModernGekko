@@ -110,6 +110,11 @@ public:
   // Presents the backbuffer to the window system, or "swaps buffers".
   virtual void PresentBackbuffer() {}
 
+  // The frame boundary when there is no window to present to (headless). A
+  // backend with per-frame resources must still recycle them here: Vulkan's
+  // descriptor pools otherwise grow every frame until allocation fails.
+  virtual void PresentHeadless() {}
+
   // Shader modules/objects.
   virtual std::unique_ptr<AbstractShader>
   CreateShaderFromSource(ShaderStage stage, std::string_view source,

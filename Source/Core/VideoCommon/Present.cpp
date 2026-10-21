@@ -1242,7 +1242,16 @@ void Presenter::Present(PresentInfo* present_info)
 {
   m_present_count++;
 
-  if (g_gfx->IsHeadless() || (!m_onscreen_ui && !m_xfb_entry))
+  if (g_gfx->IsHeadless())
+  {
+    // No window, but still a frame boundary for the backend's per-frame
+    // resources. Without it Vulkan never recycled its descriptor pools, and
+    // a headless session crashed in the driver after a few minutes of play.
+    g_vertex_manager->Flush();
+    g_gfx->PresentHeadless();
+    return;
+  }
+  if (!m_onscreen_ui && !m_xfb_entry)
     return;
 
   // Exclusive fullscreen follows the platform's request (display mode, focus).

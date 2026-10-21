@@ -78,6 +78,7 @@ public:
                              u32 groupsize_z, u32 groups_x, u32 groups_y, u32 groups_z) override;
   bool BindBackbuffer(const ClearColor& clear_color = {}) override;
   void PresentBackbuffer() override;
+  void PresentHeadless() override;
   void SetFullscreen(bool enable_fullscreen) override;
   bool IsFullscreen() const override;
 
