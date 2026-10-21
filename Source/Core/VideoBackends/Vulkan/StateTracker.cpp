@@ -8,15 +8,56 @@
 #include "VideoBackends/Vulkan/CommandBufferManager.h"
 #include "VideoBackends/Vulkan/ObjectCache.h"
 #include "VideoBackends/Vulkan/VKGfx.h"
+#include "VideoBackends/Vulkan/VKHandleCheck.h"
 #include "VideoBackends/Vulkan/VKPipeline.h"
 #include "VideoBackends/Vulkan/VKShader.h"
 #include "VideoBackends/Vulkan/VKTexture.h"
 #include "VideoBackends/Vulkan/VulkanContext.h"
 #include "VideoCommon/Constants.h"
 
+#if defined(_WIN32)
+#include <excpt.h>
+#endif
+
 namespace Vulkan
 {
 static std::unique_ptr<StateTracker> s_state_tracker;
+
+// With MODERNGEKKO_VK_CHECK=1 the GX descriptor update and bind run under a
+// structured-exception guard, so a fault inside the driver reports the exact
+// arguments it was given (see VKHandleCheck.h). Plain calls otherwise.
+#if defined(_WIN32)
+static bool GuardedUpdateDescriptorSets(u32 count, const VkWriteDescriptorSet* writes)
+{
+  __try
+  {
+    vkUpdateDescriptorSets(g_vulkan_context->GetDevice(), count, writes, 0, nullptr);
+    return true;
+  }
+  __except (GetExceptionCode() == 0xC0000005 ? EXCEPTION_EXECUTE_HANDLER :
+                                               EXCEPTION_CONTINUE_SEARCH)
+  {
+    return false;
+  }
+}
+
+static bool GuardedBindDescriptorSets(VkCommandBuffer cmd, VkPipelineLayout layout, u32 first,
+                                      u32 count, const VkDescriptorSet* sets, u32 offset_count,
+                                      const u32* offsets)
+{
+  __try
+  {
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, first, count, sets,
+                            offset_count, offsets);
+    return true;
+  }
+  __except (GetExceptionCode() == 0xC0000005 ? EXCEPTION_EXECUTE_HANDLER :
+                                               EXCEPTION_CONTINUE_SEARCH)
+  {
+    return false;
+  }
+}
+#endif
 
 StateTracker::StateTracker() = default;
 
@@ -522,6 +563,18 @@ void StateTracker::UpdateGXDescriptorSet()
   {
     m_gx_descriptor_sets[1] = g_command_buffer_mgr->AllocateDescriptorSet(
         g_object_cache->GetDescriptorSetLayout(DESCRIPTOR_SET_LAYOUT_STANDARD_SAMPLERS));
+    if (HandleCheck::Enabled())
+    {
+      for (u32 i = 0; i < VideoCommon::MAX_PIXEL_SHADER_SAMPLERS; i++)
+      {
+        HandleCheck::Check(HandleCheck::Views(),
+                           reinterpret_cast<std::uint64_t>(m_bindings.samplers[i].imageView),
+                           "image view", i);
+        HandleCheck::Check(HandleCheck::Samplers(),
+                           reinterpret_cast<std::uint64_t>(m_bindings.samplers[i].sampler),
+                           "sampler", i);
+      }
+    }
 
     writes[num_writes++] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                             nullptr,
@@ -570,18 +623,78 @@ void StateTracker::UpdateGXDescriptorSet()
     m_dirty_flags = (m_dirty_flags & ~DIRTY_FLAG_GX_SSBO) | DIRTY_FLAG_DESCRIPTOR_SETS;
   }
 
+#if defined(_WIN32)
+  const auto report = [&](const char* call) {
+    std::fprintf(stderr,
+                 "[vk-check] fault in %s: pipeline usage %d layout 0x%llx needs_ssbo %d "
+                 "needs_gs_ubo %d sets 0x%llx 0x%llx 0x%llx\n",
+                 call, static_cast<int>(m_pipeline->GetUsage()),
+                 reinterpret_cast<unsigned long long>(m_pipeline->GetVkPipelineLayout()),
+                 needs_ssbo, needs_gs_ubo,
+                 reinterpret_cast<unsigned long long>(m_gx_descriptor_sets[0]),
+                 reinterpret_cast<unsigned long long>(m_gx_descriptor_sets[1]),
+                 reinterpret_cast<unsigned long long>(m_gx_descriptor_sets[2]));
+    for (u32 i = 0; i < num_writes; i++)
+    {
+      const VkWriteDescriptorSet& w = writes[i];
+      std::fprintf(stderr, "  write %u: set 0x%llx binding %u element %u count %u type %d\n", i,
+                   reinterpret_cast<unsigned long long>(w.dstSet), w.dstBinding,
+                   w.dstArrayElement, w.descriptorCount, static_cast<int>(w.descriptorType));
+      for (u32 j = 0; w.pBufferInfo && j < w.descriptorCount; j++)
+      {
+        std::fprintf(stderr, "    buffer 0x%llx offset %llu range %llu\n",
+                     reinterpret_cast<unsigned long long>(w.pBufferInfo[j].buffer),
+                     static_cast<unsigned long long>(w.pBufferInfo[j].offset),
+                     static_cast<unsigned long long>(w.pBufferInfo[j].range));
+      }
+      for (u32 j = 0; w.pImageInfo && j < w.descriptorCount; j++)
+      {
+        std::fprintf(stderr, "    view 0x%llx sampler 0x%llx layout %d\n",
+                     reinterpret_cast<unsigned long long>(w.pImageInfo[j].imageView),
+                     reinterpret_cast<unsigned long long>(w.pImageInfo[j].sampler),
+                     static_cast<int>(w.pImageInfo[j].imageLayout));
+      }
+    }
+    std::fflush(stderr);
+    std::abort();
+  };
+#endif
+
   if (num_writes > 0)
-    vkUpdateDescriptorSets(g_vulkan_context->GetDevice(), num_writes, writes.data(), 0, nullptr);
+  {
+#if defined(_WIN32)
+    if (HandleCheck::Enabled())
+    {
+      if (!GuardedUpdateDescriptorSets(num_writes, writes.data()))
+        report("vkUpdateDescriptorSets");
+    }
+    else
+#endif
+      vkUpdateDescriptorSets(g_vulkan_context->GetDevice(), num_writes, writes.data(), 0, nullptr);
+  }
 
   if (m_dirty_flags & DIRTY_FLAG_DESCRIPTOR_SETS)
   {
-    vkCmdBindDescriptorSets(g_command_buffer_mgr->GetCurrentCommandBuffer(),
-                            VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->GetVkPipelineLayout(), 0,
-                            needs_ssbo ? NUM_GX_DESCRIPTOR_SETS : (NUM_GX_DESCRIPTOR_SETS - 1),
-                            m_gx_descriptor_sets.data(),
-                            needs_gs_ubo ? NUM_UBO_DESCRIPTOR_SET_BINDINGS :
-                                           (NUM_UBO_DESCRIPTOR_SET_BINDINGS - 1),
-                            m_bindings.gx_ubo_offsets.data());
+    const u32 set_count = needs_ssbo ? NUM_GX_DESCRIPTOR_SETS : (NUM_GX_DESCRIPTOR_SETS - 1);
+    const u32 offset_count =
+        needs_gs_ubo ? NUM_UBO_DESCRIPTOR_SET_BINDINGS : (NUM_UBO_DESCRIPTOR_SET_BINDINGS - 1);
+#if defined(_WIN32)
+    if (HandleCheck::Enabled())
+    {
+      if (!GuardedBindDescriptorSets(g_command_buffer_mgr->GetCurrentCommandBuffer(),
+                                     m_pipeline->GetVkPipelineLayout(), 0, set_count,
+                                     m_gx_descriptor_sets.data(), offset_count,
+                                     m_bindings.gx_ubo_offsets.data()))
+      {
+        report("vkCmdBindDescriptorSets");
+      }
+    }
+    else
+#endif
+      vkCmdBindDescriptorSets(g_command_buffer_mgr->GetCurrentCommandBuffer(),
+                              VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->GetVkPipelineLayout(),
+                              0, set_count, m_gx_descriptor_sets.data(), offset_count,
+                              m_bindings.gx_ubo_offsets.data());
     m_dirty_flags &= ~(DIRTY_FLAG_DESCRIPTOR_SETS | DIRTY_FLAG_GX_UBO_OFFSETS);
   }
   else if (m_dirty_flags & DIRTY_FLAG_GX_UBO_OFFSETS)

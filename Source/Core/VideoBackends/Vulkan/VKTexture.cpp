@@ -15,6 +15,7 @@
 
 #include "VideoBackends/Vulkan/CommandBufferManager.h"
 #include "VideoBackends/Vulkan/ObjectCache.h"
+#include "VideoBackends/Vulkan/VKHandleCheck.h"
 #include "VideoBackends/Vulkan/StagingBuffer.h"
 #include "VideoBackends/Vulkan/StateTracker.h"
 #include "VideoBackends/Vulkan/VKGfx.h"
@@ -45,6 +46,7 @@ VKTexture::VKTexture(const TextureConfig& tex_config, VmaAllocation alloc, VkIma
 
 VKTexture::~VKTexture()
 {
+  HandleCheck::Destroyed(HandleCheck::Views(), reinterpret_cast<std::uint64_t>(m_view));
   StateTracker::GetInstance()->UnbindTexture(m_view);
   g_command_buffer_mgr->DeferImageViewDestruction(m_view);
 
@@ -164,6 +166,15 @@ bool VKTexture::CreateView(VkImageViewType type)
     return false;
   }
 
+  if (HandleCheck::Enabled())
+  {
+    HandleCheck::Created(HandleCheck::Views(), reinterpret_cast<std::uint64_t>(m_view),
+                         "texture '" + m_name + "' " + std::to_string(GetWidth()) + "x" +
+                             std::to_string(GetHeight()) + " fmt " +
+                             std::to_string(static_cast<int>(GetFormat())) + " layers " +
+                             std::to_string(GetLayers()) +
+                             (GetConfig().IsRenderTarget() ? " rendertarget" : ""));
+  }
   return true;
 }
 

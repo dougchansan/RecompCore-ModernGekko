@@ -11,6 +11,7 @@
 #include "Common/LinearDiskCache.h"
 #include "Common/MsgHandler.h"
 
+#include "VideoBackends/Vulkan/VKHandleCheck.h"
 #include "VideoBackends/Vulkan/VKStreamBuffer.h"
 #include "VideoBackends/Vulkan/VKTexture.h"
 #include "VideoBackends/Vulkan/VulkanContext.h"
@@ -77,7 +78,10 @@ void ObjectCache::ClearSamplerCache()
   for (const auto& it : m_sampler_cache)
   {
     if (it.second != VK_NULL_HANDLE)
+    {
+      HandleCheck::Destroyed(HandleCheck::Samplers(), reinterpret_cast<std::uint64_t>(it.second));
       vkDestroySampler(g_vulkan_context->GetDevice(), it.second, nullptr);
+    }
   }
   m_sampler_cache.clear();
 }
@@ -88,12 +92,16 @@ void ObjectCache::DestroySamplers()
 
   if (m_point_sampler != VK_NULL_HANDLE)
   {
+    HandleCheck::Destroyed(HandleCheck::Samplers(),
+                           reinterpret_cast<std::uint64_t>(m_point_sampler));
     vkDestroySampler(g_vulkan_context->GetDevice(), m_point_sampler, nullptr);
     m_point_sampler = VK_NULL_HANDLE;
   }
 
   if (m_linear_sampler != VK_NULL_HANDLE)
   {
+    HandleCheck::Destroyed(HandleCheck::Samplers(),
+                           reinterpret_cast<std::uint64_t>(m_linear_sampler));
     vkDestroySampler(g_vulkan_context->GetDevice(), m_linear_sampler, nullptr);
     m_linear_sampler = VK_NULL_HANDLE;
   }
@@ -353,6 +361,10 @@ bool ObjectCache::CreateStaticSamplers()
     return false;
   }
 
+  HandleCheck::Created(HandleCheck::Samplers(), reinterpret_cast<std::uint64_t>(m_point_sampler),
+                       "point sampler");
+  HandleCheck::Created(HandleCheck::Samplers(), reinterpret_cast<std::uint64_t>(m_linear_sampler),
+                       "linear sampler");
   return true;
 }
 
@@ -405,6 +417,8 @@ VkSampler ObjectCache::GetSampler(const SamplerState& info)
     LOG_VULKAN_ERROR(res, "vkCreateSampler failed: ");
 
   // Store it even if it failed
+  HandleCheck::Created(HandleCheck::Samplers(), reinterpret_cast<std::uint64_t>(sampler),
+                       "cached sampler");
   m_sampler_cache.emplace(info, sampler);
   return sampler;
 }

@@ -4,11 +4,14 @@
 #include "VideoBackends/Vulkan/CommandBufferManager.h"
 
 #include <array>
+#include <chrono>
+#include <cstdio>
 #include <cstdint>
 
 #include "Common/Assert.h"
 #include "Common/MsgHandler.h"
 
+#include "VideoBackends/Vulkan/VKHandleCheck.h"
 #include "VideoBackends/Vulkan/VKLowLatency.h"
 #include "VideoBackends/Vulkan/VulkanContext.h"
 #include "VideoCommon/Constants.h"
@@ -186,7 +189,19 @@ VkDescriptorPool CommandBufferManager::CreateDescriptorPool(u32 max_descriptor_s
   if (res != VK_SUCCESS)
   {
     LOG_VULKAN_ERROR(res, "vkCreateDescriptorPool failed: ");
+    std::fprintf(stderr, "[vk] vkCreateDescriptorPool(%u sets) failed: %d\n", max_descriptor_sets,
+                 static_cast<int>(res));
+    std::fflush(stderr);
     return VK_NULL_HANDLE;
+  }
+  if (HandleCheck::Enabled())
+  {
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
+    std::fprintf(stderr, "[vk-check] t=%lld descriptor pool created: %u sets\n",
+                 static_cast<long long>(ms), max_descriptor_sets);
+    std::fflush(stderr);
   }
   return descriptor_pool;
 }
@@ -204,6 +219,15 @@ VkDescriptorSet CommandBufferManager::AllocateDescriptorSet(VkDescriptorSetLayou
 
     VkResult res =
         vkAllocateDescriptorSets(g_vulkan_context->GetDevice(), &allocate_info, &descriptor_set);
+    if (res != VK_SUCCESS && HandleCheck::Enabled())
+    {
+      std::fprintf(stderr,
+                   "[vk-check] vkAllocateDescriptorSets failed: %d (pool %u of %zu, "
+                   "set count %u)\n",
+                   static_cast<int>(res), resources.current_descriptor_pool_index,
+                   resources.descriptor_pools.size(), m_descriptor_set_count);
+      std::fflush(stderr);
+    }
     if (res != VK_SUCCESS &&
         resources.descriptor_pools.size() > resources.current_descriptor_pool_index + 1)
     {
@@ -218,7 +242,12 @@ VkDescriptorSet CommandBufferManager::AllocateDescriptorSet(VkDescriptorSetLayou
     VkDescriptorPool descriptor_pool = CreateDescriptorPool(DESCRIPTOR_SETS_PER_POOL);
     m_descriptor_set_count += DESCRIPTOR_SETS_PER_POOL;
     if (descriptor_pool == VK_NULL_HANDLE) [[unlikely]]
+    {
+      std::fprintf(stderr, "[vk] descriptor set allocation failed: no new pool (%zu pools)\n",
+                   resources.descriptor_pools.size());
+      std::fflush(stderr);
       return VK_NULL_HANDLE;
+    }
 
     resources.descriptor_pools.push_back(descriptor_pool);
     resources.current_descriptor_pool_index =
