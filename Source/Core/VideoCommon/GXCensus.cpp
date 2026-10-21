@@ -80,6 +80,7 @@ constexpr std::array<u16, 6> XF_SINGLE = {0x1009, 0x100e, 0x100f, 0x1010, 0x1011
 std::mutex s_mutex;
 std::string s_path;
 u32 s_frame = 0;
+u32 s_flush_every = 600;
 u64 s_draws = 0;
 u8 s_last_vat = 0;
 std::unordered_map<u64, Counter> s_features;
@@ -226,6 +227,12 @@ void Init()
     return;
 
   s_path = path;
+  if (const char* every = std::getenv("MODERNGEKKO_GX_CENSUS_EVERY"))
+  {
+    const long frames = std::strtol(every, nullptr, 10);
+    if (frames > 0)
+      s_flush_every = static_cast<u32>(frames);
+  }
   g_enabled = true;
   std::atexit([] { Flush(); });
 }
@@ -366,7 +373,7 @@ void OnFrame()
 {
   std::lock_guard lock(s_mutex);
   ++s_frame;
-  if (s_frame % 600 == 0)
+  if (s_frame % s_flush_every == 0)
     WriteLocked();
 }
 

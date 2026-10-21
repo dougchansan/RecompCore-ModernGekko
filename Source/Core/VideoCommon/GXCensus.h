@@ -3,7 +3,8 @@
 
 // GX feature census: records which GPU features a game actually uses, so a native renderer can be
 // scoped from evidence instead of guesses. Enabled by setting MODERNGEKKO_GX_CENSUS to an output
-// path; when unset every hook is a single predictable branch.
+// path; when unset every hook is a single predictable branch. MODERNGEKKO_GX_CENSUS_EVERY sets how
+// many frames pass between rewrites of the output file (default 600).
 //
 // The census stores raw register words (BP/XF/CP) for each distinct draw configuration and leaves
 // decoding to the offline tool, so this file stays small and does not depend on shader generation.
