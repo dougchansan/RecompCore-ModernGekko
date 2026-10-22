@@ -139,6 +139,11 @@ struct RenderDrawPacket {
   std::uint16_t tex_matrix_word_mask[DOL_GX_RECOMP_TEX_MATRIX_COUNT]{};
   std::uint32_t xf_regs[DOL_GX_RECOMP_XF_REG_COUNT]{};
   std::uint64_t xf_reg_mask = 0;
+  // Dual texture transform at draw time (DolGxRecompState layout).
+  float post_matrices[DOL_GX_RECOMP_POST_MATRIX_ROWS][4]{};
+  std::uint8_t post_matrix_word_mask[DOL_GX_RECOMP_POST_MATRIX_ROWS]{};
+  std::uint32_t dual_tex = 0;
+  bool dual_tex_valid = false;
 };
 
 struct RenderPacket {
@@ -272,6 +277,11 @@ struct ConsumedDraw {
   std::uint16_t tex_matrix_word_mask[DOL_GX_RECOMP_TEX_MATRIX_COUNT]{};
   std::uint32_t xf_regs[DOL_GX_RECOMP_XF_REG_COUNT]{};
   std::uint64_t xf_reg_mask = 0;
+  // Dual texture transform at draw time (DolGxRecompState layout).
+  float post_matrices[DOL_GX_RECOMP_POST_MATRIX_ROWS][4]{};
+  std::uint8_t post_matrix_word_mask[DOL_GX_RECOMP_POST_MATRIX_ROWS]{};
+  std::uint32_t dual_tex = 0;
+  bool dual_tex_valid = false;
 };
 
 using ConsumedDrawObserver = void (*)(const ConsumedDraw& draw,

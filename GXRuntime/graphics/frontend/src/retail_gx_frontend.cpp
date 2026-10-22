@@ -283,6 +283,11 @@ DrawTransformSnapshot snapshot_transform(const DolGxRecompState& state,
   std::memcpy(out.chan_regs, state.chan_regs, sizeof(out.chan_regs));
   out.chan_reg_mask = state.chan_reg_mask;
   std::memcpy(out.tex_matrices, state.tex_matrices, sizeof(out.tex_matrices));
+  out.dual_tex = state.dual_tex;
+  out.dual_tex_valid = state.dual_tex_valid;
+  std::memcpy(out.post_matrices, state.post_matrices, sizeof(out.post_matrices));
+  std::memcpy(out.post_matrix_word_mask, state.post_matrix_word_mask,
+              sizeof(out.post_matrix_word_mask));
   std::memcpy(out.tex_matrix_word_mask, state.tex_matrix_word_mask,
               sizeof(out.tex_matrix_word_mask));
   std::memcpy(out.xf_regs, state.xf_regs, sizeof(out.xf_regs));
@@ -710,6 +715,10 @@ bool RetailGxFrontend::handle_bp(std::uint32_t raw) {
     state_.texture_tlut_tmem_offset[slot] =
         static_cast<std::uint16_t>(bp_get(value, 10u, 0u));
     state_.texture_tlut_format[slot] = bp_get(value, 2u, 10u);
+    // GXLoadTexObj writes the TLUT register after IMAGE3, so the texture
+    // event emitted at IMAGE3 carried the previous texture's palette;
+    // resolve the slot again now that its own palette is known.
+    (void)maybe_resolve_texture(slot);
     return true;
   }
 
@@ -740,6 +749,12 @@ bool RetailGxFrontend::handle_bp(std::uint32_t raw) {
     (void)dol_gx_recomp_resolve_tmem_tlut(
         &state_, tmem_offset, state_.bp_regs[DOL_GX_BP_REG_LOAD_TLUT0], 0u,
         static_cast<std::uint16_t>(line_count * 16u), &tlut);
+    // A palette reloaded into TMEM under a texture that is already bound
+    // changes what that texture decodes to.
+    for (std::uint8_t s = 0; s < DOL_GX_RECOMP_TEXTURE_SLOTS; ++s) {
+      if (state_.texture_tlut_valid[s] && state_.texture_tlut_tmem_offset[s] == tmem_offset)
+        (void)maybe_resolve_texture(s);
+    }
     return true;
   }
   default:
@@ -928,6 +943,11 @@ bool RetailGxFrontend::emit_new_packets(AuroraRenderSink& sink,
       packet.draw.chan_reg_mask = transform.chan_reg_mask;
       std::memcpy(packet.draw.tex_matrices, transform.tex_matrices,
                   sizeof(packet.draw.tex_matrices));
+      packet.draw.dual_tex = transform.dual_tex;
+      packet.draw.dual_tex_valid = transform.dual_tex_valid;
+      std::memcpy(packet.draw.post_matrices, transform.post_matrices, sizeof(packet.draw.post_matrices));
+      std::memcpy(packet.draw.post_matrix_word_mask, transform.post_matrix_word_mask,
+                  sizeof(packet.draw.post_matrix_word_mask));
       std::memcpy(packet.draw.tex_matrix_word_mask,
                   transform.tex_matrix_word_mask,
                   sizeof(packet.draw.tex_matrix_word_mask));

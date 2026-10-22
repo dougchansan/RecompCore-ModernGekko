@@ -28,6 +28,7 @@ extern "C" {
 #define DOL_GX_RECOMP_CHAN_REG_COUNT 9u
 #define DOL_GX_RECOMP_TEX_MATRIX_COUNT 11u
 #define DOL_GX_RECOMP_TEX_MATRIX_WORDS 12u
+#define DOL_GX_RECOMP_POST_MATRIX_ROWS 64u /* XF 0x500..0x5FF, 4 words each */
 #define DOL_GX_RECOMP_XF_REG_COUNT 0x40u
 #define DOL_GX_PHYSICAL_ADDRESS_MASK 0x1FFFFFFFu
 
@@ -261,6 +262,14 @@ typedef struct DolGxRecompState {
     // existing consumers; this window feeds gxcore's texgen decode.
     u32 xf_regs[DOL_GX_RECOMP_XF_REG_COUNT];
     u64 xf_reg_mask;
+    // Dual texture transform: post-transform matrix memory (XF 0x500..0x5FF,
+    // 64 rows of four words, written-bits per row) and XF 0x1012, which
+    // enables it. Per-texgen matrix choice and normalize live in the raw
+    // register window (0x1050..0x1057).
+    f32 post_matrices[DOL_GX_RECOMP_POST_MATRIX_ROWS][4];
+    u8 post_matrix_word_mask[DOL_GX_RECOMP_POST_MATRIX_ROWS];
+    u32 dual_tex;
+    bool dual_tex_valid;
     DolGxRecompTraceEvent trace[DOL_GX_RECOMP_MAX_TRACE_EVENTS];
     u32 trace_count;
 } DolGxRecompState;
@@ -328,6 +337,9 @@ bool dol_gx_recomp_note_xf_load(DolGxRecompState* gx, u16 base, u8 count);
 #define DOL_GX_XF_REG_WINDOW_BASE 0x1018u /* raw reg window, 0x40 regs */
 #define DOL_GX_XF_NORMAL_MATRIX_BASE 0x0400u /* normal matrices, 0x400..0x45F */
 #define DOL_GX_XF_NORMAL_MATRIX_END 0x0460u  /* exclusive */
+#define DOL_GX_XF_POST_MATRIX_BASE 0x0500u /* dual-tex matrices, 0x500..0x5FF */
+#define DOL_GX_XF_POST_MATRIX_END 0x0600u  /* exclusive */
+#define DOL_GX_XF_DUAL_TEX 0x1012u /* DualTexTrans enable (bit 0) */
 
 // Decode the XF viewport (0x101A) and/or projection (0x1020) registers from a
 // direct XF_LOAD's big-endian data words, for whichever the loaded range

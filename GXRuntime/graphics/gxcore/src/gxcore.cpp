@@ -618,6 +618,15 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
       tg.sourcerow = static_cast<std::uint8_t>(bits(info, 5, 7));
       tg.embosssourceshift = static_cast<std::uint8_t>(bits(info, 3, 12));
       tg.embosslightshift = static_cast<std::uint8_t>(bits(info, 3, 15));
+      // Dual texture transform (Dolphin VertexShaderGen): regular texgens
+      // only, when XF 0x1012 enables it; PostMtxInfo bit 8 normalizes.
+      const std::uint32_t post_reg = (0x1050u - 0x1018u) + i;
+      if (draw.dual_tex_valid && (draw.dual_tex & 1u) != 0u &&
+          tg.texgentype == static_cast<std::uint8_t>(TexGenType::Regular)) {
+        const std::uint32_t post = (draw.xf_reg_mask & (1ull << post_reg)) ? draw.xf_regs[post_reg]
+                                                                         : 0x3Du;
+        tg.posttransform = static_cast<std::uint8_t>(1u | (bits(post, 1, 8) << 1));
+      }
     } else {
       tg.sourcerow =
           static_cast<std::uint8_t>(TexSourceRow::Tex0) +
@@ -990,6 +999,23 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
     }
     for (std::uint32_t k = 0; k < 3u; ++k)
       std::memcpy(c.texmatrices[3u * i + k], rows[k], sizeof rows[k]);
+    // Post-transform rows: PostMtxInfo index (bits 0-5) is the first of
+    // three rows in post matrix memory; unwritten rows read as identity
+    // (GX_PTIDENTITY, which GXInit loads at rows 61-63).
+    if ((key.tex_gens[i].posttransform & 1u) != 0u) {
+      const std::uint32_t post_reg = (0x1050u - 0x1018u) + i;
+      const std::uint32_t post = (draw.xf_reg_mask & (1ull << post_reg)) ? draw.xf_regs[post_reg] : 0x3Du;
+      const std::uint32_t base = post & 0x3Fu;
+      for (std::uint32_t k = 0; k < 3u; ++k) {
+        const std::uint32_t r = (base + k) & 63u;
+        if (draw.post_matrix_word_mask[r] == 0xFu) {
+          std::memcpy(c.posttexmatrices[3u * i + k], draw.post_matrices[r], sizeof(float) * 4);
+        } else {
+          for (std::uint32_t w = 0; w < 4u; ++w)
+            c.posttexmatrices[3u * i + k][w] = w == k ? 1.f : 0.f;
+        }
+      }
+    }
   }
 
   // Viewport + texture.
@@ -1014,6 +1040,16 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
     plan.tlut_entries = draw.texture.tlut_entries;
     plan.tlut_data = draw.texture.tlut_host_data;
     plan.tlut_available = draw.texture.tlut_host_available;
+    // Sampler state: TX_SETMODE0 (BP 0x80-0x83, 0xA0-0xA3) of each texmap.
+    auto mode0_reg = [](std::uint32_t t) { return t < 4u ? 0x80u + t : 0xA0u + (t - 4u); };
+    {
+      const std::uint32_t used0 = used_texmap_mask(key);
+      std::uint32_t t0 = 0;
+      while (t0 < 7u && used0 != 0u && (used0 & (1u << t0)) == 0u)
+        ++t0;
+      plan.tex_mode0_valid = bp_valid_[mode0_reg(t0)];
+      plan.tex_mode0 = bp_regs_[mode0_reg(t0)];
+    }
     // Multi-texmap (63/Mfin): when a TEV combines >1 texmap (THP YUV Y/U/V) the
     // single flat texture above is not enough. Populate the per-texmap set from
     // the per-slot bound textures. texmap_mask stays 0 for <=1 distinct texmap
@@ -1041,6 +1077,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
         dst.tlut_entries = src.tlut_entries;
         dst.tlut_data = src.tlut_host_data;
         dst.tlut_available = src.tlut_host_available;
+        dst.mode0_valid = bp_valid_[mode0_reg(t)];
+        dst.mode0 = bp_regs_[mode0_reg(t)];
       }
     }
   }

@@ -151,7 +151,9 @@ struct TexGenKey {
   std::uint8_t projection = 0;         // 0 ST (2 rows), 1 STQ (3 rows)
   std::uint8_t embosssourceshift = 0;  // XF TexMtxInfo bits 12-14 (emboss src texgen)
   std::uint8_t embosslightshift = 0;   // XF TexMtxInfo bits 15-17 (emboss light index)
-  std::uint8_t pad0 = 0;
+  // Dual texture transform (XF 0x1012 + PostMtxInfo 0x1050+i): bit 0 apply
+  // the post-transform matrix (regular texgens only), bit 1 normalize first.
+  std::uint8_t posttransform = 0;
 };
 
 // One XF lighting channel's structural config (Dolphin LightingUidData shape,
@@ -273,6 +275,7 @@ struct VertexShaderConstants {
   float projection[4][4]{};         // row-dot form (VertexShaderGen o.pos)
   float texmatrices[24][4]{};       // per texgen: 3 rows resolved via matidx
   float transformmatrices[64][4]{}; // raw XF matrix memory rows
+  float posttexmatrices[24][4]{};   // per texgen: 3 post-transform rows
   // Lighting (S15): the 8 XF lights and the four material/ambient registers
   // (Dolphin I_MATERIALS: [0]=ambient0, [1]=ambient1, [2]=material0,
   // [3]=material1, integer RGBA 0..255). Only read on the lit path.
@@ -287,7 +290,7 @@ struct VertexShaderConstants {
   float cached_binormal[4]{0.f, 0.f, 0.f, 0.f};
 };
 static_assert(sizeof(VertexShaderConstants) ==
-              (6 + 4 + 24 + 64) * 16 + 8 * (5 * 16) + 4 * 16 + 3 * 16);
+              (6 + 4 + 24 + 64 + 24) * 16 + 8 * (5 * 16) + 4 * 16 + 3 * 16);
 
 // Pixel-shader uniforms (Dolphin PixelShaderConstants subset): the four TEV
 // color registers (I_COLORS: [0] prev seed, [1..3] c0/c1/c2), the four konst
@@ -383,6 +386,10 @@ struct PlanTexture {
   std::uint32_t tlut_entries = 0;
   const void* tlut_data = nullptr;
   std::uint32_t tlut_available = 0;
+  // TX_SETMODE0 of this texmap (wrap S/T, filters); mode0_valid false = never
+  // written (sampled as repeat/linear).
+  bool mode0_valid = false;
+  std::uint32_t mode0 = 0;
 };
 
 // packed uniforms, the pipeline key, and the bound texture's guest identity +
@@ -418,6 +425,8 @@ struct DrawPlan {
   std::uint32_t tlut_entries = 0;
   const void* tlut_data = nullptr;
   std::uint32_t tlut_available = 0;
+  bool tex_mode0_valid = false; // TX_SETMODE0 of the flat texture's texmap
+  std::uint32_t tex_mode0 = 0;
   // Multi-texmap (63/Mfin): bit t of texmap_mask set => textures[t] is sampled
   // by an enabled TEV stage. 0 or a single bit keeps the single-texmap fast path
   // (the flat tex_* fields above); >1 bit makes the per-texmap set authoritative.

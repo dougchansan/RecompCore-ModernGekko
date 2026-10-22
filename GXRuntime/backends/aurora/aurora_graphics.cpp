@@ -9,11 +9,14 @@
 #include <gx/fifo.hpp>
 #include <gx/gx.hpp>
 #include <gx/recomp.hpp>
+#include "gxruntime/gxcore/texture_decode.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <span>
+#include <utility>
+#include <vector>
 
 #if GXRUNTIME_HAS_AURORA_RECOMP
 // gxcore substrate submission lives in the Aurora fork (lib/gfx/gxcore_draw.cpp),
@@ -28,9 +31,76 @@ void reset_texture_cache();
 namespace gx_aurora {
 
 #if GXRUNTIME_HAS_AURORA_RECOMP
+// Skipped draws by reason, for DOL_GX_CORE_COUNTERS.
+std::vector<std::pair<const char*, unsigned long long>> g_core_skip_reasons;
+
+// DOL_GX_CORE_TEXDUMP=<dir>: each distinct texture a draw binds, decoded as
+// gxcore decodes it, written once as <dir>/<fmt>_<w>x<h>_<addr>[_t<tlut>].ppm.
+void dump_plan_texture(std::uint32_t address, std::uint32_t format, std::uint32_t width,
+                       std::uint32_t height, const void* data, std::uint32_t size,
+                       std::uint32_t available, bool has_tlut, std::uint32_t tlut_address,
+                       std::uint32_t tlut_format, std::uint32_t tlut_entries,
+                       const void* tlut_data, std::uint32_t tlut_available) {
+    static const char* s_dir = std::getenv("DOL_GX_CORE_TEXDUMP");
+    static std::vector<std::uint64_t> s_seen;
+    if (s_dir == nullptr || data == nullptr || width == 0 || height == 0)
+        return;
+    const std::uint64_t key = (std::uint64_t(address) << 32) ^ (std::uint64_t(format) << 28) ^
+                              (std::uint64_t(width) << 14) ^ height ^ (std::uint64_t(tlut_address) << 1);
+    if (std::find(s_seen.begin(), s_seen.end(), key) != s_seen.end())
+        return;
+    s_seen.push_back(key);
+    const auto* bytes = static_cast<const std::uint8_t*>(data);
+    const std::uint32_t n = std::min(size, available);
+    std::vector<std::uint8_t> rgba =
+        gxruntime::gxcore::is_ci_format(format)
+            ? (has_tlut && tlut_data != nullptr
+                   ? gxruntime::gxcore::decode_ci(format, width, height, bytes, n, tlut_format,
+                                                  tlut_entries,
+                                                  static_cast<const std::uint8_t*>(tlut_data),
+                                                  tlut_available)
+                   : std::vector<std::uint8_t>{})
+            : gxruntime::gxcore::decode_texture(format, width, height, bytes, n);
+    char path[1024];
+    if (has_tlut)
+        std::snprintf(path, sizeof path, "%s/%X_%ux%u_%08X_t%08X.ppm", s_dir, format, width, height,
+                      address, tlut_address);
+    else
+        std::snprintf(path, sizeof path, "%s/%X_%ux%u_%08X.ppm", s_dir, format, width, height, address);
+    if (rgba.size() < std::size_t(width) * height * 4)
+        return;
+    if (FILE* f = std::fopen(path, "wb")) {
+        std::fprintf(f, "P6\n%u %u\n255\n", width, height);
+        for (std::size_t i = 0; i < std::size_t(width) * height; ++i)
+            std::fwrite(rgba.data() + i * 4, 1, 3, f);
+        std::fclose(f);
+    }
+}
+
 void core_plan_observer(const gxruntime::gxcore::DrawPlan& plan, void*) {
-    if (!plan.ok)
-        return; // skip reasons are tallied in the sink gap counters
+    if (plan.ok) {
+        if (plan.has_texture)
+            dump_plan_texture(plan.tex_address, plan.tex_format, plan.tex_width, plan.tex_height,
+                              plan.tex_data, plan.tex_size, plan.tex_available, plan.has_tlut,
+                              plan.tlut_address, plan.tlut_format, plan.tlut_entries, plan.tlut_data,
+                              plan.tlut_available);
+        for (const auto& t : plan.textures)
+            if (t.valid)
+                dump_plan_texture(t.address, t.format, t.width, t.height, t.data, t.size,
+                                  t.available, t.has_tlut, t.tlut_address, t.tlut_format,
+                                  t.tlut_entries, t.tlut_data, t.tlut_available);
+    }
+    if (!plan.ok) {
+        // skip reasons are tallied in the sink gap counters; keep them by name too
+        const char* reason = plan.skip_reason != nullptr ? plan.skip_reason : "unknown";
+        auto it = std::find_if(g_core_skip_reasons.begin(), g_core_skip_reasons.end(),
+                               [&](const auto& e) { return std::strcmp(e.first, reason) == 0; });
+        if (it == g_core_skip_reasons.end())
+            g_core_skip_reasons.emplace_back(reason, 1);
+        else
+            ++it->second;
+        return;
+    }
     if (aurora::gfx::gxcore::submit_draw_plan(plan))
         ++g_core_submitted;
     else
@@ -593,6 +663,36 @@ void aurora_backend_present(void) {
 #if GXRUNTIME_HAS_AURORA_RECOMP
     if (gx_aurora::g_gx_core_enabled && !gx_aurora::g_shadow_frontend_failed)
         gx_aurora::g_core_sink.flush_frame();
+    if (gx_aurora::g_gx_core_enabled) {
+        // DOL_GX_CORE_COUNTERS=<n>: every n presents, every non-zero gxcore gap
+        // counter (running totals): what the renderer skipped or ignored.
+        static const unsigned long long s_every = [] {
+            const char* v = std::getenv("DOL_GX_CORE_COUNTERS");
+            return v != nullptr ? std::strtoull(v, nullptr, 10) : 0ull;
+        }();
+        if (s_every != 0 && (gx_aurora::g_present_count + 1) % s_every == 0) {
+            const gxruntime::gxcore::GapCounters& c = gx_aurora::g_core_sink.counters();
+            const std::pair<const char*, unsigned long long> fields[] = {
+                {"planned", c.draws_planned}, {"skipped", c.draws_skipped},
+                {"cull_all", c.cull_all_draws}, {"missing_vcd", c.missing_vcd},
+                {"vtx_fail", c.vertex_decode_failures}, {"unsupported_texgen", c.unsupported_texgen},
+                {"per_vertex_tex_mtx", c.per_vertex_tex_mtx},
+                {"unresolved_tex_matrix", c.unresolved_tex_matrix},
+                {"normals_ignored", c.normals_ignored}, {"lighting_ignored", c.lighting_ignored},
+                {"tlut_texture", c.tlut_texture}, {"alpha_compare_ignored", c.alpha_compare_ignored},
+                {"tev_stages_over", c.tev_stages_over}, {"tev_multi_texmap", c.tev_multi_texmap},
+                {"efb_copies", c.efb_copies}, {"efb_copy_depth", c.efb_copy_depth},
+                {"fog_ignored", c.fog_ignored}, {"indirect_ignored", c.indirect_ignored},
+                {"logic_op_ignored", c.logic_op_ignored}};
+            std::fprintf(stderr, "[gx-core counters] present=%llu", gx_aurora::g_present_count + 1);
+            for (const auto& [name, value] : fields)
+                if (value != 0)
+                    std::fprintf(stderr, " %s=%llu", name, value);
+            for (const auto& [reason, count] : gx_aurora::g_core_skip_reasons)
+                std::fprintf(stderr, " [skip: %s]=%llu", reason, count);
+            std::fprintf(stderr, "\n");
+        }
+    }
     if (gx_aurora::g_gx_core_enabled) {
         static int s_cutscene_diag = -1;
         if (s_cutscene_diag < 0)

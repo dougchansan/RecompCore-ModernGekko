@@ -599,15 +599,28 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
 
   BindGroupRef textureBindGroup = 0;
   if (plan.pipeline.shader.textured != 0) {
-    const wgpu::SamplerDescriptor samplerDescriptor{
-        .label = "GXCore Sampler",
-        .addressModeU = wgpu::AddressMode::Repeat,
-        .addressModeV = wgpu::AddressMode::Repeat,
-        .magFilter = wgpu::FilterMode::Linear,
-        .minFilter = wgpu::FilterMode::Linear,
-        .mipmapFilter = wgpu::MipmapFilterMode::Nearest,
+    // The texmap's TX_SETMODE0: wrap S (bits 0-1) and T (2-3) clamp/repeat/
+    // mirror, mag filter (bit 4) and min filter (5-7, linear for LINEAR,
+    // LIN_MIP_NEAR, LIN_MIP_LIN). Projected shadows rely on clamp: the
+    // projector's back side lands outside the texture and must read its edge.
+    auto sampler_for = [](bool valid, uint32_t mode0) {
+      auto wrap = [](uint32_t w) {
+        return w == 0u ? wgpu::AddressMode::ClampToEdge
+                       : w == 2u ? wgpu::AddressMode::MirrorRepeat : wgpu::AddressMode::Repeat;
+      };
+      const uint32_t minf = (mode0 >> 5) & 7u;
+      const wgpu::SamplerDescriptor samplerDescriptor{
+          .label = "GXCore Sampler",
+          .addressModeU = valid ? wrap(mode0 & 3u) : wgpu::AddressMode::Repeat,
+          .addressModeV = valid ? wrap((mode0 >> 2) & 3u) : wgpu::AddressMode::Repeat,
+          .magFilter = !valid || ((mode0 >> 4) & 1u) ? wgpu::FilterMode::Linear : wgpu::FilterMode::Nearest,
+          .minFilter = !valid || minf == 1u || minf == 3u || minf == 5u ? wgpu::FilterMode::Linear
+                                                                        : wgpu::FilterMode::Nearest,
+          .mipmapFilter = wgpu::MipmapFilterMode::Nearest,
+      };
+      return sampler_ref(samplerDescriptor);
     };
-    const auto sampler = sampler_ref(samplerDescriptor);
+    const auto sampler = sampler_for(plan.tex_mode0_valid, plan.tex_mode0);
     if (plan.texmap_mask == 0u) {
       // Single-texmap fast path: primary texture at binding 0/1 (unchanged).
       if (plan.has_texture) {
@@ -656,8 +669,9 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
         held.push_back(bound);
         entries.push_back(WGPUBindGroupEntry{
             .binding = 2u * t, .textureView = bound->sampleTextureView.Get()});
+        const auto texmap_sampler = sampler_for(pt.mode0_valid, pt.mode0);
         entries.push_back(WGPUBindGroupEntry{.binding = 2u * t + 1u,
-                                             .sampler = sampler.Get()});
+                                             .sampler = texmap_sampler.Get()});
       }
       if (!complete)
         return false;

@@ -291,10 +291,13 @@ void emit_tev_fragment(std::string& out, const ShaderKey& key) {
           texcoord < kMaxTexGens && key.tex_gens[texcoord].projection != 0u;
       if (proj)
         emitf(out,
-              "    { let uv = in.uv%u.xy / max(in.uv%u.z, 1e-6); "
+              // Dolphin PixelShaderGen: q == 0 keeps st, otherwise st / q,
+              // negative q included (a projector behind the surface).
+              "    { let q = in.uv%u.z; let uv = select(in.uv%u.xy / q, "
+              "in.uv%u.xy, q == 0.0); "
               "rawtextemp = vec4i(round(textureSample(tex%u, samp%u, uv) * "
               "255.0)); }\n",
-              texcoord, texcoord, texunit, texunit);
+              texcoord, texcoord, texcoord, texunit, texunit);
       else
         emitf(out,
               "    { let uv = in.uv%u.xy; rawtextemp = "
@@ -585,7 +588,8 @@ std::string generate_wgsl(const ShaderKey& key) {
             "    posnormalmatrix: array<vec4f, 6>,\n"
             "    projection: array<vec4f, 4>,\n"
             "    texmatrices: array<vec4f, 24>,\n"
-            "    transformmatrices: array<vec4f, 64>,\n");
+            "    transformmatrices: array<vec4f, 64>,\n"
+            "    posttexmatrices: array<vec4f, 24>,\n");
   // The lit/emboss/register-material path binds the full uniform buffer (lights
   // + materials); the plain path declares only the leading fields (a smaller
   // WGSL struct over the same buffer is valid), keeping every existing golden
@@ -656,8 +660,11 @@ std::string generate_wgsl(const ShaderKey& key) {
     emit(out, "    @location(11) rawtangent: vec3f,\n");
   emit(out, "};\n");
 
+  // @invariant: GX multi-pass draws (base, light, shadow passes over the same
+  // geometry) depth-test against each other with EQUAL/LEQUAL, so every
+  // pipeline must compute bit-identical positions or the passes z-fight.
   emit(out, "struct VertexOut {\n"
-            "    @builtin(position) pos: vec4f,\n"
+            "    @invariant @builtin(position) pos: vec4f,\n"
             "    @location(0) color0: vec4f,\n");
   if (emit_color1)
     emit(out, "    @location(1) color1: vec4f,\n");
@@ -798,6 +805,18 @@ std::string generate_wgsl(const ShaderKey& key) {
               "dot(coord, vsc.texmatrices[%u]), 1.0);\n",
               3u * i, 3u * i + 1u);
       }
+      // Dual texture transform (Dolphin VertexShaderGen): optional normalize,
+      // then the post matrix over (s, t, q, 1). HSD sets every texture's UV
+      // transform this way.
+      if ((tg.posttransform & 1u) != 0u) {
+        if ((tg.posttransform & 2u) != 0u)
+          emit(out, "        uv = normalize(uv);\n");
+        emitf(out,
+              "        uv = vec3f(dot(vec4f(uv, 1.0), vsc.posttexmatrices[%u]), "
+              "dot(vec4f(uv, 1.0), vsc.posttexmatrices[%u]), "
+              "dot(vec4f(uv, 1.0), vsc.posttexmatrices[%u]));\n",
+              3u * i, 3u * i + 1u, 3u * i + 2u);
+      }
       // GC q==0 special case (Dolphin VertexShaderGen.cpp WriteTexCoordTransforms).
       emit(out, "        if (uv.z == 0.0) { uv = vec3f(clamp(uv.xy * 0.5, "
                 "vec2f(-1.0), vec2f(1.0)), uv.z); }\n");
@@ -843,7 +862,7 @@ std::string generate_wgsl(const ShaderKey& key) {
   emit(out, "    var prev = in.color0;\n");
   if (key.textured != 0) {
     if (key.num_tex_gens > 0 && key.tex_gens[0].projection != 0u) {
-      emit(out, "    let uv = in.uv0.xy / max(in.uv0.z, 1e-6);\n");
+      emit(out, "    let uv = select(in.uv0.xy / in.uv0.z, in.uv0.xy, in.uv0.z == 0.0);\n");
     } else {
       emit(out, "    let uv = in.uv0.xy;\n");
     }

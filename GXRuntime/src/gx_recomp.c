@@ -882,8 +882,12 @@ bool dol_gx_recomp_capture_xf_transform(DolGxRecompState* gx, u16 base, u8 count
     const bool touches_normal =
         last >= DOL_GX_XF_NORMAL_MATRIX_BASE &&
         first < DOL_GX_XF_NORMAL_MATRIX_END;
+    const bool touches_post =
+        last >= DOL_GX_XF_POST_MATRIX_BASE && first < DOL_GX_XF_POST_MATRIX_END;
+    const bool touches_dual =
+        first <= DOL_GX_XF_DUAL_TEX && last >= DOL_GX_XF_DUAL_TEX;
     if (!touches_pn && !touches_tex && !touches_scalar && !touches_window &&
-        !touches_light && !touches_normal)
+        !touches_light && !touches_normal && !touches_post && !touches_dual)
         return false;
     bool captured = false;
     for (u32 w = 0u; w < count; ++w) {
@@ -899,6 +903,17 @@ bool dol_gx_recomp_capture_xf_transform(DolGxRecompState* gx, u16 base, u8 count
             const u32 rel = xf_addr - DOL_GX_XF_REG_WINDOW_BASE;
             gx->xf_regs[rel] = bits;
             gx->xf_reg_mask |= 1ull << rel;
+            captured = true;
+        }
+        if (xf_addr >= DOL_GX_XF_POST_MATRIX_BASE &&
+            xf_addr < DOL_GX_XF_POST_MATRIX_END) {
+            const u32 rel = xf_addr - DOL_GX_XF_POST_MATRIX_BASE;
+            gx->post_matrices[rel / 4u][rel % 4u] = value;
+            gx->post_matrix_word_mask[rel / 4u] |= (u8)(1u << (rel % 4u));
+            captured = true;
+        } else if (xf_addr == DOL_GX_XF_DUAL_TEX) {
+            gx->dual_tex = bits;
+            gx->dual_tex_valid = true;
             captured = true;
         }
         if (xf_addr <= pn_last) {

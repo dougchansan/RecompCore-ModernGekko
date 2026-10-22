@@ -232,6 +232,11 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
     draw.chan_reg_mask = packet.draw.chan_reg_mask;
     std::memcpy(draw.tex_matrices, packet.draw.tex_matrices,
                 sizeof(draw.tex_matrices));
+    draw.dual_tex = packet.draw.dual_tex;
+    draw.dual_tex_valid = packet.draw.dual_tex_valid;
+    std::memcpy(draw.post_matrices, packet.draw.post_matrices, sizeof(draw.post_matrices));
+    std::memcpy(draw.post_matrix_word_mask, packet.draw.post_matrix_word_mask,
+                sizeof(draw.post_matrix_word_mask));
     std::memcpy(draw.tex_matrix_word_mask, packet.draw.tex_matrix_word_mask,
                 sizeof(draw.tex_matrix_word_mask));
     std::memcpy(draw.xf_regs, packet.draw.xf_regs, sizeof(draw.xf_regs));

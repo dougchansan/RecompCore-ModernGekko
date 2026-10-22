@@ -698,8 +698,18 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
   prevPass.resolveUniformRange = push_uniform(uvTransform);
   enqueue_pass(current_frame_packet(), g_recordingFrameSlot, g_currentRenderPass);
 
-  // Populate new render pass from previous
+  // Populate new render pass from previous. GX clears only the copied
+  // rectangle; an attachment clear wipes the whole EFB, so it is used only
+  // when the copy covers the target. A partial copy clears by a draw
+  // scissored to the rectangle (games copy shadow and effect buffers out of a
+  // corner of the frame they are still drawing).
   const auto msaaSamples = prevPass.msaaSamples;
+  const bool fullRect = rect.x <= 0 && rect.y <= 0 &&
+                        rect.x + rect.width >= static_cast<int32_t>(prevPass.targetSize.width) &&
+                        rect.y + rect.height >= static_cast<int32_t>(prevPass.targetSize.height);
+  const bool attachClearColor = fullRect && clearColor && clearAlpha;
+  const bool attachClearDepth = fullRect && clearDepth;
+  const bool hasDepth = prevPass.hasDepth;  // prevPass dangles once a pass is added
   RenderPass newPass{
       .label = pass_label("EFB"),
       .colorView = prevPass.colorView,
@@ -712,8 +722,8 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
       .msaaSamples = msaaSamples,
       .clearColorValue = clearColorValue,
       .clearDepthValue = clearDepthValue,
-      .clearColor = clearColor && clearAlpha,
-      .clearDepth = clearDepth,
+      .clearColor = attachClearColor,
+      .clearDepth = attachClearDepth,
       .hasDepth = prevPass.hasDepth,
       .hasStencil = prevPass.hasStencil,
   };
@@ -721,14 +731,19 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
   current_render_passes().emplace_back(std::move(newPass));
   ++g_currentRenderPass;
 
-  if (!newPass.clearColor && (clearColor || clearAlpha)) {
-    // If we're only clearing color _or_ alpha, perform a clear draw
+  const bool drawClearColor = !attachClearColor && (clearColor || clearAlpha);
+  const bool drawClearDepth = !attachClearDepth && clearDepth && hasDepth;
+  if (drawClearColor || drawClearDepth) {
+    // Whatever the attachment clear did not cover: one channel only, or a
+    // partial rectangle.
+    if (!fullRect)
+      push_command(CommandType::SetScissor, Command::Data{.setScissor = rect});
     push_draw_command(clear::DrawData{
         .pipeline = pipeline_ref(clear::PipelineConfig{
             .msaaSamples = msaaSamples,
-            .clearColor = clearColor,
-            .clearAlpha = clearAlpha,
-            .clearDepth = false, // Depth cleared via render attachment
+            .clearColor = drawClearColor && clearColor,
+            .clearAlpha = drawClearColor && clearAlpha,
+            .clearDepth = drawClearDepth,
         }),
         .color =
             wgpu::Color{
@@ -737,6 +752,7 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
                 .b = clearColorValue.z(),
                 .a = clearColorValue.w(),
             },
+        .depth = clearDepthValue,
     });
   }
   push_command(CommandType::SetViewport, Command::Data{.setViewport = g_cachedViewport});
