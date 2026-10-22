@@ -287,8 +287,10 @@ void emit_tev_fragment(std::string& out, const ShaderKey& key) {
       texcoord = 0;
     const std::uint32_t texunit = multi_texmap ? (s.tevorders_texmap & 7u) : 0u;
     if (s.tevorders_enable != 0 && key.num_tex_gens > 0 && key.textured != 0) {
-      const bool proj =
-          texcoord < kMaxTexGens && key.tex_gens[texcoord].projection != 0u;
+      // Dolphin PixelShaderGen divides every texcoord by its q (unless 0),
+      // not only STQ texgens: a dual-transform post matrix can leave an ST
+      // texgen's q != 1, and the hardware divides it all the same.
+      const bool proj = texcoord < kMaxTexGens;
       if (proj)
         emitf(out,
               // Dolphin PixelShaderGen: q == 0 keeps st, otherwise st / q,
@@ -861,7 +863,7 @@ std::string generate_wgsl(const ShaderKey& key) {
   emit(out, "@fragment\nfn fs_main(in: VertexOut) -> @location(0) vec4f {\n");
   emit(out, "    var prev = in.color0;\n");
   if (key.textured != 0) {
-    if (key.num_tex_gens > 0 && key.tex_gens[0].projection != 0u) {
+    if (key.num_tex_gens > 0) {  // every texcoord divides by q (see above)
       emit(out, "    let uv = select(in.uv0.xy / in.uv0.z, in.uv0.xy, in.uv0.z == 0.0);\n");
     } else {
       emit(out, "    let uv = in.uv0.xy;\n");

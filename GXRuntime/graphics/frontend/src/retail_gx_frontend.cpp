@@ -857,7 +857,9 @@ bool RetailGxFrontend::handle_draw(std::uint8_t command,
   if (state_.trace_count < DOL_GX_RECOMP_MAX_TRACE_EVENTS) {
     state_.trace[state_.trace_count++] = {
         .kind = DOL_GX_RECOMP_EVENT_DRAW,
-        .a = command & 0xF8u,
+        // GX_DRAW_QUADS_2 (0x88) draws exactly like quads (0x80); the
+        // consumers only know 0x80 and dropped 0x88 draws (stadium floors).
+        .a = (command & 0xF8u) == 0x88u ? 0x80u : (command & 0xF8u),
         .b = vtx_fmt,
         .c = vertex_count,
         .d = layout->vertex_size,
