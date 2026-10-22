@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "Common/Logging/Log.h"
+#include "VideoCommon/Present.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -28,7 +29,7 @@ namespace
 // Shared with tools/aurora-mirror. Records are {u32 type, u32 size, payload},
 // padded to 8 bytes; positions only grow and wrap modulo the capacity.
 constexpr u32 kMagic = 0x4D525541;  // "AURM"
-constexpr u32 kVersion = 1;
+constexpr u32 kVersion = 2;  // 2: frame-end records carry the draw aspect
 constexpr u64 kCapacity = 128ull << 20;
 constexpr u64 kDataOffset = 4096;
 enum : u32
@@ -157,7 +158,7 @@ void FrameEnd()
     s_frame.clear();
     return;
   }
-  const u64 need = Padded(s_frame.size()) + Padded(0);
+  const u64 need = Padded(s_frame.size()) + Padded(sizeof(float));
   u64 pos = s_header->write.load(std::memory_order_relaxed);
   const u64 used = pos - s_header->read.load(std::memory_order_acquire);
   if (used + need > kCapacity)
@@ -168,7 +169,10 @@ void FrameEnd()
   else
   {
     Write(&pos, RecordFifo, s_frame.data(), static_cast<u32>(s_frame.size()));
-    Write(&pos, RecordFrameEnd, nullptr, 0);
+    // The aspect Dolphin presents this frame at (menus pillarboxed 4:3,
+    // widescreen gameplay wider), so the mirror can present the same way.
+    const float aspect = g_presenter ? g_presenter->CalculateDrawAspectRatio() : 0.0f;
+    Write(&pos, RecordFrameEnd, reinterpret_cast<const u8*>(&aspect), sizeof(aspect));
     s_header->write.store(pos, std::memory_order_release);
     s_header->frames.fetch_add(1, std::memory_order_relaxed);
 #ifdef _WIN32
