@@ -9,6 +9,7 @@
 #include <gx/fifo.hpp>
 #include <gx/gx.hpp>
 #include <gx/recomp.hpp>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -850,6 +851,58 @@ void aurora_backend_call_display_list(const void* data, u32 size) {
     gx_aurora::flush_pending_resource_metadata();
     aurora::gx::fifo::write_data(data, size);
     gx_aurora::g_fifo_bytes += size;
+}
+
+void aurora_backend_gx_write(u64 value, u8 size);
+
+// A run of whole GX commands at once, for callers that already hold a command
+// stream (a recorded or mirrored FIFO) instead of individual pipe writes. With
+// the gxcore path it goes to the frontend in one piece; otherwise it falls back
+// to byte writes.
+void aurora_backend_gx_write_bytes(const u8* data, u32 size) {
+    if (!gx_aurora::g_initialized || size == 0)
+        return;
+#if GXRUNTIME_HAS_AURORA_RECOMP
+    if (gx_aurora::g_gx_core_enabled && gx_aurora::g_shadow_frontend_enabled) {
+        gx_aurora::g_fifo_bytes += size;
+        // The frontend drains its recorded FIFO (DOL_GX_RECOMP_MAX_FIFO_BYTES)
+        // and trace (DOL_GX_RECOMP_MAX_TRACE_EVENTS, about two per command) at
+        // each flush, so feed it in pieces that fit both. A command split
+        // across pieces waits in the frontend's buffer for the rest.
+        constexpr u32 kPiece = 8u * 1024u;
+        bool ok = true;
+        for (u32 at = 0; ok && at < size && !gx_aurora::g_shadow_frontend_failed; at += kPiece) {
+            ok = gx_aurora::g_shadow_frontend.write_fifo(
+                     std::span<const std::uint8_t>(data + at, std::min(kPiece, size - at))) &&
+                 gx_aurora::g_shadow_frontend.flush(&gx_aurora::g_core_sink);
+        }
+        if (gx_aurora::g_shadow_frontend_failed)
+            return;
+        if (!ok) {
+            gx_aurora::g_shadow_frontend_failed = true;
+            std::fprintf(stderr,
+                         "[gx-core] frontend rejected FIFO after %llu byte(s): "
+                         "%s (opcode=0x%02X offset=%llu detail=0x%X,0x%X,0x%X,0x%X); consumer=%s\n",
+                         gx_aurora::g_fifo_bytes,
+                         gx_aurora::g_shadow_frontend.last_error() != nullptr
+                             ? gx_aurora::g_shadow_frontend.last_error()
+                             : "none",
+                         static_cast<unsigned>(gx_aurora::g_shadow_frontend.last_error_opcode()),
+                         static_cast<unsigned long long>(
+                             gx_aurora::g_shadow_frontend.last_error_offset()),
+                         gx_aurora::g_shadow_frontend.last_error_a(),
+                         gx_aurora::g_shadow_frontend.last_error_b(),
+                         gx_aurora::g_shadow_frontend.last_error_c(),
+                         gx_aurora::g_shadow_frontend.last_error_d(),
+                         gx_aurora::g_core_sink.failure_reason() != nullptr
+                             ? gx_aurora::g_core_sink.failure_reason()
+                             : "none");
+        }
+        return;
+    }
+#endif
+    for (u32 i = 0; i < size; ++i)
+        aurora_backend_gx_write(data[i], 1);
 }
 
 void aurora_backend_gx_write(u64 value, u8 size) {

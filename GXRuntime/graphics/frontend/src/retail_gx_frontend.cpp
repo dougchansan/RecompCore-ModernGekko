@@ -2,6 +2,7 @@
 #include "gxruntime/aurora_recomp/retail_gx_frontend.hpp"
 #include "gxruntime/aurora_recomp/retail_gx_frontend_c.h"
 
+#include <cstdio>
 #include <cstring>
 #include <new>
 
@@ -695,8 +696,15 @@ bool RetailGxFrontend::handle_bp(std::uint32_t raw) {
     return false;
 
   std::uint8_t slot = 0;
-  if (map_image0_reg(reg, &slot) || map_image3_reg(reg, &slot))
-    return maybe_resolve_texture(slot);
+  if (map_image0_reg(reg, &slot) || map_image3_reg(reg, &slot)) {
+    // Games write IMAGE0 and IMAGE3 one at a time, so between the two writes
+    // the slot can pair a new size with the old address, which need not
+    // resolve. Hardware reads the pair only when a draw samples it; a pair
+    // that does not resolve leaves the slot unresolved instead of failing the
+    // stream.
+    (void)maybe_resolve_texture(slot);
+    return true;
+  }
   if (map_tlut_reg(reg, &slot)) {
     state_.texture_tlut_valid[slot] = true;
     state_.texture_tlut_tmem_offset[slot] =
@@ -802,6 +810,35 @@ bool RetailGxFrontend::handle_draw(std::uint8_t command,
     return fail_parse("draw vertex layout missing", command, command_offset);
 
   const DolGxRecompVertexLayout* layout = &state_.vertex_layouts[vtx_fmt];
+
+  // Resolve every indexed array before recording anything. A draw whose
+  // indices reach an array the game never set, or past guest RAM, is skipped
+  // whole (hardware would fetch garbage; the stream itself is still sound),
+  // so one bad draw does not stop the frontend.
+  std::uint32_t spans[DOL_GX_RECOMP_CP_ARRAY_COUNT] = {};
+  for (std::uint32_t i = 0u; i < layout->indexed_attr_count; ++i) {
+    const DolGxRecompIndexedAttr* spec = &layout->indexed_attrs[i];
+    const std::uint8_t attr = spec->attr;
+    if (!spec->valid || attr >= DOL_GX_RECOMP_CP_ARRAY_COUNT)
+      return fail_parse("draw indexed attribute invalid", command,
+                        command_offset);
+    const std::uint32_t stride =
+        state_.arrays[attr].stride_valid ? state_.arrays[attr].stride : 0u;
+    DolGxRecompResolvedArray array;
+    if (!dol_gx_recomp_indexed_span(vertex_data.data(), layout->vertex_size, vertex_count,
+                                    spec->vertex_offset, spec->index_size, stride,
+                                    spec->element_size, spec->element_bias, &spans[i]) ||
+        !dol_gx_recomp_resolve_cp_array(&state_, attr, spans[i], &array)) {
+      if (++skipped_draws_ <= 8u)
+        std::fprintf(stderr,
+                     "[aurora-recomp] skipped draw 0x%02X: array %u unresolved "
+                     "(base_valid=%d base=0x%08X stride=%u span=%u)\n",
+                     command, attr, state_.arrays[attr].base_valid ? 1 : 0,
+                     state_.arrays[attr].physical_base, stride, spans[i]);
+      return true;
+    }
+  }
+
   if (state_.trace_count < DOL_GX_RECOMP_MAX_TRACE_EVENTS) {
     state_.trace[state_.trace_count++] = {
         .kind = DOL_GX_RECOMP_EVENT_DRAW,
@@ -820,23 +857,7 @@ bool RetailGxFrontend::handle_draw(std::uint8_t command,
   for (std::uint32_t i = 0u; i < layout->indexed_attr_count; ++i) {
     const DolGxRecompIndexedAttr* spec = &layout->indexed_attrs[i];
     const std::uint8_t attr = spec->attr;
-    if (!spec->valid || attr >= DOL_GX_RECOMP_CP_ARRAY_COUNT)
-      return fail_parse("draw indexed attribute invalid", command,
-                        command_offset);
-    std::uint32_t span = 0;
-    if (!dol_gx_recomp_indexed_span(
-            vertex_data.data(), layout->vertex_size, vertex_count,
-            spec->vertex_offset, spec->index_size,
-            state_.arrays[attr].stride_valid ? state_.arrays[attr].stride : 0u,
-            spec->element_size, spec->element_bias, &span))
-      return fail_parse(
-          "draw indexed span failed", command, command_offset, attr,
-          state_.arrays[attr].stride_valid ? state_.arrays[attr].stride : 0u,
-          spec->vertex_offset, spec->index_size);
-    DolGxRecompResolvedArray array;
-    if (!dol_gx_recomp_resolve_cp_array(&state_, attr, span, &array))
-      return fail_parse("draw CP array resolve failed", command,
-                        command_offset);
+    const std::uint32_t span = spans[i];
     if (state_.trace_count < DOL_GX_RECOMP_MAX_TRACE_EVENTS) {
       state_.trace[state_.trace_count++] = {
           .kind = DOL_GX_RECOMP_EVENT_INDEXED_SPAN,

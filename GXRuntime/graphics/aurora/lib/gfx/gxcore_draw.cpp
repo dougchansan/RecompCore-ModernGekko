@@ -306,8 +306,8 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
     });
   }
   const wgpu::VertexBufferLayout vertexLayout{
-      .arrayStride = gxc::kVertexStrideBytes,
       .stepMode = wgpu::VertexStepMode::Vertex,
+      .arrayStride = gxc::kVertexStrideBytes,
       .attributeCount = attributes.size(),
       .attributes = attributes.data(),
   };
