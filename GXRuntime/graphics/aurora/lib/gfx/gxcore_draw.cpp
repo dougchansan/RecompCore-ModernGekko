@@ -170,7 +170,22 @@ absl::flat_hash_map<TextureKey, TextureHandle> g_textureCache;
 // arrives at an address (movie streaming, screen transitions), the prior entry
 // for that address is evicted so the content-hashed cache stays bounded to one
 // live entry per buffer instead of accumulating every historical frame.
-absl::flat_hash_map<uint32_t, TextureKey> g_textureAddrKey;
+// The frame it was last bound in rides along: content replaced at an address
+// whose texture no draw of the current frame has bound yet is written into
+// that texture in place instead of creating a new one (games rewrite some
+// buffers every frame; creating a GPU texture per rewrite dominated the feed).
+struct AddrEntry {
+  TextureKey key;
+  uint32_t last_used_frame;
+};
+absl::flat_hash_map<uint32_t, AddrEntry> g_textureAddrKey;
+// Content hashes taken this frame, keyed by identity (content_hash 0): one
+// texture is typically bound by many draws per frame and hashing its full
+// texel data for each of them cost more than the draws. Guest memory is read
+// live while the frame streams in, so a texture rewritten between two of its
+// own draws in one frame is not something this path could observe anyway.
+absl::flat_hash_map<TextureKey, uint64_t> g_textureHashMemo;
+uint32_t g_textureHashMemoFrame = UINT32_MAX;
 TextureCacheStats g_textureCacheStats;
 
 // EFB copy-to-texture destinations (63/S16): dest guest address -> resolved EFB
@@ -429,6 +444,8 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
 void reset_texture_cache() {
   g_textureCache.clear();
   g_textureAddrKey.clear();
+  g_textureHashMemo.clear();
+  g_textureHashMemoFrame = UINT32_MAX;
   g_efbCopyTextures.clear();
   g_textureCacheStats = {};
 }
@@ -648,25 +665,47 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
       return TextureHandle{};
     const auto* bytes = static_cast<const uint8_t*>(data);
     const uint32_t size = std::min(tsize, available);
+    const uint32_t frame = current_frame();
+    if (frame != g_textureHashMemoFrame) {
+      g_textureHashMemo.clear();
+      g_textureHashMemoFrame = frame;
+    }
+    TextureKey key{address,     tsize,        format,      width,
+                   height,      tlut_address, tlut_format, tlut_entries,
+                   0};
     // Hash the actual source texels (+ TLUT for CI) so a content change under an
     // unchanged guest identity is a distinct cache entry — see TextureKey.
-    uint64_t content_hash = XXH3_64bits(bytes, size);
-    if (gxc::is_ci_format(format) && has_tlut && tlut_data != nullptr)
-      content_hash =
-          XXH3_64bits_withSeed(tlut_data, tlut_available, content_hash);
-    const TextureKey key{address,     tsize,        format,      width,
-                         height,      tlut_address, tlut_format, tlut_entries,
-                         content_hash};
+    if (const auto memo = g_textureHashMemo.find(key); memo != g_textureHashMemo.end()) {
+      key.content_hash = memo->second;
+    } else {
+      uint64_t content_hash = XXH3_64bits(bytes, size);
+      // Only the palette itself: the resolver's available count runs to the
+      // end of guest RAM, and hashing that made every unrelated store a new key
+      // (each CI texture re-decoded and re-created every frame).
+      if (gxc::is_ci_format(format) && has_tlut && tlut_data != nullptr)
+        content_hash = XXH3_64bits_withSeed(tlut_data, std::min(tlut_available, tlut_entries * 2u), content_hash);
+      g_textureHashMemo.emplace(key, content_hash);
+      key.content_hash = content_hash;
+    }
     auto it = g_textureCache.find(key);
     if (it != g_textureCache.end()) {
       ++g_textureCacheStats.hits;
+      g_textureAddrKey[address].last_used_frame = frame;
       return it->second;
     }
-    // New content for this identity: evict any prior entry cached at the same
-    // guest address (its buffer was overwritten) to keep the cache bounded.
+    // New content for this identity: the prior entry cached at the same guest
+    // address is stale (its buffer was overwritten). Evict it to keep the cache
+    // bounded, keeping its texture for an in-place rewrite when no draw of
+    // this frame has bound it yet.
+    TextureHandle reusable;
     auto addrIt = g_textureAddrKey.find(address);
-    if (addrIt != g_textureAddrKey.end())
-      g_textureCache.erase(addrIt->second);
+    if (addrIt != g_textureAddrKey.end()) {
+      if (auto old = g_textureCache.find(addrIt->second.key); old != g_textureCache.end()) {
+        if (addrIt->second.last_used_frame != frame)
+          reusable = std::move(old->second);
+        g_textureCache.erase(old);
+      }
+    }
     // gxcore owns the decode for every format: produce tightly-packed RGBA8 and
     // upload it as a pre-decoded PC texture (no substrate re-conversion).
     std::vector<uint8_t> decoded;
@@ -681,10 +720,16 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
     }
     TextureHandle handle;
     if (!decoded.empty()) {
-      handle = new_static_texture_2d(
-          width, height, 1, GX_TF_RGBA8_PC,
-          ArrayRef<uint8_t>{decoded.data(), decoded.size()}, false,
-          "GXCore Texture");
+      if (reusable && reusable->gxFormat == GX_TF_RGBA8_PC && reusable->size.width == width &&
+          reusable->size.height == height && reusable->mipCount == 1) {
+        handle = std::move(reusable);
+        write_texture(*handle, ArrayRef<uint8_t>{decoded.data(), decoded.size()});
+      } else {
+        handle = new_static_texture_2d(
+            width, height, 1, GX_TF_RGBA8_PC,
+            ArrayRef<uint8_t>{decoded.data(), decoded.size()}, false,
+            "GXCore Texture");
+      }
       ++g_textureCacheStats.uploads;
       if (gxc::is_ci_format(format))
         ++g_textureCacheStats.ci_uploads;
@@ -698,7 +743,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
       ++g_textureCacheStats.raw_fallback;
     }
     g_textureCache.emplace(key, handle);
-    g_textureAddrKey[address] = key;
+    g_textureAddrKey[address] = AddrEntry{key, frame};
     return handle;
   };
 
