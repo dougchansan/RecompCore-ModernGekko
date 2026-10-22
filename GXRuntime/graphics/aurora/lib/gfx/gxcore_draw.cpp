@@ -463,16 +463,49 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
     return;
   }
   const auto fmt = static_cast<GXTexFmt>(cmd.format);
-  const gfx::ClipRect srcRect = gx::map_logical_scissor(gfx::ClipRect{
-      .x = static_cast<int32_t>(cmd.src_x),
-      .y = static_cast<int32_t>(cmd.src_y),
-      .width = static_cast<int32_t>(cmd.width),
-      .height = static_cast<int32_t>(cmd.height),
+  // Source rect in render pixels, each edge rounded inward. At a fractional
+  // EFB scale a draw clipped to a viewport edge does not reach the partly
+  // covered pixel past it (D3D12 truncates the implicit viewport clip), so
+  // rounding outward, as the scissor mapping does, takes in a fringe row or
+  // column the game never drew. A clamped sampler reading past the copy's edge
+  // (projected shadow masks) then sees the clear colour instead of the copy.
+  const gfx::Viewport mapped = gx::map_logical_viewport(gfx::Viewport{
+      .left = static_cast<float>(cmd.src_x),
+      .top = static_cast<float>(cmd.src_y),
+      .width = static_cast<float>(cmd.width),
+      .height = static_cast<float>(cmd.height),
   });
+  const auto [targetWidth, targetHeight] = gfx::get_render_target_size();
+  constexpr float kEdgeSlack = 1e-3f;  // float noise at integer scales
+  const auto inward = [](float edge, bool low) {
+    return static_cast<int32_t>(low ? std::ceil(edge - kEdgeSlack) : std::floor(edge + kEdgeSlack));
+  };
+  const int32_t copyLeft = std::clamp(inward(mapped.left, true), 0, static_cast<int32_t>(targetWidth));
+  const int32_t copyTop = std::clamp(inward(mapped.top, true), 0, static_cast<int32_t>(targetHeight));
+  const int32_t copyRight =
+      std::clamp(inward(mapped.left + mapped.width, false), copyLeft, static_cast<int32_t>(targetWidth));
+  const int32_t copyBottom =
+      std::clamp(inward(mapped.top + mapped.height, false), copyTop, static_cast<int32_t>(targetHeight));
+  const gfx::ClipRect srcRect{
+      .x = copyLeft,
+      .y = copyTop,
+      .width = copyRight - copyLeft,
+      .height = copyBottom - copyTop,
+  };
   const uint32_t dstWidth = static_cast<uint32_t>(std::max(srcRect.width, 1));
   const uint32_t dstHeight = static_cast<uint32_t>(std::max(srcRect.height, 1));
 
   auto it = g_efbCopyTextures.find(cmd.dest_address);
+  // A destination reused for a copy of another size or format (a 384x384
+  // shadow mask where a full-frame copy lived) needs a new texture: resolving
+  // into the old one leaves the copy at the wrong scale for its samplers.
+  const bool conv = gfx::tex_copy_conv::needs_conversion(fmt);
+  if (it != g_efbCopyTextures.end() && it->second &&
+      (it->second->size.width != dstWidth || it->second->size.height != dstHeight ||
+       (conv ? it->second->gxFormat != static_cast<u32>(fmt) : it->second->gxFormat != GX_TF_RGBA8))) {
+    g_efbCopyTextures.erase(it);
+    it = g_efbCopyTextures.end();
+  }
   if (it == g_efbCopyTextures.end() || !it->second) {
     TextureHandle handle;
     if (gfx::tex_copy_conv::needs_conversion(fmt)) {
@@ -505,9 +538,81 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
     return false;
   }
 
+  // GX scissor, as Dolphin BPFunctions::ComputeScissorRects and
+  // SetScissorAndViewport: closed [left, right] x [top, bottom] in GX
+  // coordinates, made EFB-relative by the scissor offset (stored halved; both
+  // carry GX's +342, which cancels). Coordinates wrap at 1024, so each axis
+  // tries the offset in 1024 steps; of the resulting rectangles the one
+  // covering most of the viewport wins (then the largest), and its offset
+  // also places the viewport origin.
+  int32_t scissorXOff = 0;
+  int32_t scissorYOff = 0;
+  {
+    const int32_t top = static_cast<int32_t>(plan.scissor_tl & 0x7FFu);
+    const int32_t left = static_cast<int32_t>((plan.scissor_tl >> 12) & 0x7FFu);
+    const int32_t bottom = static_cast<int32_t>(plan.scissor_br & 0x7FFu);
+    const int32_t right = static_cast<int32_t>((plan.scissor_br >> 12) & 0x7FFu);
+    if (left > right || top > bottom)
+      return true;  // nothing inside the scissor: the draw renders no pixels
+    struct Range {
+      int32_t offset, start, end;
+    };
+    auto ranges = [](int32_t start, int32_t end, int32_t offset, int32_t dim) {
+      std::vector<Range> out;
+      for (int32_t extra = -4096; extra <= 4096; extra += 1024) {
+        const int32_t off = offset + extra;
+        const int32_t s = std::clamp(start - off, 0, dim);
+        const int32_t e = std::clamp(end - off + 1, 0, dim);
+        if (s < e)
+          out.push_back({off, s, e});
+      }
+      return out;
+    };
+    const auto xs = ranges(left, right, static_cast<int32_t>(plan.scissor_offset & 0x1FFu) << 1, 640);
+    const auto ys = ranges(top, bottom, static_cast<int32_t>((plan.scissor_offset >> 10) & 0x1FFu) << 1, 528);
+    if (xs.empty() || ys.empty())
+      return true;
+    // Viewport extent in raw GX coordinates (origin includes the +342).
+    float vl = -1e9f, vr = 1e9f, vt = -1e9f, vb = 1e9f;
+    if (plan.viewport_valid) {
+      vl = std::min(plan.viewport[3] - plan.viewport[0], plan.viewport[3] + plan.viewport[0]);
+      vr = std::max(plan.viewport[3] - plan.viewport[0], plan.viewport[3] + plan.viewport[0]);
+      vt = std::min(plan.viewport[4] - plan.viewport[1], plan.viewport[4] + plan.viewport[1]);
+      vb = std::max(plan.viewport[4] - plan.viewport[1], plan.viewport[4] + plan.viewport[1]);
+    }
+    auto viewport_area = [&](const Range& x, const Range& y) {
+      const float x0 = std::clamp(static_cast<float>(x.start + x.offset), vl, vr);
+      const float x1 = std::clamp(static_cast<float>(x.end + x.offset), vl, vr);
+      const float y0 = std::clamp(static_cast<float>(y.start + y.offset), vt, vb);
+      const float y1 = std::clamp(static_cast<float>(y.end + y.offset), vt, vb);
+      return (x1 - x0) * (y1 - y0);
+    };
+    const Range* bx = nullptr;
+    const Range* by = nullptr;
+    float best_vp = -1.f;
+    int64_t best_area = -1;
+    for (const auto& x : xs) {
+      for (const auto& y : ys) {
+        const float vp = viewport_area(x, y);
+        const int64_t area = int64_t(x.end - x.start) * (y.end - y.start);
+        if (vp > best_vp || (vp == best_vp && area > best_area)) {
+          best_vp = vp;
+          best_area = area;
+          bx = &x;
+          by = &y;
+        }
+      }
+    }
+    scissorXOff = bx->offset;
+    scissorYOff = by->offset;
+    gx::set_logical_scissor(
+        gfx::ClipRect{.x = bx->start, .y = by->start, .width = bx->end - bx->start, .height = by->end - by->start});
+  }
+
   if (plan.viewport_valid) {
     // Raw XF viewport -> logical viewport, the raw path's own formula
-    // (gx/command_processor.cpp XF 0x1A case).
+    // (gx/command_processor.cpp XF 0x1A case), with the origin taken
+    // from the scissor offset like Dolphin SetScissorAndViewport.
     const float sx = plan.viewport[0];
     const float sy = plan.viewport[1];
     const float sz = plan.viewport[2];
@@ -517,8 +622,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
     const float width = sx * 2.0f;
     const float height = -sy * 2.0f;
     gx::set_logical_viewport({
-        .left = ox - 340.0f - width / 2.0f,
-        .top = oy - 340.0f - height / 2.0f,
+        .left = ox - static_cast<float>(scissorXOff) - width / 2.0f,
+        .top = oy - static_cast<float>(scissorYOff) - height / 2.0f,
         .width = width,
         .height = height,
         .znear = (oz - sz) / 1.6777215e7f,

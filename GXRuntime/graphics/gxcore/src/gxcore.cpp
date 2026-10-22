@@ -1023,6 +1023,11 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
     plan.viewport_valid = true;
     std::memcpy(plan.viewport, draw.viewport, sizeof plan.viewport);
   }
+  // GXInit: scissor 0,0 640x528 (both corners carry GX's +342) and offset
+  // 342 (stored halved).
+  plan.scissor_tl = bp_valid_[0x20] ? bp_regs_[0x20] : ((342u << 12) | 342u);
+  plan.scissor_br = bp_valid_[0x21] ? bp_regs_[0x21] : (((342u + 639u) << 12) | (342u + 527u));
+  plan.scissor_offset = bp_valid_[0x59] ? bp_regs_[0x59] : ((171u << 10) | 171u);
   if (key.textured != 0u) {
     plan.has_texture = true;
     plan.tex_address = draw.texture.address;

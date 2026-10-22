@@ -408,6 +408,12 @@ struct DrawPlan {
   // logical-viewport scaling.
   bool viewport_valid = false;
   float viewport[6]{};
+  // Scissor at draw time: BP 0x20 (top-left), 0x21 (bottom-right), 0x59
+  // (offset), raw. Each register falls back to the GXInit value when the
+  // stream never wrote it.
+  std::uint32_t scissor_tl = 0;
+  std::uint32_t scissor_br = 0;
+  std::uint32_t scissor_offset = 0;
   bool has_texture = false;
   std::uint32_t tex_address = 0;
   std::uint32_t tex_size = 0;
