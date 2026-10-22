@@ -11,6 +11,8 @@
 #include <vector>
 
 #include "Common/Logging/Log.h"
+#include "Core/HW/Memmap.h"
+#include "Core/System.h"
 #include "VideoCommon/Present.h"
 
 #ifdef _WIN32
@@ -21,11 +23,70 @@ namespace AuroraMirror
 {
 bool g_on = [] {
   const char* exe = std::getenv("MODERNGEKKO_AURORA_MIRROR");
-  return exe && *exe;
+  const char* dll = std::getenv("MODERNGEKKO_AURORA_NATIVE");
+  return (exe && *exe) || (dll && *dll);
 }();
 
 namespace
 {
+// MODERNGEKKO_AURORA_NATIVE=<aurora-native.dll>: the renderer runs in this
+// process instead (tools/aurora-mirror/native.cpp), normally under the Null
+// video backend. Commands go to it from the GPU thread in batches of about
+// kNativeBatch bytes, so its texture and vertex reads stay close to the draws
+// that make them, as Dolphin's own are; each XFB copy presents.
+struct Native
+{
+  bool (*init)(const u8* ram, u32 ram_size);
+  void (*feed)(const u8* data, u32 size);
+  void (*frame_end)(float aspect);
+};
+constexpr size_t kNativeBatch = 8 * 1024;
+const bool s_native_requested = [] {
+  const char* dll = std::getenv("MODERNGEKKO_AURORA_NATIVE");
+  return dll && *dll;
+}();
+Native s_native{};
+bool s_native_failed = false;
+
+bool NativeReady()
+{
+  if (s_native.feed || s_native_failed)
+    return s_native.feed != nullptr;
+  s_native_failed = true;  // until everything below succeeds
+#ifdef _WIN32
+  const char* path = std::getenv("MODERNGEKKO_AURORA_NATIVE");
+  // Its own dependencies (Dawn, SDL, the shader compiler) sit beside it.
+  HMODULE dll = LoadLibraryExA(path, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+  if (!dll)
+  {
+    ERROR_LOG_FMT(VIDEO, "Aurora native: could not load {} (error {})", path, GetLastError());
+    return false;
+  }
+  Native native{
+      reinterpret_cast<decltype(Native::init)>(GetProcAddress(dll, "aurora_native_init")),
+      reinterpret_cast<decltype(Native::feed)>(GetProcAddress(dll, "aurora_native_feed")),
+      reinterpret_cast<decltype(Native::frame_end)>(GetProcAddress(dll, "aurora_native_frame_end")),
+  };
+  if (!native.init || !native.feed || !native.frame_end)
+  {
+    ERROR_LOG_FMT(VIDEO, "Aurora native: {} lacks the aurora_native_* entry points", path);
+    return false;
+  }
+  auto& memory = Core::System::GetInstance().GetMemory();
+  if (!native.init(memory.GetRAM(), memory.GetRamSizeReal()))
+  {
+    ERROR_LOG_FMT(VIDEO, "Aurora native: {} failed to start", path);
+    return false;
+  }
+  s_native = native;
+  s_native_failed = false;
+  NOTICE_LOG_FMT(VIDEO, "Aurora native: rendering with {}", path);
+  return true;
+#else
+  return false;
+#endif
+}
+
 // Shared with tools/aurora-mirror. Records are {u32 type, u32 size, payload},
 // padded to 8 bytes; positions only grow and wrap modulo the capacity.
 constexpr u32 kMagic = 0x4D525541;  // "AURM"
@@ -132,11 +193,21 @@ void Write(u64* pos, u32 type, const u8* payload, u32 size)
     Put(*pos + 8, payload, size);
   *pos += Padded(size);
 }
+
+// Native mode: hand the commands gathered so far to the renderer.
+void NativeFlush()
+{
+  if (!s_frame.empty() && NativeReady())
+    s_native.feed(s_frame.data(), static_cast<u32>(s_frame.size()));
+  s_frame.clear();
+}
 }  // namespace
 
 void Feed(const u8* data, u32 size)
 {
   s_frame.insert(s_frame.end(), data, data + size);
+  if (s_native_requested && s_frame.size() >= kNativeBatch)
+    NativeFlush();
 }
 
 void FeedIndexedXF(u16 address, u8 size, const u32* big_endian_words)
@@ -147,10 +218,19 @@ void FeedIndexedXF(u16 address, u8 size, const u32* big_endian_words)
   s_frame.insert(s_frame.end(), command, command + sizeof(command));
   const u8* words = reinterpret_cast<const u8*>(big_endian_words);
   s_frame.insert(s_frame.end(), words, words + size * 4u);
+  if (s_native_requested && s_frame.size() >= kNativeBatch)
+    NativeFlush();
 }
 
 void FrameEnd()
 {
+  if (s_native_requested)
+  {
+    NativeFlush();
+    if (NativeReady())
+      s_native.frame_end(g_presenter ? g_presenter->CalculateDrawAspectRatio() : 0.0f);
+    return;
+  }
   if (!s_header && !s_failed && !Init())
     s_failed = true;
   if (s_failed)
