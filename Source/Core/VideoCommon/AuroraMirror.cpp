@@ -54,6 +54,21 @@ Header* s_header = nullptr;
 u8* s_data = nullptr;
 bool s_failed = false;
 std::vector<u8> s_frame;  // the current frame's commands, GPU thread only
+#ifdef _WIN32
+// <ring>.data: the producer wrote a frame. <ring>.done: the mirror consumed up
+// to header->read.
+HANDLE s_data_event = nullptr;
+HANDLE s_done_event = nullptr;
+#endif
+// Synchronous (the default; MODERNGEKKO_AURORA_MIRROR_SYNC=0 turns it off):
+// the GPU thread waits at each frame end until the mirror has drawn the frame.
+// The mirror reads textures and vertex arrays from live guest RAM, which the
+// game rewrites; waiting keeps the game no further ahead than a real GPU lets
+// it be, so those reads see what Dolphin saw.
+bool s_sync = [] {
+  const char* v = std::getenv("MODERNGEKKO_AURORA_MIRROR_SYNC");
+  return !(v && std::strcmp(v, "0") == 0);
+}();
 
 bool Init()
 {
@@ -74,6 +89,8 @@ bool Init()
   s_header->capacity = kCapacity;
   s_header->producer_pid = GetCurrentProcessId();
   s_data = static_cast<u8*>(view) + kDataOffset;
+  s_data_event = CreateEventA(nullptr, FALSE, FALSE, (name + ".data").c_str());
+  s_done_event = CreateEventA(nullptr, FALSE, FALSE, (name + ".done").c_str());
 
   std::string cmd = "\"" + std::string(std::getenv("MODERNGEKKO_AURORA_MIRROR")) + "\" " +
                     std::to_string(GetCurrentProcessId());
@@ -154,6 +171,21 @@ void FrameEnd()
     Write(&pos, RecordFrameEnd, nullptr, 0);
     s_header->write.store(pos, std::memory_order_release);
     s_header->frames.fetch_add(1, std::memory_order_relaxed);
+#ifdef _WIN32
+    SetEvent(s_data_event);
+    // Give up on a mirror that stops answering (closed, crashed, stuck)
+    // rather than hang the game; the rest of the run is asynchronous. Its
+    // first frame waits for the mirror to start up (Dawn, pipelines).
+    const int limit = s_header->read.load(std::memory_order_relaxed) == 0 ? 30000 : 5000;
+    for (int waited = 0; s_sync && s_header->read.load(std::memory_order_acquire) < pos;)
+    {
+      if (WaitForSingleObject(s_done_event, 100) == WAIT_TIMEOUT && (waited += 100) >= limit)
+      {
+        WARN_LOG_FMT(VIDEO, "Aurora mirror: no answer for 5 s, no longer waiting for it");
+        s_sync = false;
+      }
+    }
+#endif
   }
   s_frame.clear();
 }
