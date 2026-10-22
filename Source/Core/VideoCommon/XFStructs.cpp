@@ -3,6 +3,8 @@
 
 #include "VideoCommon/XFStructs.h"
 
+#include "VideoCommon/AuroraMirror.h"
+
 #include <bitset>
 #include <algorithm>
 #include <bit>
@@ -778,6 +780,8 @@ void LoadIndexedXF(CPArray array, u32 index, u16 address, u8 size)
   }
 
   XFTrace::Load('i', address, size, reinterpret_cast<const u8*>(newData));
+  if (AuroraMirror::On() && newData)
+    AuroraMirror::FeedIndexedXF(address, size, newData);
   FrameInterp::Load(address, size, reinterpret_cast<const u8*>(newData));
   auto& xf_state_manager = system.GetXFStateManager();
   bool changed = false;

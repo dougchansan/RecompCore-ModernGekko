@@ -23,6 +23,7 @@
 #include "Core/System.h"
 
 #include "VideoCommon/BPFunctions.h"
+#include "VideoCommon/AuroraMirror.h"
 #include "VideoCommon/BPMemory.h"
 #include "VideoCommon/BoundingBox.h"
 #include "VideoCommon/Fifo.h"
@@ -380,6 +381,8 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
         // memory so they form a single completed XFB. See
         // https://dolphin-emu.org/blog/2017/11/19/hybridxfb/ for examples and more detail.
         system.GetVideoEvents().after_frame_event.Trigger(system);
+        if (AuroraMirror::On())
+          AuroraMirror::FrameEnd();
 
         // Note: Theoretically, in the future we could track the VI configuration and try to detect
         //       when an XFB is the last XFB copy of a frame. Not only would we get a clean "end of

@@ -19,6 +19,7 @@
 #include "Core/FifoPlayer/FifoRecorder.h"
 #include "Core/HW/Memmap.h"
 #include "Core/System.h"
+#include "VideoCommon/AuroraMirror.h"
 #include "VideoCommon/BPMemory.h"
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/CommandProcessor.h"
@@ -259,6 +260,9 @@ public:
       {
         Core::System::GetInstance().GetFifoRecorder().WriteGPCommand(data, size);
       }
+      if (AuroraMirror::On() && static_cast<Opcode>(data[0]) != Opcode::GX_CMD_CALL_DL &&
+          !AuroraMirror::IsIndexedLoad(data[0]))
+        AuroraMirror::Feed(data, size);
     }
   }
 
