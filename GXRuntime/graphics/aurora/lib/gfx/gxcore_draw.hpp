@@ -31,8 +31,9 @@ struct DrawData {
 // v3: S15 lit vertex layout. v4: S16 fog (PixelShaderConstants grows +
 // fog fragment on the TEV path). v5: Mfin multi-texmap (a TEV combining >1 texmap
 // now emits per-texmap samplers + a wider texture bind group under an unchanged
-// key, so a persisted v4 pipeline for such a draw is stale).
-constexpr uint32_t GXCorePipelineConfigVersion = 5;
+// key, so a persisted v4 pipeline for such a draw is stale). v6: eight texgens
+// (the key's texgen array and so its layout grew).
+constexpr uint32_t GXCorePipelineConfigVersion = 6;
 
 struct PipelineConfig {
   uint32_t version = GXCorePipelineConfigVersion;

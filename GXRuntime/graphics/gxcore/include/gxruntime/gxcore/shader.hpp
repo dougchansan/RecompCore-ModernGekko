@@ -101,8 +101,13 @@ enum class FogProjection : std::uint8_t { Perspective = 0, Orthographic = 1 };
 
 // --- Shader / pipeline keys -------------------------------------------------
 
-// Slice cap: the S9 corpus histogram shows texgens <= 4 across all scenes.
-inline constexpr std::uint32_t kMaxTexGens = 4;
+// GX's eight texgens. (Once capped at 4 from an early corpus; Colosseum's
+// Pyrite Town ground uses 7, one per projected shadow plus its own texture.)
+inline constexpr std::uint32_t kMaxTexGens = 8;
+// Texcoords the vertex layout carries from the vertex data itself (TEX0-3;
+// projected texgens take position instead), and the texgens whose matrix a
+// per-vertex TEXMTXIDX can pick (one byte each, packed in a u32).
+inline constexpr std::uint32_t kMaxVertexTexCoords = 4;
 
 // Slice cap: the S9 gameplay histogram shows numtevstages <= 6.
 inline constexpr std::uint32_t kMaxTevStages = 8;
@@ -325,14 +330,14 @@ static_assert(sizeof(PixelShaderConstants) == (4 + 4 + 1 + 1 + 1 + 1 + 3) * 16);
 // indices packed one byte per texgen (@location 9), and the NBT binormal/tangent
 // emboss needs in view space (@location 10/11).
 inline constexpr std::uint32_t kVertexFloats =
-    3 + 1 + 4 + 4 + 2 * kMaxTexGens + 3 + 1 + 3 + 3;
+    3 + 1 + 4 + 4 + 2 * kMaxVertexTexCoords + 3 + 1 + 3 + 3;
 inline constexpr std::uint32_t kVertexStrideBytes = kVertexFloats * 4;
 inline constexpr std::uint32_t kVertexPosOffset = 0;
 inline constexpr std::uint32_t kVertexPosMtxOffset = 12;
 inline constexpr std::uint32_t kVertexColor0Offset = 16;
 inline constexpr std::uint32_t kVertexColor1Offset = 32;
 inline constexpr std::uint32_t kVertexUvOffset = 48; // + 8*i
-inline constexpr std::uint32_t kVertexNormalOffset = 48 + 8 * kMaxTexGens;
+inline constexpr std::uint32_t kVertexNormalOffset = 48 + 8 * kMaxVertexTexCoords;
 inline constexpr std::uint32_t kVertexTexMtxIdxOffset = kVertexNormalOffset + 12;
 inline constexpr std::uint32_t kVertexBinormalOffset = kVertexTexMtxIdxOffset + 4;
 inline constexpr std::uint32_t kVertexTangentOffset = kVertexBinormalOffset + 12;

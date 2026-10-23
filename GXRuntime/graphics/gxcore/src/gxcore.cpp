@@ -172,7 +172,7 @@ bool derive_walk(std::uint32_t vcd_lo, std::uint32_t vcd_hi,
   for (std::uint32_t t = 0; t < 8; ++t) { // TexMatIdx0-7
     if (bits(vcd_lo, 1, 1 + t) != 0u) {
       out.has_tex_mtx_idx = true;
-      if (t < kMaxTexGens)
+      if (t < kMaxVertexTexCoords)
         out.tex_mtx_idx_mask |= static_cast<std::uint8_t>(1u << t);
       add({.kind = WalkEntry::kTexMtxIdx,
            .vcd_type = 1,
@@ -842,7 +842,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
         break;
       }
       case WalkEntry::kTex: {
-        if (entry.out_slot < kMaxTexGens) {
+        if (entry.out_slot < kMaxVertexTexCoords) {
           std::uint32_t scalar = 0;
           component_scalar_size(entry.format, &scalar);
           float* dst = out_vertex + 12u + 2u * entry.out_slot;
