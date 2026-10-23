@@ -932,8 +932,19 @@ void push_draw_command(gxcore::DrawData data) {
 
 template <>
 PipelineRef pipeline_ref(const gxcore::PipelineConfig& config) {
-  return find_pipeline(ShaderType::GXCore, config,
-                       [=] { return gxcore::create_pipeline(config); });
+  // Consecutive draws mostly share a pipeline. The reference is the config's
+  // hash, so the last one can be returned for an identical config without
+  // hashing the (large) shader key or allocating the creation callback again.
+  static gxcore::PipelineConfig s_lastConfig{};
+  static PipelineRef s_lastRef = 0;
+  static bool s_lastValid = false;
+  if (s_lastValid && std::memcmp(&config, &s_lastConfig, sizeof(config)) == 0)
+    return s_lastRef;
+  s_lastRef = find_pipeline(ShaderType::GXCore, config,
+                            [=] { return gxcore::create_pipeline(config); });
+  s_lastConfig = config;
+  s_lastValid = true;
+  return s_lastRef;
 }
 #endif
 

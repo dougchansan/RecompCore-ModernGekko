@@ -903,7 +903,8 @@ bool RetailGxFrontend::emit_new_packets(AuroraRenderSink& sink,
   for (std::uint32_t i = first_event; i < events.size(); ++i) {
     const std::uint32_t sequence =
         packet_drain_enabled_ ? next_packet_sequence_++ : i;
-    RenderPacket packet = make_render_packet(sequence, events[i]);
+    RenderPacket& packet = scratch_packet_;
+    fill_render_packet(packet, sequence, events[i]);
     // Draw events are emitted exactly once, in order, so the retained payloads
     // pop FIFO in lockstep. Attach this draw's raw bytes for the issuing sink.
     if (packet.kind == RenderPacketKind::Draw &&

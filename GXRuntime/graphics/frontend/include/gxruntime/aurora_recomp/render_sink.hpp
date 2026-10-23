@@ -310,6 +310,10 @@ public:
   // accumulate. The immediately-following INDEXED_SPAN packets still patch the
   // retained draw. Tests leave this off to inspect the full draw list.
   void set_streaming(bool streaming) { streaming_ = streaming; }
+  // Off: skip the per-draw assembly statistics (assembled_*, topology and
+  // storage byte totals); the draw observer still runs. For sinks that only
+  // need the observer.
+  void set_assembly_stats(bool enabled) { assembly_stats_ = enabled; }
   // Optional observer called exactly once when a draw becomes span-complete:
   // either when the next draw arrives or when flush_assembly() is called at a
   // frame boundary. This lets a live backend export focused diagnostics without
@@ -407,6 +411,7 @@ private:
 
   const DolGuestAddressResolver* resolver_ = nullptr;
   bool streaming_ = false;
+  bool assembly_stats_ = true;
   ConsumedDrawObserver draw_observer_ = nullptr;
   void* draw_observer_user_ = nullptr;
   ConsumedArrayBinding arrays_[kArrayCount]{};
@@ -515,6 +520,12 @@ std::uint32_t build_array_sizes(const ConsumedDraw& draw, std::uint32_t* out,
 
 RenderPacket make_render_packet(std::uint32_t sequence,
                                 const DolGxRecompTraceEvent& event);
+// make_render_packet into an existing packet. The draw block (several KiB of
+// transform snapshot) is reset only for a draw event; for any other kind it
+// keeps whatever it held, which consumers do not read (they read `draw` only
+// when kind is Draw). Lets a frontend reuse one packet for every event.
+void fill_render_packet(RenderPacket& packet, std::uint32_t sequence,
+                        const DolGxRecompTraceEvent& event);
 const char* trace_event_name(DolGxRecompEventKind kind);
 
 } // namespace gxruntime::aurora_recomp

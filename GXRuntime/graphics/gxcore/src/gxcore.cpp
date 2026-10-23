@@ -472,8 +472,15 @@ void identity_rows(float rows[3][4]) {
 
 DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
                                       GapCounters& counters,
-                                      CachedVertexAttrs* cached) const {
+                                      CachedVertexAttrs* cached,
+                                      DrawPlan* reuse) const {
   DrawPlan plan;
+  if (reuse != nullptr) {
+    plan.vertices.swap(reuse->vertices);
+    plan.indices.swap(reuse->indices);
+    plan.vertices.clear();
+    plan.indices.clear();
+  }
   auto skip = [&](const char* reason) {
     plan.ok = false;
     plan.skip_reason = reason;
@@ -1200,6 +1207,9 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
 
 GxCoreSink::GxCoreSink() {
   consumer_.set_streaming(true);
+  // gxcore only needs the observer; the consumer's assembly statistics are
+  // read by nothing on this path.
+  consumer_.set_assembly_stats(false);
   consumer_.set_draw_observer(&GxCoreSink::on_consumed_draw, this);
 }
 
@@ -1208,9 +1218,9 @@ void GxCoreSink::on_consumed_draw(const ar::ConsumedDraw& draw,
   auto* self = static_cast<GxCoreSink*>(user);
   if (self->plan_observer_ == nullptr)
     return;
-  const DrawPlan plan = self->pending_state_.build_draw_plan(
-      draw, self->counters_, &self->cached_attrs_);
-  self->plan_observer_(plan, self->plan_observer_user_);
+  self->plan_ = self->pending_state_.build_draw_plan(
+      draw, self->counters_, &self->cached_attrs_, &self->plan_);
+  self->plan_observer_(self->plan_, self->plan_observer_user_);
 }
 
 bool GxCoreSink::submit_packet(const ar::RenderPacket& packet) {

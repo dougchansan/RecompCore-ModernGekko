@@ -196,16 +196,33 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
       if (arrays_[i].base_valid && arrays_[i].stride_valid)
         active_mask |= (1u << i);
     }
-    ConsumedDraw draw{
-        .sequence = packet.sequence,
-        .primitive = packet.draw.primitive,
-        .vtx_fmt = packet.draw.vtx_fmt,
-        .vertex_count = packet.draw.vertex_count,
-        .vertex_size = packet.draw.vertex_size,
-        .cull_all = cull_all_,
-        .active_array_mask = active_mask,
-        .texture = bound_texture_,
-    };
+    // The previous draw's trailing INDEXED_SPAN packets are now all in, so it is
+    // span-complete: assemble it before it is dropped or overwritten.
+    if (!draws_.empty())
+      accumulate_assembly(draws_.back());
+    // Array inputs are appended by the draw's trailing INDEXED_SPAN packets
+    // (only indexed attrs read CP arrays). In streaming mode keep only the
+    // latest draw so the vector stays bounded: rebuild it in place, keeping its
+    // payload buffer, rather than copying a new multi-KiB draw in each time.
+    std::vector<std::uint8_t> payload_buffer;
+    if (streaming_ && !draws_.empty()) {
+      payload_buffer = std::move(draws_.back().vertex_payload);
+      draws_.resize(1);
+    } else {
+      draws_.emplace_back();
+    }
+    // Every field is set below; the arrays come whole from the packet, and
+    // arrays[] is read only up to array_input_count.
+    ConsumedDraw& draw = draws_.back();
+    draw.sequence = packet.sequence;
+    draw.primitive = packet.draw.primitive;
+    draw.vtx_fmt = packet.draw.vtx_fmt;
+    draw.vertex_count = packet.draw.vertex_count;
+    draw.vertex_size = packet.draw.vertex_size;
+    draw.cull_all = cull_all_;
+    draw.active_array_mask = active_mask;
+    draw.texture = bound_texture_;
+    draw.array_input_count = 0;
     for (std::uint32_t t = 0; t < ConsumedDraw::kMaxTexmaps; ++t)
       draw.textures[t] = bound_textures_[t];
     draw.transform_flags = packet.draw.transform_flags;
@@ -241,24 +258,14 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
                 sizeof(draw.tex_matrix_word_mask));
     std::memcpy(draw.xf_regs, packet.draw.xf_regs, sizeof(draw.xf_regs));
     draw.xf_reg_mask = packet.draw.xf_reg_mask;
-    // The previous draw's trailing INDEXED_SPAN packets are now all in, so it is
-    // span-complete: assemble it before it is dropped (streaming clears draws_).
-    if (!draws_.empty())
-      accumulate_assembly(draws_.back());
-    // Array inputs are appended by the draw's trailing INDEXED_SPAN packets
-    // (only indexed attrs read CP arrays). In streaming mode keep only the
-    // latest draw so the vector stays bounded; back() is still the target of
-    // those spans.
-    if (streaming_)
-      draws_.clear();
-    draws_.push_back(draw);
     back_assembled_ = false; // the just-pushed draw is not yet assembled
     // Retain the draw's raw per-vertex bytes (valid only during this call) so an
-    // issuing sink can assemble vertices after submit. Append after push_back so
-    // the copy lands on the just-added draw.
+    // issuing sink can assemble vertices after submit.
+    draw.vertex_payload = std::move(payload_buffer);
+    draw.vertex_payload.clear();
     if (packet.draw.vertex_payload != nullptr &&
         packet.draw.vertex_payload_size != 0u) {
-      draws_.back().vertex_payload.assign(
+      draw.vertex_payload.assign(
           packet.draw.vertex_payload,
           packet.draw.vertex_payload + packet.draw.vertex_payload_size);
       payload_bytes_ += packet.draw.vertex_payload_size;
@@ -296,25 +303,28 @@ void ConsumingAuroraRenderSink::accumulate_assembly(const ConsumedDraw& draw) {
   if (back_assembled_)
     return;
   // Count-only (nullptr): the live path does not retain per-vertex elements.
-  const AssembledDrawStats stats = assemble_consumed_draw(draw, nullptr);
-  ++assembled_draws_;
-  assembled_elements_ += stats.element_reads;
-  assembled_index_bytes_ += stats.index_bytes;
-  assembled_element_bytes_ += stats.element_bytes;
-  // Compute the DRAW-INPUT extents an issued draw would submit to Aurora, using
-  // the same pure builders the cutover will call. Proves the builders run on
-  // every live ConsumedDraw and lets the backend diff totals against Aurora's
-  // native frame.verts/indices/storage sizes before exclusive cutover.
-  const std::uint32_t topo = build_topology_indices(
-      static_cast<GxPrimitive>(draw.primitive), 0,
-      static_cast<std::uint16_t>(draw.vertex_count), nullptr);
-  topology_index_bytes_ += static_cast<unsigned long long>(topo) * 2ull;
-  std::uint32_t sizes[ConsumedDraw::kMaxArrays] = {0};
-  build_array_sizes(draw, sizes, ConsumedDraw::kMaxArrays);
-  for (std::uint32_t i = 0; i < ConsumedDraw::kMaxArrays; ++i)
-    storage_bytes_ += sizes[i];
-  if (!stats.ok)
-    ++assemble_failed_draws_;
+  if (assembly_stats_) {
+    const AssembledDrawStats stats = assemble_consumed_draw(draw, nullptr);
+    ++assembled_draws_;
+    assembled_elements_ += stats.element_reads;
+    assembled_index_bytes_ += stats.index_bytes;
+    assembled_element_bytes_ += stats.element_bytes;
+    // Compute the DRAW-INPUT extents an issued draw would submit to Aurora,
+    // using the same pure builders the cutover will call. Proves the builders
+    // run on every live ConsumedDraw and lets the backend diff totals against
+    // Aurora's native frame.verts/indices/storage sizes before exclusive
+    // cutover.
+    const std::uint32_t topo = build_topology_indices(
+        static_cast<GxPrimitive>(draw.primitive), 0,
+        static_cast<std::uint16_t>(draw.vertex_count), nullptr);
+    topology_index_bytes_ += static_cast<unsigned long long>(topo) * 2ull;
+    std::uint32_t sizes[ConsumedDraw::kMaxArrays] = {0};
+    build_array_sizes(draw, sizes, ConsumedDraw::kMaxArrays);
+    for (std::uint32_t i = 0; i < ConsumedDraw::kMaxArrays; ++i)
+      storage_bytes_ += sizes[i];
+    if (!stats.ok)
+      ++assemble_failed_draws_;
+  }
   if (draw_observer_ != nullptr)
     draw_observer_(draw, total_draws_, draw_observer_user_);
   back_assembled_ = true;
@@ -521,11 +531,19 @@ std::uint32_t build_array_sizes(const ConsumedDraw& draw, std::uint32_t* out,
 
 RenderPacket make_render_packet(std::uint32_t sequence,
                                 const DolGxRecompTraceEvent& event) {
-  RenderPacket packet{
-      .kind = RenderPacketKind::TraceEvent,
-      .sequence = sequence,
-      .event = event,
-  };
+  RenderPacket packet;
+  fill_render_packet(packet, sequence, event);
+  return packet;
+}
+
+void fill_render_packet(RenderPacket& packet, std::uint32_t sequence,
+                        const DolGxRecompTraceEvent& event) {
+  packet.kind = RenderPacketKind::TraceEvent;
+  packet.sequence = sequence;
+  packet.event = event;
+  packet.stream = {};
+  packet.state = {};
+  packet.resource = {};
 
   switch (event.kind) {
   case DOL_GX_RECOMP_EVENT_FIFO_BYTES:
@@ -690,8 +708,6 @@ RenderPacket make_render_packet(std::uint32_t sequence,
   default:
     break;
   }
-
-  return packet;
 }
 
 const char* trace_event_name(DolGxRecompEventKind kind) {

@@ -70,10 +70,13 @@ public:
   // to this draw's last-vertex value when the format carries it (Dolphin
   // VertexLoaderManager normal_cache write on m_remaining==0). nullptr in unit
   // tests that don't exercise the fallback (fields stay zero, matching a fresh
-  // cache).
+  // cache). `reuse` (optional): a previous plan whose vertex and index buffers
+  // the new plan takes over, so a caller planning draw after draw stops
+  // allocating them once they have grown to its largest draw.
   DrawPlan build_draw_plan(const gxruntime::aurora_recomp::ConsumedDraw& draw,
                            GapCounters& counters,
-                           CachedVertexAttrs* cached = nullptr) const;
+                           CachedVertexAttrs* cached = nullptr,
+                           DrawPlan* reuse = nullptr) const;
 
   std::uint32_t bp(std::uint8_t reg) const { return bp_regs_[reg]; }
   bool bp_valid(std::uint8_t reg) const { return bp_valid_[reg]; }
@@ -142,6 +145,7 @@ private:
   GxCoreState live_state_;    // updated by every state packet
   GxCoreState pending_state_; // snapshot paired with the pending draw
   CachedVertexAttrs cached_attrs_{}; // cross-draw N/B/T fallback (stream order)
+  DrawPlan plan_{}; // the plan handed to the observer; its buffers are reused
   PlanObserver plan_observer_ = nullptr;
   void* plan_observer_user_ = nullptr;
   CopyObserver copy_observer_ = nullptr;

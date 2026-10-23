@@ -574,14 +574,23 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
     struct Range {
       int32_t offset, start, end;
     };
+    // At most one candidate per 1024 step in -4096..4096: a fixed buffer, as
+    // this runs for every draw.
+    struct Ranges {
+      Range items[9];
+      int count = 0;
+      const Range* begin() const { return items; }
+      const Range* end() const { return items + count; }
+      bool empty() const { return count == 0; }
+    };
     auto ranges = [](int32_t start, int32_t end, int32_t offset, int32_t dim) {
-      std::vector<Range> out;
+      Ranges out;
       for (int32_t extra = -4096; extra <= 4096; extra += 1024) {
         const int32_t off = offset + extra;
         const int32_t s = std::clamp(start - off, 0, dim);
         const int32_t e = std::clamp(end - off + 1, 0, dim);
         if (s < e)
-          out.push_back({off, s, e});
+          out.items[out.count++] = {off, s, e};
       }
       return out;
     };

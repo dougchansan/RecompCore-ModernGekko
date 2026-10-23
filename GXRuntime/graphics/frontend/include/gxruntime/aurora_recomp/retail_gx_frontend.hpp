@@ -136,6 +136,9 @@ private:
   std::vector<DrawTransformSnapshot> draw_transform_queue_;
   std::size_t draw_payload_head_ = 0;
   std::size_t draw_transform_head_ = 0;
+  // emit_new_packets refills this one packet per event (fill_render_packet)
+  // rather than building and zeroing a multi-KiB packet for each.
+  RenderPacket scratch_packet_{};
   void notify_events(std::uint32_t first_event);
 
   bool packet_drain_enabled_ = false;
