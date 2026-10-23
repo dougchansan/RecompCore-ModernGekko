@@ -23,6 +23,13 @@ inline bool On()
 {
   return g_on;
 }
+// The game is drawn by an in-process renderer (MODERNGEKKO_AURORA_NATIVE),
+// not by Dolphin's video backend.
+extern bool g_native;
+inline bool NativeRendering()
+{
+  return g_native;
+}
 
 // One whole GX command.
 void Feed(const u8* data, u32 size);

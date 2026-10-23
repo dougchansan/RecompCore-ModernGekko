@@ -26,6 +26,10 @@ bool g_on = [] {
   const char* dll = std::getenv("MODERNGEKKO_AURORA_NATIVE");
   return (exe && *exe) || (dll && *dll);
 }();
+bool g_native = [] {
+  const char* dll = std::getenv("MODERNGEKKO_AURORA_NATIVE");
+  return dll && *dll;
+}();
 
 namespace
 {

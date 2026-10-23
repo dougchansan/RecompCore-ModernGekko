@@ -144,6 +144,14 @@ public:
     {
       if (GXCensus::On())
         GXCensus::OnPrimitive(static_cast<u8>(primitive), vat, num_vertices, m_in_display_list);
+      // An in-process Aurora renderer draws from the command stream itself;
+      // under it Dolphin's vertex loading, and the flush and texture loads it
+      // leads to, would only feed the Null backend.
+      if (AuroraMirror::NativeRendering())
+      {
+        m_cycles += num_vertices * 4 * 3 + 6;
+        return;
+      }
     }
 
     const u32 bytes =
