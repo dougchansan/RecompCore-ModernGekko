@@ -44,6 +44,7 @@
 
 #include "VideoCommon/AbstractGfx.h"
 #include "VideoCommon/AsyncRequests.h"
+#include "VideoCommon/AuroraMirror.h"
 #include "VideoCommon/BPStructs.h"
 #include "VideoCommon/BoundingBox.h"
 #include "VideoCommon/CPMemory.h"
@@ -373,6 +374,10 @@ bool VideoBackendBase::InitializeShared(std::unique_ptr<AbstractGfx> gfx,
 
 void VideoBackendBase::ShutdownShared()
 {
+  // An in-process Aurora renderer stops with the backend, before process exit
+  // tears its GPU device down underneath it.
+  if (AuroraMirror::On())
+    AuroraMirror::Shutdown();
   auto& system = Core::System::GetInstance();
   system.GetCustomResourceManager().Shutdown();
 

@@ -39,6 +39,13 @@ struct Native
   bool (*init)(const u8* ram, u32 ram_size);
   void (*feed)(const u8* data, u32 size);
   void (*frame_end)(float aspect);
+  // Optional: GXDrawDone. A renderer with its own thread snapshots guest RAM
+  // here and renders the batch while the game runs on.
+  void (*sync)();
+  // Optional: stop the renderer (its thread, its window) at backend shutdown.
+  void (*shutdown)();
+  // Optional: guest memory the GPU read at this point in the stream.
+  void (*capture)(u32 address, u32 size);
 };
 constexpr size_t kNativeBatch = 8 * 1024;
 const bool s_native_requested = [] {
@@ -47,6 +54,7 @@ const bool s_native_requested = [] {
 }();
 Native s_native{};
 bool s_native_failed = false;
+bool s_draws_since_sync = false;  // GPU thread
 
 bool NativeReady()
 {
@@ -66,6 +74,9 @@ bool NativeReady()
       reinterpret_cast<decltype(Native::init)>(GetProcAddress(dll, "aurora_native_init")),
       reinterpret_cast<decltype(Native::feed)>(GetProcAddress(dll, "aurora_native_feed")),
       reinterpret_cast<decltype(Native::frame_end)>(GetProcAddress(dll, "aurora_native_frame_end")),
+      reinterpret_cast<decltype(Native::sync)>(GetProcAddress(dll, "aurora_native_sync")),
+      reinterpret_cast<decltype(Native::shutdown)>(GetProcAddress(dll, "aurora_native_shutdown")),
+      reinterpret_cast<decltype(Native::capture)>(GetProcAddress(dll, "aurora_native_capture")),
   };
   if (!native.init || !native.feed || !native.frame_end)
   {
@@ -205,6 +216,10 @@ void NativeFlush()
 
 void Feed(const u8* data, u32 size)
 {
+  // Primitive commands (0x80-0xBF) read guest memory; nothing else does
+  // except TLUT loads, which CaptureMemory covers.
+  if ((data[0] & 0xC0) == 0x80)
+    s_draws_since_sync = true;
   s_frame.insert(s_frame.end(), data, data + size);
   if (s_native_requested && s_frame.size() >= kNativeBatch)
     NativeFlush();
@@ -220,6 +235,39 @@ void FeedIndexedXF(u16 address, u8 size, const u32* big_endian_words)
   s_frame.insert(s_frame.end(), words, words + size * 4u);
   if (s_native_requested && s_frame.size() >= kNativeBatch)
     NativeFlush();
+}
+
+void DrawDone()
+{
+  if (!s_native_requested)
+    return;
+  NativeFlush();
+  // With no draw since the last sync there is nothing a snapshot of guest RAM
+  // would serve (Colosseum syncs twice a frame, once with no draws between);
+  // the batch just carries on.
+  if (!s_draws_since_sync)
+    return;
+  s_draws_since_sync = false;
+  if (NativeReady() && s_native.sync)
+    s_native.sync();
+}
+
+void CaptureMemory(u32 address, u32 size)
+{
+  if (!s_native_requested)
+    return;
+  // After the commands before it, so the renderer applies it in order.
+  NativeFlush();
+  if (NativeReady() && s_native.capture)
+    s_native.capture(address, size);
+}
+
+void Shutdown()
+{
+  if (s_native.shutdown)
+    s_native.shutdown();
+  s_native = {};
+  s_native_failed = true;  // stays stopped for the rest of the process
 }
 
 void FrameEnd()

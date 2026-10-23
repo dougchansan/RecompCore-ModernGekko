@@ -198,6 +198,9 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
       g_texture_cache->FlushStaleBinds();
       g_framebuffer_manager->InvalidatePeekCache(false);
       g_framebuffer_manager->RefreshPeekCache();
+      // Before the interrupt: the game resumes once it is raised.
+      if (AuroraMirror::On())
+        AuroraMirror::DrawDone();
       auto& system = Core::System::GetInstance();
       if (!system.GetFifo().UseDeterministicGPUThread())
         system.GetPixelEngine().SetFinish(cycles_into_future);  // may generate interrupt
@@ -449,6 +452,9 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
 
     auto& memory = system.GetMemory();
     memory.CopyFromEmu(s_tex_mem.data() + tmem_addr, addr, tmem_transfer_count);
+    // The palette as loaded now: games refill one buffer for several loads.
+    if (AuroraMirror::On())
+      AuroraMirror::CaptureMemory(addr, tmem_transfer_count);
 
     if (OpcodeDecoder::g_record_fifo_data)
       system.GetFifoRecorder().UseMemory(addr, tmem_transfer_count, MemoryUpdate::Type::TMEM);

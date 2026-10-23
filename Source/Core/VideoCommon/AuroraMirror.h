@@ -12,6 +12,10 @@
 // mirror process maps the ring and guest RAM and draws with Aurora. The game
 // never waits on it: when the ring is full the frame is dropped and the
 // mirror is told its GX state is no longer exact.
+//
+// MODERNGEKKO_AURORA_NATIVE=<aurora-native.dll> takes the same stream to
+// GXRuntime/Aurora loaded into this process instead, which then renders the
+// game (normally under the Null video backend).
 namespace AuroraMirror
 {
 extern bool g_on;
@@ -31,4 +35,13 @@ inline bool IsIndexedLoad(u8 opcode)
 }
 // The frame's XFB copy has executed.
 void FrameEnd();
+// GXDrawDone, before its finish interrupt is raised: the game will wait for
+// the GPU, so guest RAM now holds what the draws so far read.
+void DrawDone();
+// The video backend is shutting down: stop an in-process renderer.
+void Shutdown();
+// The GPU read guest memory at this point in the stream (a TLUT load): a
+// renderer working from a later copy of guest RAM needs these bytes as they
+// are now.
+void CaptureMemory(u32 address, u32 size);
 }  // namespace AuroraMirror
