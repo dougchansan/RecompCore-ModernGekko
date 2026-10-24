@@ -2,6 +2,7 @@
 #include "gxruntime/gxcore/gxcore.hpp"
 #include "gxruntime/gxcore/shader.hpp"
 
+#include <array>
 #include <cstring>
 #include <limits>
 
@@ -339,19 +340,32 @@ std::uint32_t read_be(const std::uint8_t* p, std::uint32_t size) {
   return v;
 }
 
+// 2^-frac for each 5-bit fraction field: multiplying by it is exactly the
+// division by 2^frac (both are exact for a power of two) without a divide per
+// vertex component.
+constexpr auto kFracScale = [] {
+  std::array<float, 32> scale{};
+  float s = 1.f;
+  for (float& v : scale) {
+    v = s;
+    s *= 0.5f;
+  }
+  return scale;
+}();
+
 float decode_component(const std::uint8_t* p, std::uint32_t format,
                        std::uint32_t frac) {
+  const float scale = kFracScale[frac & 31u];
   switch (format) {
   case 0u: // u8
-    return static_cast<float>(p[0]) / static_cast<float>(1u << frac);
+    return static_cast<float>(p[0]) * scale;
   case 1u: // s8
-    return static_cast<float>(static_cast<std::int8_t>(p[0])) /
-           static_cast<float>(1u << frac);
+    return static_cast<float>(static_cast<std::int8_t>(p[0])) * scale;
   case 2u: // u16
-    return static_cast<float>(read_be(p, 2)) / static_cast<float>(1u << frac);
+    return static_cast<float>(static_cast<std::uint16_t>((p[0] << 8) | p[1])) * scale;
   case 3u: { // s16
-    const auto raw = static_cast<std::int16_t>(read_be(p, 2));
-    return static_cast<float>(raw) / static_cast<float>(1u << frac);
+    const auto raw = static_cast<std::int16_t>((p[0] << 8) | p[1]);
+    return static_cast<float>(raw) * scale;
   }
   case 4u: { // f32 big-endian
     const std::uint32_t v = read_be(p, 4);
@@ -760,6 +774,11 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
       static_cast<std::size_t>(draw.vertex_count) * kVertexFloats, 0.f);
   const std::uint8_t* payload = draw.vertex_payload.data();
   const std::size_t payload_size = draw.vertex_payload.size();
+  // Each indexed entry's array, looked up once per draw, not per vertex.
+  const ar::ConsumedArrayInput* entry_arrays[std::size(WalkLayout{}.entries)] = {};
+  for (std::uint32_t e = 0; e < walk.entry_count; ++e)
+    if (walk.entries[e].vcd_type >= 2u)
+      entry_arrays[e] = find_array(draw, walk.entries[e].attr);
   for (std::uint32_t v = 0; v < draw.vertex_count; ++v) {
     float* out_vertex = plan.vertices.data() +
                         static_cast<std::size_t>(v) * kVertexFloats;
@@ -804,7 +823,7 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
         const std::uint32_t idx_size = entry.vcd_type == 2u ? 1u : 2u;
         const std::uint32_t index = read_be(p, idx_size);
         advance = idx_size;
-        const ar::ConsumedArrayInput* array = find_array(draw, entry.attr);
+        const ar::ConsumedArrayInput* array = entry_arrays[e];
         if (array == nullptr || !array->resolved ||
             array->host_data == nullptr) {
           ++counters.vertex_decode_failures;
@@ -893,8 +912,13 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
 
   // Uniforms.
   VertexShaderConstants& c = plan.constants;
-  for (std::uint32_t row = 0; row < 63u; ++row)
-    (void)load_matrix_row(draw, row, c.transformmatrices[row]);
+  // Matrix memory rows 0-29 are position_matrices and rows 30-62 tex_matrices,
+  // both stored row after row (as load_matrix_row reads them; its validity is
+  // not needed here): two block copies.
+  static_assert(sizeof(draw.position_matrices) == 30u * 4u * sizeof(float));
+  static_assert(sizeof(draw.tex_matrices) == 33u * 4u * sizeof(float));
+  std::memcpy(c.transformmatrices[0], draw.position_matrices, sizeof(draw.position_matrices));
+  std::memcpy(c.transformmatrices[30], draw.tex_matrices, sizeof(draw.tex_matrices));
   const std::uint32_t pn_row = draw.current_pn_matrix * 3u;
   for (std::uint32_t k = 0; k < 3u; ++k)
     (void)load_matrix_row(draw, pn_row + k, c.posnormalmatrix[k]);
