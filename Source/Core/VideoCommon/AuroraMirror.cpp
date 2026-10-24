@@ -11,9 +11,13 @@
 #include <vector>
 
 #include "Common/Logging/Log.h"
+#include "Common/Swap.h"
 #include "Core/HW/Memmap.h"
 #include "Core/System.h"
+#include "VideoCommon/BPMemory.h"
+#include "VideoCommon/CPMemory.h"
 #include "VideoCommon/Present.h"
+#include "VideoCommon/XFMemory.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -218,8 +222,104 @@ void NativeFlush()
 }
 }  // namespace
 
+namespace
+{
+std::atomic<bool> s_resync{false};
+
+void Put8(u8 value)
+{
+  s_frame.push_back(value);
+}
+
+void Put32(u32 value)
+{
+  const u32 be = Common::swap32(value);
+  const u8* bytes = reinterpret_cast<const u8*>(&be);
+  s_frame.insert(s_frame.end(), bytes, bytes + 4);
+}
+
+// The register state as GX commands, by FifoPlayer::LoadRegisters' rules:
+// every BP register but the ones that trigger work, the CP vertex format and
+// array registers, all XF memory and the known XF registers. GPU thread.
+void EmitState()
+{
+  const u32* bp = reinterpret_cast<const u32*>(&bpmem);
+  for (u32 reg = 0; reg < 0x100; ++reg)
+  {
+    switch (reg)
+    {
+    case BPMEM_SETDRAWDONE:
+    case BPMEM_PE_TOKEN_ID:
+    case BPMEM_PE_TOKEN_INT_ID:
+    case BPMEM_TRIGGER_EFB_COPY:
+    case BPMEM_LOADTLUT1:
+    case BPMEM_PRELOAD_MODE:
+    case BPMEM_PERF1:
+      continue;
+    }
+    Put8(0x61);
+    Put32((reg << 24) | (bp[reg] & 0x00FFFFFF));
+  }
+
+  u32 cp[256] = {};
+  g_main_cp_state.FillCPMemoryArray(cp);
+  const auto cp_reg = [&](u8 reg) {
+    Put8(0x08);
+    Put8(reg);
+    Put32(cp[reg]);
+  };
+  cp_reg(MATINDEX_A);
+  cp_reg(MATINDEX_B);
+  cp_reg(VCD_LO);
+  cp_reg(VCD_HI);
+  for (u8 i = 0; i < CP_NUM_VAT_REG; ++i)
+  {
+    cp_reg(CP_VAT_REG_A + i);
+    cp_reg(CP_VAT_REG_B + i);
+    cp_reg(CP_VAT_REG_C + i);
+  }
+  for (u8 i = 0; i < CP_NUM_ARRAYS; ++i)
+  {
+    cp_reg(ARRAY_BASE + i);
+    cp_reg(ARRAY_STRIDE + i);
+  }
+
+  constexpr u32 kXFMemWords = 0x1000;
+  const u32* xf = reinterpret_cast<const u32*>(&xfmem);
+  for (u32 address = 0; address < kXFMemWords; address += 16)
+  {
+    Put8(0x10);
+    Put32(0x000F0000 | address);  // 16 words
+    for (u32 i = 0; i < 16; ++i)
+      Put32(xf[address + i]);
+  }
+  const u32 reg_words = static_cast<u32>(sizeof(XFMemory) / 4) - kXFMemWords;
+  for (u32 i = 0; i < reg_words && i < 0x1000; ++i)
+  {
+    const u32 address = 0x1000 + i;
+    if (address == XFMEM_UNKNOWN_1007 ||
+        (address >= XFMEM_UNKNOWN_GROUP_1_START && address <= XFMEM_UNKNOWN_GROUP_1_END) ||
+        (address >= XFMEM_UNKNOWN_GROUP_2_START && address <= XFMEM_UNKNOWN_GROUP_2_END) ||
+        (address >= XFMEM_UNKNOWN_GROUP_3_START && address <= XFMEM_UNKNOWN_GROUP_3_END))
+    {
+      continue;
+    }
+    Put8(0x10);
+    Put32(address);  // one word
+    Put32(xf[kXFMemWords + i]);
+  }
+}
+}  // namespace
+
+void ResyncState()
+{
+  s_resync = true;
+}
+
 void Feed(const u8* data, u32 size)
 {
+  if (s_resync.exchange(false))
+    EmitState();
   // Primitive commands (0x80-0xBF) read guest memory; nothing else does
   // except TLUT loads, which CaptureMemory covers.
   if ((data[0] & 0xC0) == 0x80)

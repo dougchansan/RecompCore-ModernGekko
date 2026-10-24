@@ -5,6 +5,7 @@
 
 #include "Common/ChunkFile.h"
 #include "Core/System.h"
+#include "VideoCommon/AuroraMirror.h"
 #include "VideoCommon/BPMemory.h"
 #include "VideoCommon/BPStructs.h"
 #include "VideoCommon/BoundingBox.h"
@@ -113,5 +114,9 @@ void VideoCommon_DoState(PointerWrap& p)
     // Inform backend of new state from registers.
     BPReload();
     VertexLoaderManager::MarkAllDirty();
+    // A renderer fed from the command stream never saw the registers this
+    // state restored; it gets them replayed before the next command.
+    if (AuroraMirror::On())
+      AuroraMirror::ResyncState();
   }
 }

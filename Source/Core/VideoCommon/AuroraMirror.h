@@ -47,6 +47,10 @@ void FrameEnd();
 void DrawDone();
 // The video backend is shutting down: stop an in-process renderer.
 void Shutdown();
+// A savestate restored the GPU registers: replay BP, CP and XF state into the
+// stream (as Dolphin's FIFO player loads a recording's registers) before the
+// next command, so a renderer fed from the stream starts from the same state.
+void ResyncState();
 // The GPU read guest memory at this point in the stream (a TLUT load): a
 // renderer working from a later copy of guest RAM needs these bytes as they
 // are now.
