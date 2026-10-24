@@ -187,6 +187,14 @@ absl::flat_hash_map<uint32_t, AddrEntry> g_textureAddrKey;
 absl::flat_hash_map<TextureKey, uint64_t> g_textureHashMemo;
 uint32_t g_textureHashMemoFrame = UINT32_MAX;
 TextureCacheStats g_textureCacheStats;
+// GPU vertex fetch: arrays already in this frame's storage buffer, by host
+// pointer -> byte offset and the span uploaded.
+struct FetchUpload {
+  uint32_t offset = 0;
+  uint32_t size = 0;
+};
+absl::flat_hash_map<uintptr_t, FetchUpload> g_fetchArrays;
+uint32_t g_fetchArraysFrame = UINT32_MAX;
 
 // EFB copy-to-texture destinations (63/S16): dest guest address -> resolved EFB
 // texture. A draw binding a texture at one of these addresses samples the copied
@@ -396,8 +404,9 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
           wgpu::VertexState{
               .module = module,
               .entryPoint = "vs_main",
-              .bufferCount = 1,
-              .buffers = &vertexLayout,
+              // GPU vertex fetch reads its vertices from storage instead.
+              .bufferCount = config.key.shader.fetch.enabled != 0 ? 0u : 1u,
+              .buffers = config.key.shader.fetch.enabled != 0 ? nullptr : &vertexLayout,
           },
       .primitive =
           wgpu::PrimitiveState{
@@ -434,8 +443,9 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
   } else if (data.textureBindGroup != 0) {
     pass.SetBindGroup(2, find_bind_group(data.textureBindGroup));
   }
-  pass.SetVertexBuffer(0, g_vertexBuffer, data.vertRange.offset,
-                       data.vertRange.size);
+  if (!data.fetch)
+    pass.SetVertexBuffer(0, g_vertexBuffer, data.vertRange.offset,
+                         data.vertRange.size);
   pass.SetIndexBuffer(g_indexBuffer, wgpu::IndexFormat::Uint16,
                       data.idxRange.offset, data.idxRange.size);
   pass.DrawIndexed(data.indexCount);
@@ -844,9 +854,38 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
     }
   }
 
-  const auto vertRange = push_verts(
-      reinterpret_cast<const uint8_t*>(plan.vertices.data()),
-      plan.vertices.size() * sizeof(float), 4);
+  const bool fetch = plan.pipeline.shader.fetch.enabled != 0;
+  Range vertRange{};
+  if (fetch) {
+    // GPU vertex fetch: the raw GX vertex bytes into the vertex buffer and each
+    // indexed array into the storage buffer, where the shader reads them by
+    // byte offset (group 0, the static bind group). An array several draws of
+    // a frame share goes up once. The offsets go into the plan's uniform; the
+    // plan is the sink's own scratch, filled for this submission.
+    auto& constants = const_cast<gxc::VertexShaderConstants&>(plan.constants);
+    vertRange = push_verts(plan.fetch_payload, plan.fetch_payload_size, 4);
+    constants.fetch_base[0] = vertRange.offset;
+    const uint32_t frame = current_frame();
+    if (frame != g_fetchArraysFrame) {
+      g_fetchArrays.clear();
+      g_fetchArraysFrame = frame;
+    }
+    for (uint32_t attr = 0; attr < 16u; ++attr) {
+      const auto& array = plan.fetch_arrays[attr];
+      if (array.data == nullptr)
+        continue;
+      // Keyed by the host pointer (one per guest array per RAM snapshot): each
+      // draw asks for the span its own indices reach, so an upload is reused
+      // while it covers the request and replaced by a longer one when not.
+      auto& upload = g_fetchArrays[reinterpret_cast<uintptr_t>(array.data)];
+      if (upload.size < array.size)
+        upload = {push_storage(static_cast<const uint8_t*>(array.data), array.size).offset, array.size};
+      constants.fetch_arrays[attr][0] = upload.offset;
+    }
+  } else {
+    vertRange = push_verts(reinterpret_cast<const uint8_t*>(plan.vertices.data()),
+                           plan.vertices.size() * sizeof(float), 4);
+  }
   const auto idxRange = push_indices(
       reinterpret_cast<const uint8_t*>(plan.indices.data()),
       plan.indices.size() * sizeof(uint16_t), 4);
@@ -874,6 +913,7 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
       .indexCount = static_cast<uint32_t>(plan.indices.size()),
       .textureBindGroup = textureBindGroup,
       .tev = tev,
+      .fetch = fetch,
   });
   return true;
 }

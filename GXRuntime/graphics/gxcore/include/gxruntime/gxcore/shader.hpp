@@ -179,6 +179,33 @@ struct LightChanKey {
 };
 static_assert(std::has_unique_object_representations_v<LightChanKey>);
 
+// GPU vertex fetch: the vertex shader reads the draw's raw GX vertex bytes and
+// indexed arrays itself (Aurora's storage buffers) instead of a CPU-decoded
+// vertex buffer. One entry per payload element, in payload order, as the CPU
+// decoder walks them (gxcore.cpp derive_walk); the shader is generated from
+// this layout, so a vertex format is part of the pipeline key on this path.
+inline constexpr std::uint32_t kMaxFetchEntries = 24;
+struct FetchEntryKey {
+  std::uint8_t kind = 0;     // gxcore.cpp WalkEntry::Kind
+  std::uint8_t attr = 0;     // CP array (0 pos, 1 nrm, 2-3 colors, 4-11 tex)
+  std::uint8_t vcd_type = 0; // 1 direct, 2 index8, 3 index16
+  std::uint8_t format = 0;   // ComponentFormat / ColorFormat
+  std::uint8_t count = 0;    // components (pos 2/3, tex 1/2, normal 3/9)
+  std::uint8_t frac = 0;     // fixed-point shift
+  std::uint8_t out_slot = 0; // color 0/1, tex 0-7, tex-matrix index 0-7
+  std::uint8_t nbt_part = 0; // 3-part normal: 0 normal, 1 binormal, 2 tangent
+  std::uint16_t offset = 0;  // byte offset of the element in the vertex
+  std::uint16_t pad = 0;
+};
+static_assert(std::has_unique_object_representations_v<FetchEntryKey>);
+struct FetchKey {
+  std::uint8_t enabled = 0;
+  std::uint8_t entry_count = 0;
+  std::uint16_t vertex_size = 0; // payload bytes per vertex
+  FetchEntryKey entries[kMaxFetchEntries]{};
+};
+static_assert(std::has_unique_object_representations_v<FetchKey>);
+
 struct ShaderKey {
   std::uint8_t num_tex_gens = 0;    // XF numTexGens (0x103F), capped kMaxTexGens
   std::uint8_t has_pos_mtx_idx = 0; // per-vertex PNMTXIDX attr present
@@ -236,6 +263,7 @@ struct ShaderKey {
   LightChanKey litchan[4]{}; // color0, color1, alpha0, alpha1
   TexGenKey tex_gens[kMaxTexGens]{};
   TevStageKey tev_stages[kMaxTevStages]{};
+  FetchKey fetch{}; // enabled: GPU vertex fetch (no decoded vertex buffer)
 };
 static_assert(std::has_unique_object_representations_v<ShaderKey>);
 static_assert(sizeof(ShaderKey) % 4 == 0);
@@ -293,9 +321,15 @@ struct VertexShaderConstants {
   float cached_normal[4]{0.f, 0.f, 0.f, 0.f};
   float cached_tangent[4]{0.f, 0.f, 0.f, 0.f};
   float cached_binormal[4]{0.f, 0.f, 0.f, 0.f};
+  // GPU vertex fetch (ShaderKey::fetch): fetch_base = {byte offset of the raw
+  // payload in the vertex buffer, default position-matrix row, 0, 0};
+  // fetch_arrays[attr] = {byte offset of the uploaded array in the storage
+  // buffer, stride, 0, 0} per CP array.
+  std::uint32_t fetch_base[4]{};
+  std::uint32_t fetch_arrays[16][4]{};
 };
 static_assert(sizeof(VertexShaderConstants) ==
-              (6 + 4 + 24 + 64 + 24) * 16 + 8 * (5 * 16) + 4 * 16 + 3 * 16);
+              (6 + 4 + 24 + 64 + 24) * 16 + 8 * (5 * 16) + 4 * 16 + 3 * 16 + 16 + 16 * 16);
 
 // Pixel-shader uniforms (Dolphin PixelShaderConstants subset): the four TEV
 // color registers (I_COLORS: [0] prev seed, [1..3] c0/c1/c2), the four konst
@@ -405,9 +439,21 @@ struct DrawPlan {
   PipelineKey pipeline{};
   VertexShaderConstants constants{};
   PixelShaderConstants pixel_constants{}; // S14 TEV color/konst/alpha uniforms
-  std::vector<float> vertices; // kVertexFloats per vertex
+  std::vector<float> vertices; // kVertexFloats per vertex (empty under fetch)
   std::vector<std::uint16_t> indices;
   std::uint32_t vertex_count = 0;
+  // GPU vertex fetch (pipeline.shader.fetch.enabled): the raw vertex bytes and
+  // the indexed arrays, valid during the plan observer call, for the
+  // submission layer to upload; it also fills the offsets in
+  // constants.fetch_base/fetch_arrays.
+  struct FetchArray {
+    const void* data = nullptr;
+    std::uint32_t size = 0;
+    std::uint32_t address = 0; // guest address (identifies it for reuse)
+  };
+  const std::uint8_t* fetch_payload = nullptr;
+  std::uint32_t fetch_payload_size = 0;
+  FetchArray fetch_arrays[16]{};
   // Viewport, raw XF values (wd/2, -ht/2, zmax*2^24, xorig+342, yorig+342,
   // farz*2^24) — the submission layer maps these through the substrate's
   // logical-viewport scaling.

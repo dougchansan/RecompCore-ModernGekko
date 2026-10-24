@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "gxruntime/gxcore/shader.hpp"
 
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <string>
 
 namespace gxruntime::gxcore {
 
@@ -519,6 +521,172 @@ bool channel_lit_path(const ShaderKey& k, unsigned j) {
          static_cast<MatSource>(alp.matsource) == MatSource::Register;
 }
 
+// --- GPU vertex fetch ---------------------------------------------------------
+// The vertex shader decodes the raw GX vertex stream (big-endian bytes in the
+// shared vertex buffer) and the indexed arrays (in the shared storage buffer)
+// as gxcore.cpp's CPU decoder does, from the walk in FetchKey.
+
+void emit_fetch_buffers(std::string& out) {
+  emit(out,
+       "@group(0) @binding(0) var<storage, read> fetch_verts: array<u32>;\n"
+       "@group(0) @binding(1) var<storage, read> fetch_store: array<u32>;\n"
+       "fn vb8(b: u32) -> u32 { return (fetch_verts[b >> 2u] >> ((b & 3u) * 8u)) & 0xFFu; }\n"
+       "fn vb16(b: u32) -> u32 { return (vb8(b) << 8u) | vb8(b + 1u); }\n"
+       "fn vb24(b: u32) -> u32 { return (vb16(b) << 8u) | vb8(b + 2u); }\n"
+       "fn vb32(b: u32) -> u32 { return (vb16(b) << 16u) | vb16(b + 2u); }\n"
+       "fn sb8(b: u32) -> u32 { return (fetch_store[b >> 2u] >> ((b & 3u) * 8u)) & 0xFFu; }\n"
+       "fn sb16(b: u32) -> u32 { return (sb8(b) << 8u) | sb8(b + 1u); }\n"
+       "fn sb24(b: u32) -> u32 { return (sb16(b) << 8u) | sb8(b + 2u); }\n"
+       "fn sb32(b: u32) -> u32 { return (sb16(b) << 16u) | sb16(b + 2u); }\n"
+       "fn fetch_e4(x: u32) -> u32 { return x * 17u; }\n"
+       "fn fetch_e5(x: u32) -> u32 { return (x << 3u) | (x >> 2u); }\n"
+       "fn fetch_e6(x: u32) -> u32 { return (x << 2u) | (x >> 4u); }\n");
+}
+
+// One fixed-point or float component at byte address `addr` (a WGSL u32
+// expression), read with the vb* (vertex) or sb* (array) helpers.
+std::string fetch_component(const char* reader, const std::string& addr, std::uint32_t format,
+                            std::uint32_t frac) {
+  const std::string r = reader;
+  std::string value;
+  switch (format) {
+  case 0u:
+    value = "f32(" + r + "8(" + addr + "))";
+    break;
+  case 1u:
+    value = "f32((i32(" + r + "8(" + addr + ")) << 24u) >> 24u)";
+    break;
+  case 2u:
+    value = "f32(" + r + "16(" + addr + "))";
+    break;
+  case 3u:
+    value = "f32((i32(" + r + "16(" + addr + ")) << 16u) >> 16u)";
+    break;
+  case 4u:
+    return "bitcast<f32>(" + r + "32(" + addr + "))";
+  default:
+    return "0.0";
+  }
+  if (frac == 0u)
+    return value;
+  // 2^-frac: a power of two prints and parses back exactly.
+  char scale[64];
+  std::snprintf(scale, sizeof scale, "%.9e", std::ldexp(1.0, -static_cast<int>(frac)));
+  return value + " * " + scale;
+}
+
+std::uint32_t fetch_scalar_size(std::uint32_t format) {
+  return format <= 1u ? 1u : format <= 3u ? 2u : 4u;
+}
+
+// GX color at `a` as a vec4f in 0..1 (gxcore.cpp decode_color).
+std::string fetch_color(const char* reader, const std::string& a, std::uint32_t format) {
+  const std::string r = reader;
+  auto byte = [&](int n) { return r + "8(" + a + " + " + std::to_string(n) + "u)"; };
+  std::string rgba;
+  switch (format) {
+  case 0u: { // RGB565
+    const std::string c = r + "16(" + a + ")";
+    rgba = "fetch_e5((" + c + " >> 11u) & 31u), fetch_e6((" + c + " >> 5u) & 63u), fetch_e5(" + c +
+           " & 31u), 255u";
+    break;
+  }
+  case 1u: // RGB888
+  case 2u: // RGB888x
+    rgba = byte(0) + ", " + byte(1) + ", " + byte(2) + ", 255u";
+    break;
+  case 3u: { // RGBA4444
+    const std::string c = r + "16(" + a + ")";
+    rgba = "fetch_e4((" + c + " >> 12u) & 15u), fetch_e4((" + c + " >> 8u) & 15u), fetch_e4((" + c +
+           " >> 4u) & 15u), fetch_e4(" + c + " & 15u)";
+    break;
+  }
+  case 4u: { // RGBA6666
+    const std::string c = r + "24(" + a + ")";
+    rgba = "fetch_e6((" + c + " >> 18u) & 63u), fetch_e6((" + c + " >> 12u) & 63u), fetch_e6((" + c +
+           " >> 6u) & 63u), fetch_e6(" + c + " & 63u)";
+    break;
+  }
+  case 5u: // RGBA8888
+    rgba = byte(0) + ", " + byte(1) + ", " + byte(2) + ", " + byte(3);
+    break;
+  default:
+    return "vec4f(1.0)";
+  }
+  return "vec4f(vec4u(" + rgba + ")) / 255.0";
+}
+
+void emit_fetch_vertex(std::string& out, const FetchKey& fetch, bool in_normal, bool in_texmtxidx,
+                       bool in_binormal, bool in_tangent) {
+  emit(out, "fn fetch_vertex(vid: u32) -> VertexIn {\n"
+            "    var v: VertexIn;\n"
+            "    v.rawcolor0 = vec4f(1.0);\n"
+            "    v.rawcolor1 = vec4f(1.0);\n"
+            "    v.posmtx = vsc.fetch_base.y;\n");
+  emitf(out, "    let base = vsc.fetch_base.x + vid * %uu;\n", fetch.vertex_size);
+  for (std::uint32_t e = 0; e < fetch.entry_count && e < kMaxFetchEntries; ++e) {
+    const FetchEntryKey& f = fetch.entries[e];
+    const std::string a = "a" + std::to_string(e);
+    const char* reader = "vb";
+    // Kinds 0/1 are the matrix-index bytes, always in the vertex.
+    if (f.vcd_type >= 2u && f.kind != 0u && f.kind != 1u) {
+      emitf(out, "    let i%u = vb%u(base + %uu);\n", e, f.vcd_type == 2u ? 8u : 16u, f.offset);
+      emitf(out, "    let %s = vsc.fetch_arrays[%u].x + i%u * vsc.fetch_arrays[%u].y;\n", a.c_str(), f.attr,
+            e, f.attr);
+      reader = "sb";
+    } else {
+      emitf(out, "    let %s = base + %uu;\n", a.c_str(), f.offset);
+    }
+    const std::uint32_t scalar = fetch_scalar_size(f.format);
+    auto comp = [&](std::uint32_t n) {
+      return fetch_component(reader, a + " + " + std::to_string(n * scalar) + "u", f.format, f.frac);
+    };
+    auto vec3 = [&](std::uint32_t first) {
+      return "vec3f(" + comp(first) + ", " + comp(first + 1) + ", " + comp(first + 2) + ")";
+    };
+    switch (f.kind) {
+    case 0u: // position-matrix index: the matrix-memory row
+      emitf(out, "    v.posmtx = vb8(%s);\n", a.c_str());
+      break;
+    case 1u: // tex-matrix index, packed one byte per texgen 0-3
+      if (in_texmtxidx && f.out_slot < 4u)
+        emitf(out, "    v.texmtxidx = v.texmtxidx | (vb8(%s) << %uu);\n", a.c_str(), 8u * f.out_slot);
+      break;
+    case 2u: // position
+      out += "    v.rawpos = vec3f(" + comp(0) + ", " + comp(1) + ", " +
+             (f.count >= 3u ? comp(2) : std::string("0.0")) + ");\n";
+      break;
+    case 3u: // normal, or normal/binormal/tangent
+      if (f.count >= 9u) {
+        if (in_normal)
+          out += "    v.rawnormal = " + vec3(0) + ";\n";
+        if (in_binormal)
+          out += "    v.rawbinormal = " + vec3(3) + ";\n";
+        if (in_tangent)
+          out += "    v.rawtangent = " + vec3(6) + ";\n";
+      } else if (f.nbt_part == 0u && in_normal) {
+        out += "    v.rawnormal = " + vec3(0) + ";\n";
+      } else if (f.nbt_part == 1u && in_binormal) {
+        out += "    v.rawbinormal = " + vec3(0) + ";\n";
+      } else if (f.nbt_part == 2u && in_tangent) {
+        out += "    v.rawtangent = " + vec3(0) + ";\n";
+      }
+      break;
+    case 4u: // color 0/1
+      out += "    v.rawcolor" + std::to_string(f.out_slot & 1u) + " = " + fetch_color(reader, a, f.format) + ";\n";
+      break;
+    case 5u: // texcoord 0-3 (the vertex layout carries four)
+      if (f.out_slot < kMaxVertexTexCoords)
+        out += "    v.rawtex" + std::to_string(f.out_slot) + " = vec2f(" + comp(0) + ", " +
+               (f.count >= 2u ? comp(1) : std::string("0.0")) + ");\n";
+      break;
+    default:
+      break;
+    }
+  }
+  emit(out, "    return v;\n}\n");
+}
+
 std::string generate_wgsl(const ShaderKey& key) {
 
   std::string out;
@@ -576,9 +744,13 @@ std::string generate_wgsl(const ShaderKey& key) {
   // attribute keep byte-identical goldens.
   const bool uses_cached =
       uses_cached_normal || uses_cached_tangent || uses_cached_binormal;
+  // GPU vertex fetch: the shader reads the raw vertex bytes itself, and its
+  // per-draw offsets sit at the end of the uniform, so the whole uniform view
+  // is declared ahead of them.
+  const bool fetch = key.fetch.enabled != 0;
 
   emit(out, "// gxcore generated shader (Dolphin VertexShaderGen shape)\n");
-  if (needs_uniform_full)
+  if (needs_uniform_full || fetch)
     emit(out, "struct Light {\n"
               "    color: vec4i,\n"
               "    cosatt: vec4f,\n"
@@ -596,15 +768,20 @@ std::string generate_wgsl(const ShaderKey& key) {
   // + materials); the plain path declares only the leading fields (a smaller
   // WGSL struct over the same buffer is valid), keeping every existing golden
   // byte-identical.
-  if (needs_uniform_full)
+  if (needs_uniform_full || fetch)
     emit(out, "    lights: array<Light, 8>,\n"
               "    materials: array<vec4i, 4>,\n");
-  if (uses_cached)
+  if (uses_cached || fetch)
     emit(out, "    cached_normal: vec4f,\n"
               "    cached_tangent: vec4f,\n"
               "    cached_binormal: vec4f,\n");
+  if (fetch)
+    emit(out, "    fetch_base: vec4u,\n"
+              "    fetch_arrays: array<vec4u, 16>,\n");
   emit(out, "};\n"
             "@group(1) @binding(0) var<uniform> vsc: VertexShaderConstants;\n");
+  if (fetch)
+    emit_fetch_buffers(out);
   if (tev) {
     // PixelShaderConstants (Dolphin I_COLORS/I_KCOLORS/I_ALPHA). Integer TEV.
     // group(2) here (texture shifts to group(3)) so an untextured TEV draw
@@ -643,24 +820,33 @@ std::string generate_wgsl(const ShaderKey& key) {
   }
 
   // Fixed vertex input layout (kVertexStrideBytes); unused inputs are ignored.
-  emit(out, "struct VertexIn {\n"
-            "    @location(0) rawpos: vec3f,\n"
-            "    @location(1) posmtx: u32,\n"
-            "    @location(2) rawcolor0: vec4f,\n"
-            "    @location(3) rawcolor1: vec4f,\n"
-            "    @location(4) rawtex0: vec2f,\n"
-            "    @location(5) rawtex1: vec2f,\n"
-            "    @location(6) rawtex2: vec2f,\n"
-            "    @location(7) rawtex3: vec2f,\n");
-  if ((lit || emit_nbt) && has_normal)
-    emit(out, "    @location(8) rawnormal: vec3f,\n");
-  if (key.has_tex_mtx_idx != 0)
-    emit(out, "    @location(9) texmtxidx: u32,\n");
-  if (emit_nbt && has_binormal)
-    emit(out, "    @location(10) rawbinormal: vec3f,\n");
-  if (emit_nbt && has_tangent)
-    emit(out, "    @location(11) rawtangent: vec3f,\n");
+  // Under GPU vertex fetch the same struct is filled by fetch_vertex instead
+  // (no vertex buffer, so no locations).
+  const bool in_normal = (lit || emit_nbt) && has_normal;
+  const bool in_texmtxidx = key.has_tex_mtx_idx != 0;
+  const bool in_binormal = emit_nbt && has_binormal;
+  const bool in_tangent = emit_nbt && has_tangent;
+  auto loc = [&](unsigned n) -> std::string {
+    return fetch ? std::string() : "@location(" + std::to_string(n) + ") ";
+  };
+  out += "struct VertexIn {\n";
+  out += "    " + loc(0) + "rawpos: vec3f,\n";
+  out += "    " + loc(1) + "posmtx: u32,\n";
+  out += "    " + loc(2) + "rawcolor0: vec4f,\n";
+  out += "    " + loc(3) + "rawcolor1: vec4f,\n";
+  for (unsigned t = 0; t < 4; ++t)
+    out += "    " + loc(4 + t) + "rawtex" + std::to_string(t) + ": vec2f,\n";
+  if (in_normal)
+    out += "    " + loc(8) + "rawnormal: vec3f,\n";
+  if (in_texmtxidx)
+    out += "    " + loc(9) + "texmtxidx: u32,\n";
+  if (in_binormal)
+    out += "    " + loc(10) + "rawbinormal: vec3f,\n";
+  if (in_tangent)
+    out += "    " + loc(11) + "rawtangent: vec3f,\n";
   emit(out, "};\n");
+  if (fetch)
+    emit_fetch_vertex(out, key.fetch, in_normal, in_texmtxidx, in_binormal, in_tangent);
 
   // @invariant: GX multi-pass draws (base, light, shadow passes over the same
   // geometry) depth-test against each other with EQUAL/LEQUAL, so every
@@ -681,8 +867,13 @@ std::string generate_wgsl(const ShaderKey& key) {
   if (chan1_lit)
     emit_lighting_chan(out, key, 1u);
 
-  emit(out, "@vertex\nfn vs_main(in: VertexIn) -> VertexOut {\n"
-            "    var o: VertexOut;\n");
+  if (fetch)
+    emit(out, "@vertex\nfn vs_main(@builtin(vertex_index) vid: u32) -> VertexOut {\n"
+              "    let in = fetch_vertex(vid);\n"
+              "    var o: VertexOut;\n");
+  else
+    emit(out, "@vertex\nfn vs_main(in: VertexIn) -> VertexOut {\n"
+              "    var o: VertexOut;\n");
   if (key.has_pos_mtx_idx != 0) {
     emit(out, "    let posidx = i32(in.posmtx);\n"
               "    let p0 = vsc.transformmatrices[posidx];\n"

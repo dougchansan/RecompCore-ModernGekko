@@ -22,6 +22,7 @@ struct DrawData {
   uint32_t indexCount;
   BindGroupRef textureBindGroup; // 0 when untextured
   bool tev = false; // TEV path: PS uniform at group 2, texture at group 3
+  bool fetch = false; // GPU vertex fetch: no vertex buffer (vertices from storage)
 };
 
 // Bump when generate_wgsl output or the DrawData/vertex layout changes: the
@@ -32,8 +33,9 @@ struct DrawData {
 // fog fragment on the TEV path). v5: Mfin multi-texmap (a TEV combining >1 texmap
 // now emits per-texmap samplers + a wider texture bind group under an unchanged
 // key, so a persisted v4 pipeline for such a draw is stale). v6: eight texgens
-// (the key's texgen array and so its layout grew).
-constexpr uint32_t GXCorePipelineConfigVersion = 6;
+// (the key's texgen array and so its layout grew). v7: GPU vertex fetch
+// (ShaderKey::fetch, VertexShaderConstants grew).
+constexpr uint32_t GXCorePipelineConfigVersion = 7;
 
 struct PipelineConfig {
   uint32_t version = GXCorePipelineConfigVersion;

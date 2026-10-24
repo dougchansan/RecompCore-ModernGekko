@@ -3,6 +3,7 @@
 #include "gxruntime/gxcore/shader.hpp"
 
 #include <array>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -26,6 +27,14 @@ float fog_param_float(std::uint32_t raw) {
   std::memcpy(&f, &integral, sizeof f);
   return f;
 }
+
+// GXCORE_GPU_FETCH=1: plan draws for GPU vertex fetch (ShaderKey::fetch): the
+// vertex shader decodes the raw GX vertex bytes and arrays, and the CPU decode
+// runs at most for one vertex (the cross-draw normal cache).
+const bool g_gpu_fetch = [] {
+  const char* v = std::getenv("GXCORE_GPU_FETCH");
+  return v != nullptr && v[0] == '1';
+}();
 
 } // namespace
 
@@ -576,6 +585,34 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
   key.has_vertex_normal = walk.has_normal ? 1u : 0u;
   key.has_vertex_binormal = walk.has_nbt ? 1u : 0u;
   key.has_vertex_tangent = walk.has_nbt ? 1u : 0u;
+  // GPU vertex fetch: the walk itself goes into the key; the shader generated
+  // from it reads each element at its byte offset in the vertex.
+  const bool fetch = g_gpu_fetch && walk.entry_count <= kMaxFetchEntries;
+  if (fetch) {
+    key.fetch.enabled = 1u;
+    key.fetch.entry_count = static_cast<std::uint8_t>(walk.entry_count);
+    key.fetch.vertex_size = static_cast<std::uint16_t>(walk.vertex_size);
+    std::uint32_t offset = 0;
+    std::uint8_t normal_part = 0;
+    for (std::uint32_t e = 0; e < walk.entry_count; ++e) {
+      const WalkEntry& entry = walk.entries[e];
+      FetchEntryKey& f = key.fetch.entries[e];
+      f.kind = entry.kind;
+      f.attr = entry.attr;
+      f.vcd_type = entry.vcd_type;
+      f.format = entry.format;
+      f.count = entry.count;
+      f.frac = entry.frac;
+      f.out_slot = entry.out_slot;
+      f.offset = static_cast<std::uint16_t>(offset);
+      if (entry.kind == WalkEntry::kNormal && entry.count == 3u)
+        f.nbt_part = normal_part++; // index3 NBT: three entries in turn
+      if (entry.kind == WalkEntry::kPosMtxIdx || entry.kind == WalkEntry::kTexMtxIdx)
+        offset += 1u;
+      else
+        offset += entry.vcd_type == 1u ? entry.element_size : entry.vcd_type == 2u ? 1u : 2u;
+    }
+  }
 
   // Lighting key (S15). LitChannel bitfields (XFMemory.h): matsource@0,
   // enablelighting@1, lightMask0_3@2, ambsource@6, diffusefunc@7, attnfunc@9,
@@ -770,8 +807,6 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
 
   // Vertex decode to the fixed layout.
   plan.vertex_count = draw.vertex_count;
-  plan.vertices.assign(
-      static_cast<std::size_t>(draw.vertex_count) * kVertexFloats, 0.f);
   const std::uint8_t* payload = draw.vertex_payload.data();
   const std::size_t payload_size = draw.vertex_payload.size();
   // Each indexed entry's array, looked up once per draw, not per vertex.
@@ -779,9 +814,42 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
   for (std::uint32_t e = 0; e < walk.entry_count; ++e)
     if (walk.entries[e].vcd_type >= 2u)
       entry_arrays[e] = find_array(draw, walk.entries[e].attr);
-  for (std::uint32_t v = 0; v < draw.vertex_count; ++v) {
+  // GPU vertex fetch: hand over the raw bytes and arrays instead. The CPU
+  // decodes only the last vertex, and only for the cross-draw normal cache.
+  std::uint32_t first_decoded = 0;
+  if (fetch) {
+    if (payload_size < static_cast<std::size_t>(draw.vertex_count) * walk.vertex_size) {
+      ++counters.vertex_decode_failures;
+      return skip("payload overrun");
+    }
+    for (std::uint32_t e = 0; e < walk.entry_count; ++e) {
+      const WalkEntry& entry = walk.entries[e];
+      if (entry.vcd_type < 2u || entry.kind == WalkEntry::kPosMtxIdx ||
+          entry.kind == WalkEntry::kTexMtxIdx)
+        continue;
+      const ar::ConsumedArrayInput* array = entry_arrays[e];
+      if (array == nullptr || !array->resolved || array->host_data == nullptr) {
+        ++counters.vertex_decode_failures;
+        return skip("indexed attr has no resolved array");
+      }
+      plan.fetch_arrays[entry.attr] = {
+          .data = array->host_data,
+          .size = static_cast<std::uint32_t>(
+              std::min<std::uint64_t>(array->span_size, array->host_available)),
+          .address = array->base,
+      };
+      plan.constants.fetch_arrays[entry.attr][1] = array->stride;
+    }
+    plan.fetch_payload = payload;
+    plan.fetch_payload_size = static_cast<std::uint32_t>(payload_size);
+    plan.constants.fetch_base[1] = draw.current_pn_matrix * 3u;
+    first_decoded = cached != nullptr && walk.has_normal ? draw.vertex_count - 1u : draw.vertex_count;
+  }
+  plan.vertices.assign(
+      static_cast<std::size_t>(draw.vertex_count - first_decoded) * kVertexFloats, 0.f);
+  for (std::uint32_t v = first_decoded; v < draw.vertex_count; ++v) {
     float* out_vertex = plan.vertices.data() +
-                        static_cast<std::size_t>(v) * kVertexFloats;
+                        static_cast<std::size_t>(v - first_decoded) * kVertexFloats;
     // Defaults: color0/1 white, uv 0, posmtx = current matrix's first row.
     out_vertex[4] = out_vertex[5] = out_vertex[6] = out_vertex[7] = 1.f;
     out_vertex[8] = out_vertex[9] = out_vertex[10] = out_vertex[11] = 1.f;
@@ -1206,10 +1274,8 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
       c.cached_tangent[k] = cached->tangent[k];
       c.cached_binormal[k] = cached->binormal[k];
     }
-    if (plan.vertex_count > 0u) {
-      const float* last =
-          plan.vertices.data() +
-          static_cast<std::size_t>(plan.vertex_count - 1u) * kVertexFloats;
+    if (plan.vertex_count > 0u && !plan.vertices.empty()) {
+      const float* last = plan.vertices.data() + plan.vertices.size() - kVertexFloats;
       if (walk.has_normal)
         for (std::uint32_t k = 0; k < 3u; ++k)
           cached->normal[k] = last[kVertexNormalOffset / 4u + k];

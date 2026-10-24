@@ -178,7 +178,9 @@ inline constexpr uint64_t UniformBufferSize = 25165824;  // 24mb
 // the live SDK path used. Per-frame staging; costs ~staging_count * delta RAM.
 inline constexpr uint64_t VertexBufferSize = 12582912;   // 12mb
 inline constexpr uint64_t IndexBufferSize = 8388608;     // 8mb
-inline constexpr uint64_t StorageBufferSize = 8388608;   // 8mb
+// Storage raised from 8mb: gxcore's GPU vertex fetch puts each frame's indexed
+// vertex arrays here.
+inline constexpr uint64_t StorageBufferSize = 33554432;  // 32mb
 inline constexpr uint64_t TextureUploadSize = 25165824;  // 24mb
 
 extern AuroraStats g_stats;
