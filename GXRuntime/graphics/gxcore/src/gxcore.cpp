@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <new>
 
 namespace gxruntime::gxcore {
 
@@ -501,6 +502,24 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
   if (reuse != nullptr) {
     plan.vertices.swap(reuse->vertices);
     plan.indices.swap(reuse->indices);
+  }
+  build_draw_plan_into(draw, counters, cached, plan);
+  return plan;
+}
+
+void GxCoreState::build_draw_plan_into(const ar::ConsumedDraw& draw,
+                                       GapCounters& counters,
+                                       CachedVertexAttrs* cached,
+                                       DrawPlan& plan) const {
+  // Reset in place, keeping the vertex/index buffers' capacity: one pass over
+  // the (KB-sized) plan instead of building a fresh one and copying it over.
+  {
+    std::vector<float> vertices = std::move(plan.vertices);
+    std::vector<std::uint16_t> indices = std::move(plan.indices);
+    plan.~DrawPlan();
+    new (&plan) DrawPlan();
+    plan.vertices = std::move(vertices);
+    plan.indices = std::move(indices);
     plan.vertices.clear();
     plan.indices.clear();
   }
@@ -508,7 +527,6 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
     plan.ok = false;
     plan.skip_reason = reason;
     ++counters.draws_skipped;
-    return plan;
   };
 
   if (draw.cull_all) {
@@ -1290,7 +1308,6 @@ DrawPlan GxCoreState::build_draw_plan(const ar::ConsumedDraw& draw,
 
   plan.ok = true;
   ++counters.draws_planned;
-  return plan;
 }
 
 // --- Sink ---------------------------------------------------------------------
@@ -1308,8 +1325,8 @@ void GxCoreSink::on_consumed_draw(const ar::ConsumedDraw& draw,
   auto* self = static_cast<GxCoreSink*>(user);
   if (self->plan_observer_ == nullptr)
     return;
-  self->plan_ = self->pending_state_.build_draw_plan(
-      draw, self->counters_, &self->cached_attrs_, &self->plan_);
+  self->pending_state_.build_draw_plan_into(draw, self->counters_,
+                                           &self->cached_attrs_, self->plan_);
   self->plan_observer_(self->plan_, self->plan_observer_user_);
 }
 

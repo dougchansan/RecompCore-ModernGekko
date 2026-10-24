@@ -77,6 +77,12 @@ public:
                            GapCounters& counters,
                            CachedVertexAttrs* cached = nullptr,
                            DrawPlan* reuse = nullptr) const;
+  // build_draw_plan into an existing plan (reset first; its vertex and index
+  // buffers keep their capacity): the per-draw path, which skips building and
+  // copying a fresh KB-sized plan.
+  void build_draw_plan_into(const gxruntime::aurora_recomp::ConsumedDraw& draw,
+                            GapCounters& counters, CachedVertexAttrs* cached,
+                            DrawPlan& plan) const;
 
   std::uint32_t bp(std::uint8_t reg) const { return bp_regs_[reg]; }
   bool bp_valid(std::uint8_t reg) const { return bp_valid_[reg]; }
