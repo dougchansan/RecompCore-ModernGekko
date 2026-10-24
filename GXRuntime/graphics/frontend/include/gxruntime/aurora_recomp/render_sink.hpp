@@ -2,6 +2,8 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
+#include <span>
 #include <vector>
 
 extern "C" {
@@ -156,12 +158,123 @@ struct RenderPacket {
   RenderDrawPacket draw{};
 };
 
+// A draw handed straight to the sink at its stream position (the frontend's
+// direct mode): every state/resource packet before it has been submitted, and
+// the frontend's live state is the draw-time state, so nothing is snapshotted,
+// queued or packed. Its arrays are the frontend's own resolution of the draw's
+// indexed spans. Valid only during submit_direct_draw.
+struct DirectDraw {
+  struct Array {
+    std::uint32_t attr = 0;
+    std::uint32_t base = 0;
+    std::uint32_t stride = 0;
+    std::uint32_t span = 0;
+    const void* data = nullptr;
+    std::uint32_t available = 0;
+    std::uint32_t vertex_offset = 0;
+    std::uint32_t index_size = 0;
+    std::uint32_t element_size = 0;
+  };
+  std::uint32_t primitive = 0;
+  std::uint32_t vtx_fmt = 0;
+  std::uint32_t vertex_count = 0;
+  std::uint32_t vertex_size = 0;
+  std::span<const std::uint8_t> payload;
+  const DolGxRecompState* state = nullptr;
+  const DolGxRecompVertexLayout* layout = nullptr;
+  std::uint32_t array_count = 0;
+  Array arrays[DOL_GX_RECOMP_CP_ARRAY_COUNT]{};
+};
+
 class AuroraRenderSink {
 public:
   virtual ~AuroraRenderSink() = default;
 
   virtual bool submit_packet(const RenderPacket& packet) = 0;
+  // Direct mode (RetailGxFrontend::set_direct_draws): a sink that returns true
+  // here takes draws through submit_direct_draw instead of Draw/IndexedArraySpan
+  // packets.
+  virtual bool accepts_direct_draws() const { return false; }
+  virtual bool submit_direct_draw(const DirectDraw&) { return false; }
 };
+
+// Which position matrices a draw's PNMTXIDX payload bytes select.
+inline std::uint32_t payload_pn_matrix_mask(
+    const DolGxRecompState& state, const DolGxRecompVertexLayout& layout,
+    std::span<const std::uint8_t> vertex_data, std::uint32_t vertex_count) {
+  if ((state.vcd_lo & 1u) == 0u || layout.vertex_size == 0u)
+    return 0;
+  std::uint32_t mask = 0;
+  for (std::uint32_t v = 0; v < vertex_count; ++v) {
+    const std::size_t offset = static_cast<std::size_t>(v) * layout.vertex_size;
+    if (offset >= vertex_data.size())
+      break;
+    const std::uint32_t pn = vertex_data[offset] / 3u;
+    if (pn < DOL_GX_RECOMP_POSITION_MATRIX_COUNT)
+      mask |= (1u << pn);
+  }
+  return mask;
+}
+
+// Copy the draw-time transform state (matrices, lighting, XF window) into any
+// draw record carrying the shared field set (the frontend's queued snapshot,
+// RenderDrawPacket, ConsumedDraw). Overwrites every field, so `out` may be a
+// reused record: invalid position matrices are zeroed.
+template <typename Out>
+void fill_draw_transform(Out& out, const DolGxRecompState& state,
+                         const DolGxRecompVertexLayout& layout,
+                         std::span<const std::uint8_t> vertex_data,
+                         std::uint32_t vertex_count) {
+  out.transform_flags = 0;
+  if (state.viewport_valid) {
+    out.transform_flags |= kDrawTransformViewportValid;
+    std::memcpy(out.viewport, state.viewport, sizeof(out.viewport));
+  } else {
+    std::memset(out.viewport, 0, sizeof(out.viewport));
+  }
+  if (state.projection_valid) {
+    out.transform_flags |= kDrawTransformProjectionValid;
+    std::memcpy(out.projection, state.projection, sizeof(out.projection));
+    out.projection_type = state.projection_type;
+  } else {
+    std::memset(out.projection, 0, sizeof(out.projection));
+    out.projection_type = 0;
+  }
+  out.current_pn_matrix = state.current_pn_matrix;
+  out.payload_pn_matrix_mask =
+      payload_pn_matrix_mask(state, layout, vertex_data, vertex_count);
+  if (out.payload_pn_matrix_mask != 0u)
+    out.transform_flags |= kDrawTransformPayloadPnMatrixValid;
+  out.position_matrix_valid_mask = 0;
+  for (std::uint32_t i = 0; i < DOL_GX_RECOMP_POSITION_MATRIX_COUNT; ++i) {
+    if (!state.position_matrix_valid[i]) {
+      std::memset(out.position_matrices[i], 0, sizeof(out.position_matrices[i]));
+      continue;
+    }
+    out.position_matrix_valid_mask |= (1u << i);
+    std::memcpy(out.position_matrices[i], state.position_matrices[i],
+                sizeof(out.position_matrices[i]));
+  }
+  std::memcpy(out.normal_matrices, state.normal_matrices,
+              sizeof(out.normal_matrices));
+  std::memcpy(out.normal_matrix_word_mask, state.normal_matrix_word_mask,
+              sizeof(out.normal_matrix_word_mask));
+  std::memcpy(out.light_words, state.light_words, sizeof(out.light_words));
+  std::memcpy(out.light_word_mask, state.light_word_mask,
+              sizeof(out.light_word_mask));
+  std::memcpy(out.chan_regs, state.chan_regs, sizeof(out.chan_regs));
+  out.chan_reg_mask = state.chan_reg_mask;
+  std::memcpy(out.tex_matrices, state.tex_matrices, sizeof(out.tex_matrices));
+  out.dual_tex = state.dual_tex;
+  out.dual_tex_valid = state.dual_tex_valid;
+  std::memcpy(out.post_matrices, state.post_matrices, sizeof(out.post_matrices));
+  std::memcpy(out.post_matrix_word_mask, state.post_matrix_word_mask,
+              sizeof(out.post_matrix_word_mask));
+  std::memcpy(out.tex_matrix_word_mask, state.tex_matrix_word_mask,
+              sizeof(out.tex_matrix_word_mask));
+  std::memcpy(out.xf_regs, state.xf_regs, sizeof(out.xf_regs));
+  out.xf_reg_mask = state.xf_reg_mask;
+}
 
 class RecordingAuroraRenderSink final : public AuroraRenderSink {
 public:
@@ -389,6 +502,12 @@ public:
     return topology_index_bytes_;
   }
   unsigned long long storage_bytes() const { return storage_bytes_; }
+
+  // The ConsumedDraw a Draw packet plus its trailing IndexedArraySpan packets
+  // would have built, from a direct-mode draw and this sink's current bindings
+  // (textures, arrays, cull state): into `draw` in place, reusing its payload
+  // buffer. Counts nothing.
+  void build_direct_draw(const DirectDraw& direct, ConsumedDraw& draw) const;
 
   const ConsumedArrayBinding& array(std::uint32_t index) const;
   const ConsumedTexture& bound_texture() const { return bound_texture_; }

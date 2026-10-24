@@ -969,12 +969,19 @@ void aurora_backend_gx_write_bytes(const u8* data, u32 size) {
         // and trace (DOL_GX_RECOMP_MAX_TRACE_EVENTS, about two per command) at
         // each flush, so feed it in pieces that fit both. A command split
         // across pieces waits in the frontend's buffer for the rest.
+        // Direct mode keeps neither, so it takes the whole run in place.
         constexpr u32 kPiece = 8u * 1024u;
         bool ok = true;
-        for (u32 at = 0; ok && at < size && !gx_aurora::g_shadow_frontend_failed; at += kPiece) {
-            ok = gx_aurora::g_shadow_frontend.write_fifo(
-                     std::span<const std::uint8_t>(data + at, std::min(kPiece, size - at))) &&
-                 gx_aurora::g_shadow_frontend.flush(&gx_aurora::g_core_sink);
+        if (gx_aurora::g_gx_core_direct) {
+            ok = gx_aurora::g_shadow_frontend_failed ||
+                 gx_aurora::g_shadow_frontend.feed(std::span<const std::uint8_t>(data, size),
+                                                   &gx_aurora::g_core_sink);
+        } else {
+            for (u32 at = 0; ok && at < size && !gx_aurora::g_shadow_frontend_failed; at += kPiece) {
+                ok = gx_aurora::g_shadow_frontend.write_fifo(
+                         std::span<const std::uint8_t>(data + at, std::min(kPiece, size - at))) &&
+                     gx_aurora::g_shadow_frontend.flush(&gx_aurora::g_core_sink);
+            }
         }
         if (gx_aurora::g_shadow_frontend_failed)
             return;

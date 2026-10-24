@@ -76,8 +76,19 @@ public:
     event_observer_user_ = user;
   }
 
+  // Direct mode: when the sink passed to flush/feed accepts direct draws (and
+  // packet drain is on, with no event observer), each draw goes to it through
+  // submit_direct_draw at its stream position, after the state packets before
+  // it, instead of being queued with a transform snapshot and replayed as
+  // Draw/IndexedArraySpan packets at the end of the flush. The FIFO byte
+  // record (and its per-command Stream packets) is skipped.
+  void set_direct_draws(bool enabled) { direct_draws_ = enabled; }
+
   bool write_fifo(std::span<const std::uint8_t> bytes);
   bool flush(AuroraRenderSink* sink = nullptr);
+  // write_fifo + flush. In direct mode with nothing buffered it parses `bytes`
+  // in place and buffers only a trailing incomplete command.
+  bool feed(std::span<const std::uint8_t> bytes, AuroraRenderSink* sink);
   // Parse a display list from caller-provided bytes through the SAME internal
   // path as the in-stream 0x40 CALL_DL opcode, minus the guest resolution
   // (the bytes are already host-visible). Entry point for trace replay
@@ -124,6 +135,14 @@ private:
                    std::size_t command_offset);
   bool emit_new_packets(AuroraRenderSink& sink, std::uint32_t first_event);
   void drain_emitted_packets(std::uint32_t emitted_count);
+  bool direct_mode(const AuroraRenderSink* sink) const;
+  // Direct mode: submit and drain every trace event recorded so far.
+  bool emit_direct();
+  bool parse_direct(std::span<const std::uint8_t> bytes, AuroraRenderSink* sink,
+                    std::size_t* consumed);
+
+  bool direct_draws_ = false;
+  AuroraRenderSink* direct_sink_ = nullptr; // set while a direct parse runs
 
   DolGxRecompState state_{};
   std::vector<std::uint8_t> fifo_buffer_;

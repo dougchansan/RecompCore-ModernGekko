@@ -1396,6 +1396,16 @@ bool GxCoreSink::submit_packet(const ar::RenderPacket& packet) {
   return ok;
 }
 
+bool GxCoreSink::submit_direct_draw(const ar::DirectDraw& draw) {
+  if (plan_observer_ == nullptr)
+    return true;
+  consumer_.build_direct_draw(draw, direct_draw_);
+  live_state_.build_draw_plan_into(direct_draw_, counters_, &cached_attrs_,
+                                   plan_);
+  plan_observer_(plan_, plan_observer_user_);
+  return true;
+}
+
 void GxCoreSink::flush_frame() { consumer_.flush_assembly(); }
 
 } // namespace gxruntime::gxcore

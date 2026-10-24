@@ -228,70 +228,12 @@ std::uint32_t copy_trigger_texture_format(std::uint32_t value, bool is_depth) {
   }
 }
 
-std::uint32_t payload_pn_matrix_mask(const DolGxRecompState& state,
-                                     const DolGxRecompVertexLayout& layout,
-                                     std::span<const std::uint8_t> vertex_data,
-                                     std::uint16_t vertex_count) {
-  if ((state.vcd_lo & 1u) == 0u || layout.vertex_size == 0u)
-    return 0;
-  std::uint32_t mask = 0;
-  for (std::uint16_t v = 0; v < vertex_count; ++v) {
-    const std::size_t offset =
-        static_cast<std::size_t>(v) * layout.vertex_size;
-    if (offset >= vertex_data.size())
-      break;
-    const std::uint32_t pn = vertex_data[offset] / 3u;
-    if (pn < DOL_GX_RECOMP_POSITION_MATRIX_COUNT)
-      mask |= (1u << pn);
-  }
-  return mask;
-}
-
 DrawTransformSnapshot snapshot_transform(const DolGxRecompState& state,
                                          const DolGxRecompVertexLayout& layout,
                                          std::span<const std::uint8_t> vertex_data,
                                          std::uint16_t vertex_count) {
   DrawTransformSnapshot out{};
-  if (state.viewport_valid) {
-    out.transform_flags |= kDrawTransformViewportValid;
-    std::memcpy(out.viewport, state.viewport, sizeof(out.viewport));
-  }
-  if (state.projection_valid) {
-    out.transform_flags |= kDrawTransformProjectionValid;
-    std::memcpy(out.projection, state.projection, sizeof(out.projection));
-    out.projection_type = state.projection_type;
-  }
-  out.current_pn_matrix = state.current_pn_matrix;
-  out.payload_pn_matrix_mask =
-      payload_pn_matrix_mask(state, layout, vertex_data, vertex_count);
-  if (out.payload_pn_matrix_mask != 0u)
-    out.transform_flags |= kDrawTransformPayloadPnMatrixValid;
-  for (std::uint32_t i = 0; i < DOL_GX_RECOMP_POSITION_MATRIX_COUNT; ++i) {
-    if (!state.position_matrix_valid[i])
-      continue;
-    out.position_matrix_valid_mask |= (1u << i);
-    std::memcpy(out.position_matrices[i], state.position_matrices[i],
-                sizeof(out.position_matrices[i]));
-  }
-  std::memcpy(out.normal_matrices, state.normal_matrices,
-              sizeof(out.normal_matrices));
-  std::memcpy(out.normal_matrix_word_mask, state.normal_matrix_word_mask,
-              sizeof(out.normal_matrix_word_mask));
-  std::memcpy(out.light_words, state.light_words, sizeof(out.light_words));
-  std::memcpy(out.light_word_mask, state.light_word_mask,
-              sizeof(out.light_word_mask));
-  std::memcpy(out.chan_regs, state.chan_regs, sizeof(out.chan_regs));
-  out.chan_reg_mask = state.chan_reg_mask;
-  std::memcpy(out.tex_matrices, state.tex_matrices, sizeof(out.tex_matrices));
-  out.dual_tex = state.dual_tex;
-  out.dual_tex_valid = state.dual_tex_valid;
-  std::memcpy(out.post_matrices, state.post_matrices, sizeof(out.post_matrices));
-  std::memcpy(out.post_matrix_word_mask, state.post_matrix_word_mask,
-              sizeof(out.post_matrix_word_mask));
-  std::memcpy(out.tex_matrix_word_mask, state.tex_matrix_word_mask,
-              sizeof(out.tex_matrix_word_mask));
-  std::memcpy(out.xf_regs, state.xf_regs, sizeof(out.xf_regs));
-  out.xf_reg_mask = state.xf_reg_mask;
+  fill_draw_transform(out, state, layout, vertex_data, vertex_count);
   return out;
 }
 
@@ -373,8 +315,55 @@ bool RetailGxFrontend::write_fifo(std::span<const std::uint8_t> bytes) {
   return true;
 }
 
+bool RetailGxFrontend::direct_mode(const AuroraRenderSink* sink) const {
+  return direct_draws_ && sink != nullptr && sink->accepts_direct_draws() &&
+         packet_drain_enabled_ && event_observer_ == nullptr;
+}
+
+bool RetailGxFrontend::emit_direct() {
+  if (state_.trace_count == 0u)
+    return true;
+  if (!emit_new_packets(*direct_sink_, emitted_trace_count_))
+    return false;
+  drain_emitted_packets(state_.trace_count);
+  return true;
+}
+
+bool RetailGxFrontend::parse_direct(std::span<const std::uint8_t> bytes,
+                                    AuroraRenderSink* sink,
+                                    std::size_t* consumed) {
+  direct_sink_ = sink;
+  const bool ok = parse_stream(bytes, true, true, 0u, consumed) && emit_direct();
+  direct_sink_ = nullptr;
+  return ok;
+}
+
+bool RetailGxFrontend::feed(std::span<const std::uint8_t> bytes,
+                            AuroraRenderSink* sink) {
+  if (!fifo_buffer_.empty() || !direct_mode(sink))
+    return write_fifo(bytes) && flush(sink);
+  last_error_ = nullptr;
+  std::size_t consumed = 0;
+  if (!parse_direct(bytes, sink, &consumed))
+    return false;
+  if (consumed < bytes.size())
+    fifo_buffer_.assign(bytes.begin() + static_cast<std::ptrdiff_t>(consumed),
+                        bytes.end());
+  return true;
+}
+
 bool RetailGxFrontend::flush(AuroraRenderSink* sink) {
   last_error_ = nullptr;
+  if (direct_mode(sink)) {
+    std::size_t consumed = 0;
+    if (!parse_direct(fifo_buffer_, sink, &consumed))
+      return false;
+    if (consumed != 0u)
+      fifo_buffer_.erase(fifo_buffer_.begin(),
+                         fifo_buffer_.begin() +
+                             static_cast<std::ptrdiff_t>(consumed));
+    return true;
+  }
   std::uint32_t first_event = 0;
   if (packet_drain_enabled_) {
     first_event = emitted_trace_count_;
@@ -405,6 +394,17 @@ bool RetailGxFrontend::flush(AuroraRenderSink* sink) {
 bool RetailGxFrontend::write_display_list(std::span<const std::uint8_t> bytes,
                                           AuroraRenderSink* sink) {
   last_error_ = nullptr;
+  if (direct_mode(sink)) {
+    // As below, minus the FIFO record (direct mode keeps none).
+    if (bytes.empty())
+      return true;
+    direct_sink_ = sink;
+    std::size_t dl_consumed = 0;
+    const bool ok = parse_stream(bytes, false, false, 1u, &dl_consumed) &&
+                    dl_consumed == bytes.size() && emit_direct();
+    direct_sink_ = nullptr;
+    return ok;
+  }
   std::uint32_t first_event = 0;
   if (packet_drain_enabled_) {
     first_event = emitted_trace_count_;
@@ -500,9 +500,17 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
                                     std::size_t* consumed) {
   if (consumed == nullptr || depth > 4u)
     return false;
+  // Direct mode keeps no FIFO record (nothing reads it there).
+  const bool direct = direct_sink_ != nullptr;
+  record_fifo_bytes = record_fifo_bytes && !direct;
 
   std::size_t pos = 0;
   while (pos < bytes.size()) {
+    // Direct mode submits events as it goes; keep the trace ring (which drops
+    // events when full) well short of full across a draw-free run.
+    if (direct && state_.trace_count >= DOL_GX_RECOMP_MAX_TRACE_EVENTS / 2u &&
+        !emit_direct())
+      return false;
     const std::uint8_t cmd = bytes[pos];
     if (cmd == 0x00u) {
       if (record_fifo_bytes &&
@@ -608,7 +616,7 @@ bool RetailGxFrontend::parse_stream(std::span<const std::uint8_t> bytes,
       DolGuestResolvedRange range;
       if (!dol_gx_recomp_resolve_display_list(&state_, address, size, &range))
         return false;
-      if (!dol_gx_recomp_push_fifo(&state_, range.data, range.size))
+      if (!direct && !dol_gx_recomp_push_fifo(&state_, range.data, range.size))
         return false;
 
       std::size_t dl_consumed = 0;
@@ -831,6 +839,7 @@ bool RetailGxFrontend::handle_draw(std::uint8_t command,
   // whole (hardware would fetch garbage; the stream itself is still sound),
   // so one bad draw does not stop the frontend.
   std::uint32_t spans[DOL_GX_RECOMP_CP_ARRAY_COUNT] = {};
+  DolGxRecompResolvedArray resolved[DOL_GX_RECOMP_CP_ARRAY_COUNT];
   for (std::uint32_t i = 0u; i < layout->indexed_attr_count; ++i) {
     const DolGxRecompIndexedAttr* spec = &layout->indexed_attrs[i];
     const std::uint8_t attr = spec->attr;
@@ -839,7 +848,7 @@ bool RetailGxFrontend::handle_draw(std::uint8_t command,
                         command_offset);
     const std::uint32_t stride =
         state_.arrays[attr].stride_valid ? state_.arrays[attr].stride : 0u;
-    DolGxRecompResolvedArray array;
+    DolGxRecompResolvedArray& array = resolved[i];
     if (!dol_gx_recomp_indexed_span(vertex_data.data(), layout->vertex_size, vertex_count,
                                     spec->vertex_offset, spec->index_size, stride,
                                     spec->element_size, spec->element_bias, &spans[i]) ||
@@ -854,12 +863,48 @@ bool RetailGxFrontend::handle_draw(std::uint8_t command,
     }
   }
 
+  // GX_DRAW_QUADS_2 (0x88) draws exactly like quads (0x80); the consumers only
+  // know 0x80 and dropped 0x88 draws (stadium floors).
+  const std::uint32_t primitive =
+      (command & 0xF8u) == 0x88u ? 0x80u : (command & 0xF8u);
+
+  if (direct_sink_ != nullptr) {
+    // Everything before this draw reaches the sink first, then the draw itself
+    // against the live state.
+    if (!emit_direct())
+      return false;
+    DirectDraw draw{
+        .primitive = primitive,
+        .vtx_fmt = vtx_fmt,
+        .vertex_count = vertex_count,
+        .vertex_size = layout->vertex_size,
+        .payload = vertex_data,
+        .state = &state_,
+        .layout = layout,
+    };
+    for (std::uint32_t i = 0u; i < layout->indexed_attr_count; ++i) {
+      const DolGxRecompIndexedAttr* spec = &layout->indexed_attrs[i];
+      draw.arrays[draw.array_count++] = {
+          .attr = spec->attr,
+          .base = state_.arrays[spec->attr].physical_base,
+          .stride = resolved[i].stride,
+          .span = spans[i],
+          .data = resolved[i].range.data,
+          .available = resolved[i].range.available,
+          .vertex_offset = spec->vertex_offset,
+          .index_size = spec->index_size,
+          .element_size = spec->element_size,
+      };
+    }
+    if (!direct_sink_->submit_direct_draw(draw))
+      return fail_parse("direct draw rejected", command, command_offset);
+    return true;
+  }
+
   if (state_.trace_count < DOL_GX_RECOMP_MAX_TRACE_EVENTS) {
     state_.trace[state_.trace_count++] = {
         .kind = DOL_GX_RECOMP_EVENT_DRAW,
-        // GX_DRAW_QUADS_2 (0x88) draws exactly like quads (0x80); the
-        // consumers only know 0x80 and dropped 0x88 draws (stadium floors).
-        .a = (command & 0xF8u) == 0x88u ? 0x80u : (command & 0xF8u),
+        .a = primitive,
         .b = vtx_fmt,
         .c = vertex_count,
         .d = layout->vertex_size,

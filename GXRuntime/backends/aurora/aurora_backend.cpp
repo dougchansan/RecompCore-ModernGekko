@@ -16,6 +16,7 @@ bool g_should_quit = false;
 bool g_graphics_log = false;
 bool g_force_untextured = false;
 bool g_gx_core_enabled = true;
+bool g_gx_core_direct = false;
 bool g_draw_opcode_pending = false;
 bool g_audio_queue_log = false;
 bool g_frame_pacing_log = false;
@@ -317,6 +318,16 @@ bool dol_aurora_initialize(int argc, char** argv,
     gx_aurora::g_shadow_frontend_failed = false;
     gx_aurora::g_shadow_frontend.reset(nullptr);
     gx_aurora::g_shadow_frontend.set_packet_drain_enabled(gx_aurora::g_shadow_frontend_enabled);
+    {
+        // Direct draws (frontend straight into gxcore, no Draw packets) unless
+        // DOL_GX_CORE_DIRECT=0 or a diagnostic that reads the packet stream is on.
+        const char* direct_env = std::getenv("DOL_GX_CORE_DIRECT");
+        gx_aurora::g_gx_core_direct =
+            gx_aurora::g_gx_core_enabled && !gx_aurora::g_trace_armed &&
+            !gx_aurora::g_shadow_transform_log_enabled &&
+            !(direct_env != nullptr && direct_env[0] == '0');
+        gx_aurora::g_shadow_frontend.set_direct_draws(gx_aurora::g_gx_core_direct);
+    }
     gx_aurora::g_shadow_packet_sink.reset();
     gx_aurora::g_shadow_packet_sink.set_streaming(true);
     gx_aurora::g_shadow_packet_sink.set_draw_observer(

@@ -132,6 +132,11 @@ public:
 
   bool submit_packet(
       const gxruntime::aurora_recomp::RenderPacket& packet) override;
+  // Direct mode: a draw planned at its stream position against the live state
+  // (no pending-draw snapshot, no packet-built ConsumedDraw).
+  bool accepts_direct_draws() const override { return true; }
+  bool submit_direct_draw(
+      const gxruntime::aurora_recomp::DirectDraw& draw) override;
   // Frame boundary: plan the final pending draw of the frame.
   void flush_frame();
 
@@ -152,6 +157,7 @@ private:
   GxCoreState pending_state_; // snapshot paired with the pending draw
   CachedVertexAttrs cached_attrs_{}; // cross-draw N/B/T fallback (stream order)
   DrawPlan plan_{}; // the plan handed to the observer; its buffers are reused
+  gxruntime::aurora_recomp::ConsumedDraw direct_draw_{}; // reused per direct draw
   PlanObserver plan_observer_ = nullptr;
   void* plan_observer_user_ = nullptr;
   CopyObserver copy_observer_ = nullptr;

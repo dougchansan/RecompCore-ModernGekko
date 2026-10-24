@@ -280,6 +280,52 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
   }
 }
 
+void ConsumingAuroraRenderSink::build_direct_draw(const DirectDraw& direct,
+                                                  ConsumedDraw& draw) const {
+  std::uint32_t active_mask = 0;
+  for (std::uint32_t i = 0; i < kArrayCount; ++i) {
+    if (arrays_[i].base_valid && arrays_[i].stride_valid)
+      active_mask |= (1u << i);
+  }
+  draw.sequence = 0;
+  draw.primitive = direct.primitive;
+  draw.vtx_fmt = direct.vtx_fmt;
+  draw.vertex_count = direct.vertex_count;
+  draw.vertex_size = direct.vertex_size;
+  draw.cull_all = cull_all_;
+  draw.active_array_mask = active_mask;
+  draw.texture = bound_texture_;
+  for (std::uint32_t t = 0; t < ConsumedDraw::kMaxTexmaps; ++t)
+    draw.textures[t] = bound_textures_[t];
+  // As the IndexedArraySpan packets would: one input per indexed attr, its
+  // base/stride from this sink's bindings, its bytes from the frontend's
+  // resolution of the same span.
+  draw.array_input_count = 0;
+  for (std::uint32_t i = 0;
+       i < direct.array_count && draw.array_input_count < ConsumedDraw::kMaxArrays;
+       ++i) {
+    const DirectDraw::Array& in = direct.arrays[i];
+    if (in.attr >= kArrayCount)
+      continue;
+    const ConsumedArrayBinding& binding = arrays_[in.attr];
+    ConsumedArrayInput& input = draw.arrays[draw.array_input_count++];
+    input.attr = in.attr;
+    input.base = binding.base;
+    input.stride = binding.stride;
+    input.span_size = in.span;
+    input.indexed = true;
+    input.vertex_offset = in.vertex_offset;
+    input.index_size = in.index_size;
+    input.element_size = in.element_size;
+    input.resolved = resolver_ != nullptr && in.data != nullptr;
+    input.host_data = input.resolved ? in.data : nullptr;
+    input.host_available = input.resolved ? in.available : 0u;
+  }
+  fill_draw_transform(draw, *direct.state, *direct.layout, direct.payload,
+                      direct.vertex_count);
+  draw.vertex_payload.assign(direct.payload.begin(), direct.payload.end());
+}
+
 bool ConsumingAuroraRenderSink::resolve_array_input(
     ConsumedArrayInput& input) {
   input.resolved = false;

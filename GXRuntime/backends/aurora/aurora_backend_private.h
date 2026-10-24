@@ -35,6 +35,8 @@ extern bool g_should_quit;
 extern bool g_graphics_log;
 extern bool g_force_untextured;
 extern bool g_gx_core_enabled;
+// Frontend draws go straight into gxcore (DOL_GX_CORE_DIRECT, default on).
+extern bool g_gx_core_direct;
 extern bool g_draw_opcode_pending;
 extern bool g_audio_queue_log;
 extern bool g_frame_pacing_log;
