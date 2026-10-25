@@ -21,6 +21,8 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <dlfcn.h>
 #endif
 
 namespace AuroraMirror
@@ -69,8 +71,8 @@ bool NativeReady()
   if (s_native.feed || s_native_failed)
     return s_native.feed != nullptr;
   s_native_failed = true;  // until everything below succeeds
-#ifdef _WIN32
   const char* path = std::getenv("MODERNGEKKO_AURORA_NATIVE");
+#ifdef _WIN32
   // Its own dependencies (Dawn, SDL, the shader compiler) sit beside it.
   HMODULE dll = LoadLibraryExA(path, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
   if (!dll)
@@ -78,13 +80,24 @@ bool NativeReady()
     ERROR_LOG_FMT(VIDEO, "Aurora native: could not load {} (error {})", path, GetLastError());
     return false;
   }
+  const auto symbol = [dll](const char* name) { return GetProcAddress(dll, name); };
+#else
+  // RTLD_LOCAL keeps its Dawn, SDL and absl apart from the runner's.
+  void* dll = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+  if (!dll)
+  {
+    ERROR_LOG_FMT(VIDEO, "Aurora native: could not load {} ({})", path, dlerror());
+    return false;
+  }
+  const auto symbol = [dll](const char* name) { return dlsym(dll, name); };
+#endif
   Native native{
-      reinterpret_cast<decltype(Native::init)>(GetProcAddress(dll, "aurora_native_init")),
-      reinterpret_cast<decltype(Native::feed)>(GetProcAddress(dll, "aurora_native_feed")),
-      reinterpret_cast<decltype(Native::frame_end)>(GetProcAddress(dll, "aurora_native_frame_end")),
-      reinterpret_cast<decltype(Native::sync)>(GetProcAddress(dll, "aurora_native_sync")),
-      reinterpret_cast<decltype(Native::shutdown)>(GetProcAddress(dll, "aurora_native_shutdown")),
-      reinterpret_cast<decltype(Native::capture)>(GetProcAddress(dll, "aurora_native_capture")),
+      reinterpret_cast<decltype(Native::init)>(symbol("aurora_native_init")),
+      reinterpret_cast<decltype(Native::feed)>(symbol("aurora_native_feed")),
+      reinterpret_cast<decltype(Native::frame_end)>(symbol("aurora_native_frame_end")),
+      reinterpret_cast<decltype(Native::sync)>(symbol("aurora_native_sync")),
+      reinterpret_cast<decltype(Native::shutdown)>(symbol("aurora_native_shutdown")),
+      reinterpret_cast<decltype(Native::capture)>(symbol("aurora_native_capture")),
   };
   if (!native.init || !native.feed || !native.frame_end)
   {
@@ -101,9 +114,6 @@ bool NativeReady()
   s_native_failed = false;
   NOTICE_LOG_FMT(VIDEO, "Aurora native: rendering with {}", path);
   return true;
-#else
-  return false;
-#endif
 }
 
 // Shared with tools/aurora-mirror. Records are {u32 type, u32 size, payload},
