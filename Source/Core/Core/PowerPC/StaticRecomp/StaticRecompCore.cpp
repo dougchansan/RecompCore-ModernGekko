@@ -323,7 +323,11 @@ void StaticRecompCore::Shutdown()
                                                     m_dispatch_samples.end());
   std::sort(dispatch_samples.begin(), dispatch_samples.end(),
             [](const auto& left, const auto& right) { return left.second > right.second; });
-  for (std::size_t i = 0; i < std::min<std::size_t>(dispatch_samples.size(), 16); ++i)
+  // STATICRECOMP_DISPATCH_SAMPLES=<n>: report the n hottest sites (default 16).
+  const char* sample_setting = std::getenv("STATICRECOMP_DISPATCH_SAMPLES");
+  const std::size_t sites_to_report =
+      sample_setting && std::atoi(sample_setting) > 1 ? std::atoi(sample_setting) : 16;
+  for (std::size_t i = 0; i < std::min(dispatch_samples.size(), sites_to_report); ++i)
   {
     std::fprintf(stderr, "[staticrecomp] dispatch-site pc=%08x samples=%llu\n",
                  dispatch_samples[i].first,
