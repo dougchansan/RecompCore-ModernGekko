@@ -203,6 +203,9 @@ bool Init()
 
 void Put(u64 pos, const void* src, u64 size)
 {
+  // No ring off Windows (Init never maps one); GCC's -Werror=nonnull proves it.
+  if (!s_data)
+    return;
   const u64 at = pos % kCapacity;
   const u64 first = std::min(size, kCapacity - at);
   std::memcpy(s_data + at, src, first);
