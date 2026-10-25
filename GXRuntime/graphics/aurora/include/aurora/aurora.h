@@ -136,6 +136,10 @@ void aurora_set_log_level(AuroraLogLevel level);
 void aurora_set_pause_on_focus_lost(bool value);
 void aurora_set_background_input(bool value);
 void aurora_set_resampler(AuroraSampler sampler);
+// false: frames are rendered and submitted but never shown (no swapchain image
+// acquired, no present), as a headless emulator renders; for measuring the
+// renderer without a display's present cost. Default true.
+void aurora_set_present_enabled(bool value);
 
 AuroraBackend aurora_get_backend();
 const AuroraBackend* aurora_get_available_backends(size_t* count);

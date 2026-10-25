@@ -88,6 +88,7 @@ constexpr std::array<AuroraBackend, 0> PreferredBackendOrder{};
 #endif
 
 bool g_initialFrame = false;
+bool g_presentEnabled = true;  // aurora_set_present_enabled
 
 AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexcept {
   g_config = config;
@@ -221,7 +222,8 @@ const AuroraEvent* update() noexcept {
 bool begin_frame() noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
-  {
+  // Without presenting, a frame renders whatever the window's state.
+  if (g_presentEnabled) {
     if (!window::is_presentable()) {
       webgpu::release_surface();
       return false;
@@ -274,7 +276,7 @@ void end_frame() noexcept {
     auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
     {
       window::SurfaceLock surfaceLock;
-      if (window::is_presentable() && g_surface) {
+      if (g_presentEnabled && window::is_presentable() && g_surface) {
         ZoneScopedN("Acquire texture");
         wgpu::SurfaceTexture surfaceTexture;
         g_surface.GetCurrentTexture(&surfaceTexture);
@@ -344,7 +346,7 @@ void end_frame() noexcept {
         imgui::render(pass, imguiDrawData);
         pass.End();
       }
-    } else {
+    } else if (g_presentEnabled) {
       Log.info("Skipping present; window not presentable");
     }
     webgpu::gpu_prof::frame_end(encoder);
@@ -370,7 +372,7 @@ void end_frame() noexcept {
         Log.warn("Surface present failed");
         webgpu::release_surface();
       }
-    } else if (g_surface) {
+    } else if (g_surface && g_presentEnabled) {
       switch (surfaceStatus) {
       case wgpu::SurfaceGetCurrentTextureStatus::Timeout:
         Log.warn("Surface texture acquisition timed out");
@@ -437,6 +439,7 @@ const AuroraBackend* aurora_get_available_backends(size_t* count) {
   return aurora::PreferredBackendOrder.data();
 }
 void aurora_set_log_level(AuroraLogLevel level) { aurora::g_config.logLevel = level; }
+void aurora_set_present_enabled(bool value) { aurora::g_presentEnabled = value; }
 void aurora_set_pause_on_focus_lost(bool value) { aurora::g_config.pauseOnFocusLost = value; }
 void aurora_set_background_input(bool value) {
   aurora::g_config.allowJoystickBackgroundEvents = value;
