@@ -19,6 +19,7 @@
 #include "window.hpp"
 
 #include <SDL3/SDL_filesystem.h>
+#include <SDL3/SDL_timer.h>
 #include <magic_enum.hpp>
 
 #include "system_info.hpp"
@@ -130,25 +131,39 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   /* Attempt to create a window using the calling application's desired backend */
   AuroraBackend selectedBackend = config.desiredBackend;
   bool windowCreated = false;
-  if (selectedBackend != BACKEND_AUTO && window::create_window(selectedBackend)) {
-    if (webgpu::initialize(selectedBackend, config.allowCpuAdapter)) {
-      windowCreated = true;
-    } else {
+  // A backend whose window opens but whose device does not come up is tried a few
+  // times before falling to the next one: device creation can fail transiently
+  // (vkCreateDevice returning VK_ERROR_DEVICE_LOST while another Vulkan device is
+  // starting in the process), and the next backend down may be a software one
+  // (OpenGLES on llvmpipe under Xvfb rendered a frame in ~25 ms).
+  const auto try_backend = [&](AuroraBackend backend) {
+    constexpr int kAttempts = 3;
+    for (int attempt = 1; attempt <= kAttempts; ++attempt) {
+      if (!window::create_window(backend)) {
+        return false;
+      }
+      if (webgpu::initialize(backend, config.allowCpuAdapter)) {
+        return true;
+      }
       window::destroy_window();
+      if (attempt < kAttempts) {
+        Log.warn("Backend {} did not initialize (attempt {} of {}), retrying", static_cast<int>(backend), attempt,
+                 kAttempts);
+        SDL_Delay(100);
+      }
     }
+    return false;
+  };
+  if (selectedBackend != BACKEND_AUTO && try_backend(selectedBackend)) {
+    windowCreated = true;
   }
 
   if (!windowCreated) {
     for (const auto backendType : PreferredBackendOrder) {
       selectedBackend = backendType;
-      if (!window::create_window(selectedBackend)) {
-        continue;
-      }
-      if (webgpu::initialize(selectedBackend, config.allowCpuAdapter)) {
+      if (try_backend(selectedBackend)) {
         windowCreated = true;
         break;
-      } else {
-        window::destroy_window();
       }
     }
   }
