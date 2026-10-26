@@ -911,6 +911,16 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
         }
         requiredFeatures.push_back(feature);
       }
+#ifdef WEBGPU_DAWN
+      // The frame is recorded on one thread and encoded, submitted and
+      // released on the render worker (and pipelines compile on others), so
+      // the device takes calls from several threads at once. Without Dawn's
+      // device lock those race: bind groups created on one thread and freed
+      // on another corrupted the Vulkan backend's per-layout allocators.
+      if (feature == wgpu::FeatureName::ImplicitDeviceSynchronization) {
+        requiredFeatures.push_back(feature);
+      }
+#endif
 #ifdef TRACY_ENABLE
       if (feature == wgpu::FeatureName::TimestampQuery) {
         requiredFeatures.push_back(feature);

@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 namespace aurora::gfx::gxcore {
@@ -99,8 +100,13 @@ wgpu::BlendFactor to_blend_factor_dst(gxc::DstBlendFactor factor) {
 // Texture bind group layout for a used-texmap set (63/Mfin multi-texmap): texmap
 // t occupies binding 2t (texture) + 2t+1 (sampler), matching the WGSL. Cached per
 // mask; used_mask=1 (texmap 0 only) reproduces the pre-Mfin single-texmap layout.
+// Called by draws on the recording thread and by create_pipeline on the pipeline
+// thread: unlocked, an insert's rehash on one let the other miss, create its own
+// layout and get back an uncached temporary that the bind group outlived.
 wgpu::BindGroupLayout texture_bind_group_layout(uint32_t used_mask = 1u) {
+  static std::mutex mutex;
   static absl::flat_hash_map<uint32_t, wgpu::BindGroupLayout> cache;
+  std::lock_guard lock{mutex};
   auto it = cache.find(used_mask);
   if (it != cache.end())
     return it->second;
