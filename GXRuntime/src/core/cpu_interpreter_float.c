@@ -152,7 +152,7 @@ u32 classify_f64(f64 value) {
     u64 sign = bits >> 63;
     u64 exponent = bits & 0x7FF0000000000000ull;
     u64 fraction = bits & 0x000FFFFFFFFFFFFFull;
-    if (exponent == 0x7FF0000000000000ull)
+    if (DOLRECOMP_UNLIKELY(exponent == 0x7FF0000000000000ull))
         return fraction ? 0x11u : (sign ? 0x09u : 0x05u);
     if (exponent == 0)
         return fraction ? (sign ? 0x18u : 0x14u) : (sign ? 0x12u : 0x02u);
@@ -165,7 +165,7 @@ u32 classify_f32(f32 value) {
     u32 sign = bits >> 31;
     u32 exponent = bits & 0x7F800000u;
     u32 fraction = bits & 0x007FFFFFu;
-    if (exponent == 0x7F800000u)
+    if (DOLRECOMP_UNLIKELY(exponent == 0x7F800000u))
         return fraction ? 0x11u : (sign ? 0x09u : 0x05u);
     if (exponent == 0)
         return fraction ? (sign ? 0x18u : 0x14u) : (sign ? 0x12u : 0x02u);
@@ -228,7 +228,7 @@ void ppc_ps_res(CPUState* cpu, f64 a, f64 b, f64* result_a, f64* result_b) {
     }
     if (is_snan(a) || is_snan(b))
         set_fp_exception(cpu, 0x01000000u);
-    if (isnan(a) || isinf(a) || isnan(b) || isinf(b))
+    if (DOLRECOMP_UNLIKELY(isnan(a) || isinf(a) || isnan(b) || isinf(b)))
         clear_fifr(cpu);
     *result_a = ppc_approx_reciprocal(a);
     *result_b = ppc_approx_reciprocal(b);
@@ -246,7 +246,7 @@ void ppc_ps_rsqrte(CPUState* cpu, f64 a, f64 b, f64* result_a, f64* result_b) {
     }
     if (is_snan(a) || is_snan(b))
         set_fp_exception(cpu, 0x01000000u);
-    if (isnan(a) || isinf(a) || isnan(b) || isinf(b))
+    if (DOLRECOMP_UNLIKELY(isnan(a) || isinf(a) || isnan(b) || isinf(b)))
         clear_fifr(cpu);
     *result_a = ppc_approx_rsqrt(a);
     *result_b = ppc_approx_rsqrt(b);
@@ -294,7 +294,7 @@ bool ppc_fma(CPUState* cpu, f64 a, f64 c, f64 b, bool single,
         f64 rounded_c = force_25_bit(c);
         result = fma(a, rounded_c, addend);
         u64 bits = f64_bits(result);
-        if ((bits & 0x000000001FFFFFFFull) == 0x0000000010000000ull) {
+        if (DOLRECOMP_UNLIKELY((bits & 0x000000001FFFFFFFull) == 0x0000000010000000ull)) {
             f64 a_prime = addend - result;
             f64 b_prime = result + a_prime;
             f64 error = fma(a, rounded_c, a_prime) + (addend - b_prime);
@@ -307,7 +307,7 @@ bool ppc_fma(CPUState* cpu, f64 a, f64 c, f64 b, bool single,
         result = (f64)(f32)result;
     }
 
-    if (isnan(result)) {
+    if (DOLRECOMP_UNLIKELY(isnan(result))) {
         u32 invalid = 0;
         if (is_snan(a) || is_snan(b) || is_snan(c))
             invalid |= 0x01000000u;
@@ -331,7 +331,7 @@ bool ppc_fma(CPUState* cpu, f64 a, f64 c, f64 b, bool single,
             if (cpu->fpscr & 0x80u)
                 return false;
         }
-    } else if (isinf(a) || isinf(b) || isinf(c)) {
+    } else if (DOLRECOMP_UNLIKELY(isinf(a) || isinf(b) || isinf(c))) {
         clear_fifr(cpu);
     }
 
@@ -367,7 +367,7 @@ f64 force_25bit_c(f64 d) {
     u64 exponent = integral & 0x7FF0000000000000ull;
     u64 fraction = integral & 0x000FFFFFFFFFFFFFull;
 
-    if (exponent == 0 && fraction != 0) {
+    if (DOLRECOMP_UNLIKELY(exponent == 0 && fraction != 0)) {
         s64 keep_mask = (s64)0xFFFFFFFFF8000000ll;
         u64 round = 0x8000000u;
         unsigned shift = leading_zeroes_u64(fraction) - 11u;
@@ -383,7 +383,7 @@ f64 force_25bit_c(f64 d) {
 FPRes ni_add(CPUState* cpu, f64 a, f64 b) {
     FPRes result = {a + b, 0};
 
-    if (isnan(result.value)) {
+    if (DOLRECOMP_UNLIKELY(isnan(result.value))) {
         if (is_snan(a) || is_snan(b)) {
             result.exception = FPSCR_VXSNAN_BIT;
             set_fp_exception(cpu, FPSCR_VXSNAN_BIT);
@@ -397,7 +397,7 @@ FPRes ni_add(CPUState* cpu, f64 a, f64 b) {
         return result;
     }
 
-    if (isinf(a) || isinf(b))
+    if (DOLRECOMP_UNLIKELY(isinf(a) || isinf(b)))
         clear_fifr(cpu);
     return result;
 }
@@ -405,7 +405,7 @@ FPRes ni_add(CPUState* cpu, f64 a, f64 b) {
 FPRes ni_sub(CPUState* cpu, f64 a, f64 b) {
     FPRes result = {a - b, 0};
 
-    if (isnan(result.value)) {
+    if (DOLRECOMP_UNLIKELY(isnan(result.value))) {
         if (is_snan(a) || is_snan(b)) {
             result.exception = FPSCR_VXSNAN_BIT;
             set_fp_exception(cpu, FPSCR_VXSNAN_BIT);
@@ -419,7 +419,7 @@ FPRes ni_sub(CPUState* cpu, f64 a, f64 b) {
         return result;
     }
 
-    if (isinf(a) || isinf(b))
+    if (DOLRECOMP_UNLIKELY(isinf(a) || isinf(b)))
         clear_fifr(cpu);
     return result;
 }
@@ -427,7 +427,7 @@ FPRes ni_sub(CPUState* cpu, f64 a, f64 b) {
 FPRes ni_mul(CPUState* cpu, f64 a, f64 b) {
     FPRes result = {a * b, 0};
 
-    if (isnan(result.value)) {
+    if (DOLRECOMP_UNLIKELY(isnan(result.value))) {
         if (is_snan(a) || is_snan(b)) {
             result.exception = FPSCR_VXSNAN_BIT;
             set_fp_exception(cpu, FPSCR_VXSNAN_BIT);
@@ -453,7 +453,7 @@ FPRes ni_div(CPUState* cpu, f64 a, f64 b) {
             set_fp_exception(cpu, FPSCR_ZX_BIT);
             return result;
         }
-    } else if (isnan(result.value)) {
+    } else if (DOLRECOMP_UNLIKELY(isnan(result.value))) {
         if (is_snan(a) || is_snan(b)) {
             result.exception = FPSCR_VXSNAN_BIT;
             set_fp_exception(cpu, FPSCR_VXSNAN_BIT);
@@ -503,7 +503,7 @@ FPRes ni_madd_msub(CPUState* cpu, f64 a, f64 c, f64 b, bool sub, bool single) {
         }
     }
 
-    if (isnan(result.value)) {
+    if (DOLRECOMP_UNLIKELY(isnan(result.value))) {
         if (is_snan(a) || is_snan(b) || is_snan(c)) {
             result.exception = FPSCR_VXSNAN_BIT;
             set_fp_exception(cpu, FPSCR_VXSNAN_BIT);
@@ -518,13 +518,13 @@ FPRes ni_madd_msub(CPUState* cpu, f64 a, f64 c, f64 b, bool sub, bool single) {
         return result;
     }
 
-    if (isinf(a) || isinf(b) || isinf(c))
+    if (DOLRECOMP_UNLIKELY(isinf(a) || isinf(b) || isinf(c)))
         clear_fifr(cpu);
     return result;
 }
 
 bool fp_invalid_gated(const CPUState* cpu, const FPRes* res) {
-    return (cpu->fpscr & FPSCR_VE_BIT) != 0 && (res->exception & FPSCR_VX_ANY_MASK) != 0;
+    return DOLRECOMP_UNLIKELY((cpu->fpscr & FPSCR_VE_BIT) != 0 && (res->exception & FPSCR_VX_ANY_MASK) != 0);
 }
 
 void fp_write_single(CPUState* cpu, u8 d, f32 rounded) {

@@ -860,7 +860,7 @@ extern bool g_ppc_lazy_fp_enabled;
 bool ppc_fp_raise_unavailable(CPUState* cpu, u32 cia);
 
 static inline bool ppc_fp_available_inline(CPUState* cpu, u32 cia) {
-    if (!g_ppc_lazy_fp_enabled || (cpu->msr & PPC_MSR_FP))
+    if (DOLRECOMP_LIKELY(!g_ppc_lazy_fp_enabled || (cpu->msr & PPC_MSR_FP)))
         return true;
     return ppc_fp_raise_unavailable(cpu, cia);
 }

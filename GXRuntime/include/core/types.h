@@ -22,6 +22,17 @@ typedef int64_t  s64;
 typedef float    f32;
 typedef double   f64;
 
+// Branch hints for the runtime's rare paths (NaN/infinity/denormal handling, slow
+// paths). Profile-guided builds gained most from laying these helpers out; static
+// hints get part of that without shipping a profile.
+#if defined(__GNUC__) || defined(__clang__)
+#define DOLRECOMP_LIKELY(x) __builtin_expect(!!(x), 1)
+#define DOLRECOMP_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define DOLRECOMP_LIKELY(x) (x)
+#define DOLRECOMP_UNLIKELY(x) (x)
+#endif
+
 // sign-extend from N bits to s32
 static inline s32 sign_extend(u32 value, int bits) {
     u32 mask = 1u << (bits - 1);
@@ -111,11 +122,11 @@ static inline u64 convert_to_double(u32 value) {
     u64 exp = (x >> 23) & 0xFFu;
     u64 frac = x & 0x007FFFFFu;
 
-    if (exp > 0 && exp < 255) { /* normal */
+    if (DOLRECOMP_LIKELY(exp > 0 && exp < 255)) { /* normal */
         u64 y = !(exp >> 7);
         u64 z = (y << 61) | (y << 60) | (y << 59);
         return ((x & 0xC0000000u) << 32) | z | ((x & 0x3FFFFFFFu) << 29);
-    } else if (exp == 0 && frac != 0) { /* subnormal */
+    } else if (DOLRECOMP_UNLIKELY(exp == 0 && frac != 0)) { /* subnormal */
         exp = 1023 - 126;
         do {
             frac <<= 1;
@@ -131,7 +142,7 @@ static inline u64 convert_to_double(u32 value) {
 
 static inline u32 convert_to_single(u64 x) {
     u32 exp = (u32)((x >> 52) & 0x7FFu);
-    if (exp > 896 || (x & ~0x8000000000000000ull) == 0) {
+    if (DOLRECOMP_LIKELY(exp > 896 || (x & ~0x8000000000000000ull) == 0)) {
         return (u32)(((x >> 32) & 0xC0000000u) | ((x >> 29) & 0x3FFFFFFFu));
     } else if (exp >= 874) {
         u32 t = (u32)(0x80000000u | ((x & 0x000FFFFFFFFFFFFFull) >> 21));
@@ -146,7 +157,7 @@ static inline u32 convert_to_single(u64 x) {
 
 static inline u32 convert_to_single_ftz(u64 x) {
     u32 exp = (u32)((x >> 52) & 0x7FFu);
-    if (exp > 896 || (x & ~0x8000000000000000ull) == 0)
+    if (DOLRECOMP_LIKELY(exp > 896 || (x & ~0x8000000000000000ull) == 0))
         return (u32)(((x >> 32) & 0xC0000000u) | ((x >> 29) & 0x3FFFFFFFu));
     return (u32)((x >> 32) & 0x80000000u);
 }
