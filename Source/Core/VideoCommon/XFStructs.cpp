@@ -331,6 +331,8 @@ std::vector<LoadRec> s_cur, s_pending;
 std::vector<u32> s_prev_data, s_cur_data;
 std::unordered_map<u64, std::vector<u32>> s_prev_map;  // key -> data indices, in order
 std::unordered_map<u64, u32> s_key_uses;               // occurrences used this frame
+// For keys loaded more than once: which previous-frame loads are taken.
+std::unordered_map<u64, std::vector<bool>> s_key_taken;
 bool s_have_prev = false;
 // Shadow words written by this frame's loads; the rest are refreshed from XF
 // memory at the frame's end so an unchanged matrix blends to itself.
@@ -434,14 +436,67 @@ void ResolveLoad(LoadRec rec, bool* flushed)
     const char* v = std::getenv("MODERNGEKKO_INTERP_PROJ");
     return v && v[0] == '1';
   }();
-  if (s_have_prev && (touches_pos || blend_projection))
+  // MODERNGEKKO_INTERP_NOPAIR=1 (diagnostic): pair nothing, so every layer
+  // draws the real frame - separates pairing faults from everything else.
+  static const bool no_pair = std::getenv("MODERNGEKKO_INTERP_NOPAIR") != nullptr;
+  if (!no_pair && s_have_prev && (touches_pos || blend_projection))
   {
     const u64 key = Key(address, words, rec.base);
     if (const auto it = s_prev_map.find(key); it != s_prev_map.end())
     {
       const u32 use = s_key_uses[key]++;
-      if (use < it->second.size())
-        prev = &s_prev_data[it->second[use]];
+      const std::vector<u32>& candidates = it->second;
+      if (candidates.size() > 1 && touches_pos && words == 12 && (address & 3) == 0)
+      {
+        // Many draws share one vertex array (the battle HUD draws every
+        // sprite from a single quad), so the key alone does not name the
+        // object, and pairing by order broke whenever the count changed: an
+        // HP digit ticking down, a cursor moving in Pokemon select, a HUD
+        // sliding in shifted every later sprite onto its neighbour's previous
+        // matrix, and the in-between frames drew the HP box scrambled. Take
+        // the unused previous load nearest to it instead.
+        std::vector<bool>& taken = s_key_taken[key];
+        if (taken.size() != candidates.size())
+          taken.assign(candidates.size(), false);
+        double best = 0;
+        size_t best_index = candidates.size();
+        for (size_t c = 0; c < candidates.size(); ++c)
+        {
+          if (taken[c])
+            continue;
+          const u32* p = &s_prev_data[candidates[c]];
+          // The whole matrix: a HUD box, its bar and its text share a
+          // position and differ in scale.
+          double d = 0;
+          for (int w = 0; w < 12; ++w)
+          {
+            const double delta = double(AsFloat(now_words[w])) - AsFloat(p[w]);
+            d += delta * delta;
+          }
+          if (best_index == candidates.size() || d < best)
+          {
+            best = d;
+            best_index = c;
+          }
+        }
+        // When a sprite appears or goes (a highlight frame, a new digit) the
+        // nearest unused load can still be a different sprite. Blend only a
+        // close match - motion between frames is small next to the matrix
+        // itself - and draw anything else where it really is.
+        double norm = 0;
+        for (int w = 0; w < 12; ++w)
+          norm += double(AsFloat(now_words[w])) * AsFloat(now_words[w]);
+        if (best_index != candidates.size() &&
+            std::sqrt(best) <= 0.05 * std::sqrt(norm) + 0.5)
+        {
+          taken[best_index] = true;
+          prev = &s_prev_data[candidates[best_index]];
+        }
+      }
+      else if (use < candidates.size())
+      {
+        prev = &s_prev_data[candidates[use]];
+      }
     }
   }
   // 2D (orthographic) draws are HUD and menu quads, which share vertex arrays
@@ -621,6 +676,7 @@ void Reset()
   s_cur_data.clear();
   s_prev_map.clear();
   s_key_uses.clear();
+  s_key_taken.clear();
   s_have_prev = false;
   s_pos_loaded.reset();
   s_proj_loaded = false;
@@ -669,6 +725,7 @@ void Frame()
   s_cur.clear();
   s_cur_data.clear();
   s_key_uses.clear();
+  s_key_taken.clear();
   s_have_prev = true;
 }
 }  // namespace FrameInterp
