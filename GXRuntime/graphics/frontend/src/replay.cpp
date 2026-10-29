@@ -62,8 +62,7 @@ bool mem1_resolver(void* user, u32 address, u32 size,
 void digest_draw_observer(const ConsumedDraw& draw, unsigned long long,
                           void* user) {
   auto* ctx = static_cast<ReplayContext*>(user);
-  fnv_bytes(ctx->content_fnv, draw.vertex_payload.data(),
-            draw.vertex_payload.size());
+  fnv_bytes(ctx->content_fnv, draw.payload_data(), draw.payload_size());
   std::vector<AssembledElement> elements;
   const AssembledDrawStats stats = assemble_consumed_draw(draw, &elements);
   fnv_u32(ctx->content_fnv, stats.ok ? 1u : 0u);

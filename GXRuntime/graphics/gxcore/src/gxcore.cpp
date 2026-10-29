@@ -543,7 +543,7 @@ void GxCoreState::build_draw_plan_into(const ar::ConsumedDraw& draw,
     ++counters.vertex_decode_failures;
     return skip("projection never captured");
   }
-  if (draw.vertex_payload.empty()) {
+  if (draw.payload_size() == 0u) {
     ++counters.vertex_decode_failures;
     return skip("draw carried no payload");
   }
@@ -825,8 +825,8 @@ void GxCoreState::build_draw_plan_into(const ar::ConsumedDraw& draw,
 
   // Vertex decode to the fixed layout.
   plan.vertex_count = draw.vertex_count;
-  const std::uint8_t* payload = draw.vertex_payload.data();
-  const std::size_t payload_size = draw.vertex_payload.size();
+  const std::uint8_t* payload = draw.payload_data();
+  const std::size_t payload_size = draw.payload_size();
   // Each indexed entry's array, looked up once per draw, not per vertex.
   const ar::ConsumedArrayInput* entry_arrays[std::size(WalkLayout{}.entries)] = {};
   for (std::uint32_t e = 0; e < walk.entry_count; ++e)

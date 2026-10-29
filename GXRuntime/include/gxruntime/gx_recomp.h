@@ -204,6 +204,15 @@ typedef struct DolGxRecompState {
     u16 texture_tlut_tmem_offset[DOL_GX_RECOMP_TEXTURE_SLOTS];
     u32 texture_tlut_format[DOL_GX_RECOMP_TEXTURE_SLOTS];
     DolGxRecompVertexLayout vertex_layouts[DOL_GX_RECOMP_VERTEX_FORMATS];
+    /* The CP inputs each vertex_layouts[i] was last derived from (VCD lo/hi,
+       their valid bits, the format's three VAT groups), so a re-derivation
+       from the same inputs reuses it: every VCD write re-derives all eight
+       formats, and the game writes the same VCD values again and again. */
+    struct {
+        u32 vcd_lo, vcd_hi, vat0, vat1, vat2;
+        u8 vcd_valid;
+        bool set;
+    } layout_inputs[DOL_GX_RECOMP_VERTEX_FORMATS];
     DolGxRecompCopyState copy;
     u32 bp_regs[256];
     bool bp_valid[256];

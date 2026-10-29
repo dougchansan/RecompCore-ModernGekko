@@ -368,6 +368,17 @@ struct ConsumedDraw {
   // per-vertex indices), retained from the Draw packet so an issuing sink can
   // assemble vertices after submit. Empty when the packet carried no payload.
   std::vector<std::uint8_t> vertex_payload;
+  // Or, for a draw consumed synchronously while its packet's bytes are still
+  // live (build_direct_draw), those bytes borrowed instead of copied. Read the
+  // payload through payload_data()/payload_size().
+  const std::uint8_t* payload_view = nullptr;
+  std::uint32_t payload_view_size = 0;
+  const std::uint8_t* payload_data() const {
+    return payload_view != nullptr ? payload_view : vertex_payload.data();
+  }
+  std::size_t payload_size() const {
+    return payload_view != nullptr ? payload_view_size : vertex_payload.size();
+  }
   std::uint32_t transform_flags = 0;
   std::uint32_t current_pn_matrix = 0;
   std::uint32_t payload_pn_matrix_mask = 0;

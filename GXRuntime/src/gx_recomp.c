@@ -995,6 +995,7 @@ bool dol_gx_recomp_set_vertex_layout(DolGxRecompState* gx, u8 vtx_fmt,
     memset(layout, 0, sizeof(*layout));
     layout->valid = true;
     layout->vertex_size = vertex_size;
+    gx->layout_inputs[vtx_fmt].set = false;
     dol_gx_recomp_trace_event(gx, DOL_GX_RECOMP_EVENT_VERTEX_LAYOUT, vtx_fmt, vertex_size,
                 0u, 0u);
     return true;
@@ -1011,6 +1012,7 @@ bool dol_gx_recomp_set_indexed_attr(DolGxRecompState* gx, u8 vtx_fmt,
     DolGxRecompVertexLayout* layout = &gx->vertex_layouts[vtx_fmt];
     if (!layout->valid || vertex_offset + index_size > layout->vertex_size)
         return false;
+    gx->layout_inputs[vtx_fmt].set = false;
     return add_indexed_attr_spec(layout, attr, vertex_offset, index_size,
                                  element_size, element_bias);
 }
@@ -1018,10 +1020,35 @@ bool dol_gx_recomp_set_indexed_attr(DolGxRecompState* gx, u8 vtx_fmt,
 bool dol_gx_recomp_derive_vertex_layout(DolGxRecompState* gx, u8 vtx_fmt) {
     if (gx == NULL || vtx_fmt >= DOL_GX_RECOMP_VERTEX_FORMATS)
         return false;
+    const u8 vcd_valid = (u8)((gx->vcd_lo_valid ? 1u : 0u) | (gx->vcd_hi_valid ? 2u : 0u));
+    const u32 vat0 = gx->vat_group0[vtx_fmt];
+    const u32 vat1 = gx->vat_group1[vtx_fmt];
+    const u32 vat2 = gx->vat_group2[vtx_fmt];
+    /* The same inputs as the layout already there give the same layout (the
+       derivation reads nothing else); the event still goes out, as before. */
+    if (gx->layout_inputs[vtx_fmt].set && gx->vertex_layouts[vtx_fmt].valid &&
+        gx->layout_inputs[vtx_fmt].vcd_lo == gx->vcd_lo &&
+        gx->layout_inputs[vtx_fmt].vcd_hi == gx->vcd_hi &&
+        gx->layout_inputs[vtx_fmt].vcd_valid == vcd_valid &&
+        gx->layout_inputs[vtx_fmt].vat0 == vat0 &&
+        gx->layout_inputs[vtx_fmt].vat1 == vat1 &&
+        gx->layout_inputs[vtx_fmt].vat2 == vat2) {
+        const DolGxRecompVertexLayout* layout = &gx->vertex_layouts[vtx_fmt];
+        dol_gx_recomp_trace_event(gx, DOL_GX_RECOMP_EVENT_VERTEX_LAYOUT, vtx_fmt,
+                    layout->vertex_size, layout->indexed_attr_count, 0u);
+        return true;
+    }
     DolGxRecompVertexLayout layout;
     if (!derive_layout_from_cp(gx, vtx_fmt, &layout))
         return false;
     gx->vertex_layouts[vtx_fmt] = layout;
+    gx->layout_inputs[vtx_fmt].vcd_lo = gx->vcd_lo;
+    gx->layout_inputs[vtx_fmt].vcd_hi = gx->vcd_hi;
+    gx->layout_inputs[vtx_fmt].vcd_valid = vcd_valid;
+    gx->layout_inputs[vtx_fmt].vat0 = vat0;
+    gx->layout_inputs[vtx_fmt].vat1 = vat1;
+    gx->layout_inputs[vtx_fmt].vat2 = vat2;
+    gx->layout_inputs[vtx_fmt].set = true;
     dol_gx_recomp_trace_event(gx, DOL_GX_RECOMP_EVENT_VERTEX_LAYOUT, vtx_fmt,
                 layout.vertex_size, layout.indexed_attr_count, 0u);
     return true;

@@ -263,6 +263,8 @@ bool ConsumingAuroraRenderSink::submit_packet(const RenderPacket& packet) {
     // issuing sink can assemble vertices after submit.
     draw.vertex_payload = std::move(payload_buffer);
     draw.vertex_payload.clear();
+    draw.payload_view = nullptr;
+    draw.payload_view_size = 0;
     if (packet.draw.vertex_payload != nullptr &&
         packet.draw.vertex_payload_size != 0u) {
       draw.vertex_payload.assign(
@@ -323,7 +325,11 @@ void ConsumingAuroraRenderSink::build_direct_draw(const DirectDraw& direct,
   }
   fill_draw_transform(draw, *direct.state, *direct.layout, direct.payload,
                       direct.vertex_count);
-  draw.vertex_payload.assign(direct.payload.begin(), direct.payload.end());
+  // Borrowed, not copied: submit_direct_draw finishes with this draw before
+  // the frontend's payload bytes go away.
+  draw.vertex_payload.clear();
+  draw.payload_view = direct.payload.data();
+  draw.payload_view_size = static_cast<std::uint32_t>(direct.payload.size());
 }
 
 bool ConsumingAuroraRenderSink::resolve_array_input(
@@ -421,13 +427,13 @@ AssembledDrawStats assemble_consumed_draw(const ConsumedDraw& draw,
     return stats;
   }
   // The retained payload must hold vertex_count whole strides.
-  if (draw.vertex_payload.size() <
+  if (draw.payload_size() <
       static_cast<std::size_t>(draw.vertex_count) * draw.vertex_size) {
     stats.ok = false;
     stats.failure_reason = "payload smaller than vertex_count*vertex_size";
     return stats;
   }
-  const std::uint8_t* payload = draw.vertex_payload.data();
+  const std::uint8_t* payload = draw.payload_data();
 
   for (std::uint32_t a = 0; a < draw.array_input_count; ++a) {
     const ConsumedArrayInput& in = draw.arrays[a];
@@ -451,7 +457,7 @@ AssembledDrawStats assemble_consumed_draw(const ConsumedDraw& draw,
     for (std::uint32_t v = 0; v < draw.vertex_count; ++v) {
       const std::size_t idx_pos =
           static_cast<std::size_t>(v) * draw.vertex_size + in.vertex_offset;
-      if (idx_pos + in.index_size > draw.vertex_payload.size()) {
+      if (idx_pos + in.index_size > draw.payload_size()) {
         ++stats.failed_reads;
         stats.ok = false;
         stats.failure_attr = in.attr;
@@ -490,12 +496,31 @@ std::uint32_t build_topology_indices(GxPrimitive primitive,
                                      std::uint16_t vtx_start,
                                      std::uint16_t vtx_count,
                                      std::vector<std::uint16_t>* out) {
+  // The count has a closed form; size the output once and write through a
+  // pointer (one push_back per index was a capacity check per index, on every
+  // draw).
+  std::uint32_t total = 0;
+  switch (primitive) {
+  case GxPrimitive::Quads:
+    total = (vtx_count / 4u) * 6u;
+    break;
+  case GxPrimitive::Triangles:
+    total = vtx_count;
+    break;
+  case GxPrimitive::TriangleFan:
+  case GxPrimitive::TriangleStrip:
+    total = vtx_count <= 3u ? vtx_count : 3u + (vtx_count - 3u) * 3u;
+    break;
+  default:
+    break;
+  }
+  if (out == nullptr || total == 0u)
+    return total;
+  const std::size_t first = out->size();
+  out->resize(first + total);
+  std::uint16_t* dst = out->data() + first;
   std::uint32_t num = 0;
-  const auto push = [&](std::uint16_t v) {
-    if (out != nullptr)
-      out->push_back(v);
-    ++num;
-  };
+  const auto push = [&](std::uint16_t v) { dst[num++] = v; };
   switch (primitive) {
   case GxPrimitive::Quads:
     // Each quad -> two triangles {0,1,2} {2,3,0}. Trailing verts (< 4) ignored,

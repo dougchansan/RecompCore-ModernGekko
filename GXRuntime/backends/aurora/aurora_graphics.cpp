@@ -568,7 +568,7 @@ void shadow_transform_observer(
                  "pn_valid=0x%03X pos_valid=0x%03X arrays=%u active=0x%04X\n",
                  frame, frame_draw, draw.sequence, cumulative_draw,
                  draw.primitive, draw.vtx_fmt, draw.vertex_count,
-                 draw.vertex_size, draw.vertex_payload.size(),
+                 draw.vertex_size, draw.payload_size(),
                  draw.cull_all ? 1 : 0, draw.texture.slot,
                  draw.texture.address, draw.transform_flags,
                  draw.current_pn_matrix, draw.payload_pn_matrix_mask,
