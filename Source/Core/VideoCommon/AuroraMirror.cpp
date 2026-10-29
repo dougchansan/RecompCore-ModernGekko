@@ -57,6 +57,16 @@ struct Native
   // Optional: guest memory the GPU read at this point in the stream.
   void (*capture)(u32 address, u32 size);
 };
+// Optional, aurora_native_write_watch: MEM1's write watch (Memory::EnableWriteWatch), so the
+// renderer's snapshots recopy only pages written since it last copied them. Shared with
+// tools/aurora-mirror/native.cpp.
+struct NativeWriteWatch
+{
+  u32 version;  // 1
+  const std::atomic<u32>* write_gen;
+  u32 (*begin_sync)();
+  bool (*rearm)(u32 page);
+};
 constexpr size_t kNativeBatch = 8 * 1024;
 const bool s_native_requested = [] {
   const char* dll = std::getenv("MODERNGEKKO_AURORA_NATIVE");
@@ -109,6 +119,18 @@ bool NativeReady()
   {
     ERROR_LOG_FMT(VIDEO, "Aurora native: {} failed to start", path);
     return false;
+  }
+  // AURORA_NATIVE_WRITE_WATCH=0 keeps the full copy at every GXDrawDone.
+  using WriteWatchEntry = bool (*)(const NativeWriteWatch*);
+  const auto write_watch = reinterpret_cast<WriteWatchEntry>(symbol("aurora_native_write_watch"));
+  const char* watch_env = std::getenv("AURORA_NATIVE_WRITE_WATCH");
+  if (write_watch && !(watch_env && watch_env[0] == '0') && memory.EnableWriteWatch())
+  {
+    static const NativeWriteWatch api{
+        1, memory.WriteWatchGenerations(),
+        [] { return Core::System::GetInstance().GetMemory().WriteWatchBeginSync(); },
+        [](u32 page) { return Core::System::GetInstance().GetMemory().WriteWatchRearm(page); }};
+    write_watch(&api);
   }
   s_native = native;
   s_native_failed = false;

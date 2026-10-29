@@ -8,6 +8,7 @@
 #include "Common/CommonFuncs.h"
 #include "Common/MsgHandler.h"
 
+#include "Core/HW/Memmap.h"
 #include "Core/MachineContext.h"
 #include "Core/PowerPC/JitInterface.h"
 #include "Core/System.h"
@@ -61,6 +62,13 @@ static LONG NTAPI Handler(PEXCEPTION_POINTERS pPtrs)
     // virtual address of the inaccessible data
     uintptr_t fault_address = (uintptr_t)pPtrs->ExceptionRecord->ExceptionInformation[1];
     SContext* ctx = pPtrs->ContextRecord;
+
+    // A write to a page the write watch armed (any view of MEM1, any writer).
+    if (access_type == 1 &&
+        Core::System::GetInstance().GetMemory().HandleWriteWatchFault(fault_address))
+    {
+      return EXCEPTION_CONTINUE_EXECUTION;
+    }
 
     if (Core::System::GetInstance().GetJitInterface().HandleFault(fault_address, ctx))
     {
@@ -292,6 +300,13 @@ static void sigsegv_handler(int sig, siginfo_t* info, void* raw_context)
 #else
   SContext* const ctx = &context->uc_mcontext;
 #endif
+  // A write to a page the write watch armed (any view of MEM1, any writer).
+  if (sicode == SEGV_ACCERR &&
+      Core::System::GetInstance().GetMemory().HandleWriteWatchFault(bad_address))
+  {
+    return;
+  }
+
   if (Core::System::GetInstance().GetJitInterface().HandleFault(bad_address, ctx))
     return;
 

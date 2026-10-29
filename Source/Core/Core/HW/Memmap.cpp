@@ -18,6 +18,12 @@
 #include <span>
 #include <tuple>
 
+#ifdef _WIN32
+#include <Windows.h>
+#else
+#include <sys/mman.h>
+#endif
+
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
 #include "Common/Logging/Log.h"
@@ -323,6 +329,7 @@ void MemoryManager::UpdateDBATMappings(const PowerPC::BatTable& dbat_table)
       }
     }
   }
+  WriteWatchUpdateViews();
 }
 
 void MemoryManager::AddPageTableMapping(u32 logical_address, u32 translated_address, bool writeable)
@@ -544,8 +551,118 @@ void MemoryManager::DoState(PointerWrap& p)
   p.DoMarker("Memory EXRAM");
 }
 
+bool MemoryManager::EnableWriteWatch()
+{
+  if (m_ww_enabled)
+    return true;
+  // One host page per 4 KiB guest page; and the views must exist.
+  if (!m_ram || m_page_size != 0x1000)
+    return false;
+  const u32 pages = GetRamSize() >> 12;
+  m_ww_write_gen = std::make_unique<std::atomic<u32>[]>(pages);
+  m_ww_armed = std::make_unique<std::atomic<u8>[]>(pages);
+  m_ww_enabled = true;
+  WriteWatchUpdateViews();
+  return true;
+}
+
+// Rebuilds the list of MEM1 views (DBAT changes remap the logical ones, writable) and disarms
+// every page, stamping it, so the consumer recopies and re-arms it. A page can still be read-only
+// in a surviving view; a write there faults and is handled like any other.
+void MemoryManager::WriteWatchUpdateViews()
+{
+  if (!m_ww_enabled)
+    return;
+  m_ww_view_count.store(0, std::memory_order_release);
+  const u32 ram_size = GetRamSize();
+  size_t count = 0;
+  m_ww_views[count++] = {m_ram, 0, ram_size};
+  if (m_is_fastmem_arena_initialized)
+  {
+    m_ww_views[count++] = {m_physical_base, 0, ram_size};
+    for (const auto& [unused, entry] : m_dbat_mapped_entries)
+    {
+      // Which physical range this logical view shows: its first BAT page's target.
+      u8* const view = static_cast<u8*>(entry.mapped_pointer);
+      const u32 logical = static_cast<u32>(view - m_logical_base);
+      u8* const target = static_cast<u8*>(m_logical_page_mappings[logical / PowerPC::BAT_PAGE_SIZE]);
+      if (!target || target < m_ram || target >= m_ram + ram_size || count == m_ww_views.size())
+        continue;
+      const u32 begin = static_cast<u32>(target - m_ram);
+      m_ww_views[count++] = {view - begin, begin,
+                             std::min(ram_size, begin + static_cast<u32>(entry.mapped_size))};
+    }
+  }
+  m_ww_view_count.store(count, std::memory_order_release);
+  const u32 gen = m_ww_gen.load(std::memory_order_relaxed);
+  for (u32 page = 0; page < (ram_size >> 12); ++page)
+  {
+    m_ww_write_gen[page].store(gen, std::memory_order_relaxed);
+    m_ww_armed[page].store(0, std::memory_order_relaxed);
+  }
+}
+
+// Straight to the OS: this also runs inside the fault handlers, where logging is not safe.
+void MemoryManager::WriteWatchProtect(u32 page, bool writeable)
+{
+  const u32 address = page << 12;
+  const size_t count = m_ww_view_count.load(std::memory_order_acquire);
+  for (size_t i = 0; i < count; ++i)
+  {
+    const WriteWatchView& view = m_ww_views[i];
+    if (address < view.begin || address >= view.end)
+      continue;
+#ifdef _WIN32
+    DWORD old_protect;
+    VirtualProtect(view.base + address, 0x1000, writeable ? PAGE_READWRITE : PAGE_READONLY,
+                   &old_protect);
+#else
+    mprotect(view.base + address, 0x1000, writeable ? PROT_READ | PROT_WRITE : PROT_READ);
+#endif
+  }
+}
+
+u32 MemoryManager::WriteWatchBeginSync()
+{
+  return m_ww_gen.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+bool MemoryManager::WriteWatchRearm(u32 page)
+{
+  if (!m_ww_enabled || page >= (GetRamSize() >> 12))
+    return true;
+  if (m_ww_armed[page].exchange(1, std::memory_order_acq_rel))
+    return false;
+  WriteWatchProtect(page, false);
+  return true;
+}
+
+bool MemoryManager::HandleWriteWatchFault(uintptr_t address)
+{
+  if (!m_ww_enabled)
+    return false;
+  const size_t count = m_ww_view_count.load(std::memory_order_acquire);
+  for (size_t i = 0; i < count; ++i)
+  {
+    const WriteWatchView& view = m_ww_views[i];
+    const uintptr_t base = reinterpret_cast<uintptr_t>(view.base);
+    if (address < base + view.begin || address >= base + view.end)
+      continue;
+    // The views are writable unless armed, so a fault inside one is ours. Stamp before the
+    // page becomes writable, so the stamp is never older than the write.
+    const u32 page = static_cast<u32>((address - base) >> 12);
+    m_ww_write_gen[page].store(m_ww_gen.load(std::memory_order_relaxed), std::memory_order_release);
+    WriteWatchProtect(page, true);
+    m_ww_armed[page].store(0, std::memory_order_release);
+    return true;
+  }
+  return false;
+}
+
 void MemoryManager::Shutdown()
 {
+  m_ww_view_count.store(0, std::memory_order_release);
+  m_ww_enabled = false;
   ShutdownFastmemArena();
 
   m_is_initialized = false;

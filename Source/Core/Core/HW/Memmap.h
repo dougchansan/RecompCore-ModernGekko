@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <map>
 #include <memory>
 #include <set>
@@ -109,6 +110,22 @@ public:
   void RemovePageTableMappings(const std::set<u32>& mappings);
   void RemoveAllPageTableMappings();
 
+  // Write watch over MEM1, in 4 KiB pages, for a consumer that keeps copies of guest RAM (the Aurora
+  // native renderer's snapshots) and wants to recopy only what changed. A page is armed by making it
+  // read-only in every view of MEM1; the first write to it, by any thread and through any view,
+  // faults into HandleWriteWatchFault, which stamps the page with the current generation and makes
+  // it writable again. The consumer starts each copy with WriteWatchBeginSync and re-arms the pages
+  // it copies.
+  bool EnableWriteWatch();
+  // Starts a new generation and returns it.
+  u32 WriteWatchBeginSync();
+  // Arms the page; returns true if it was not armed (written since, or never armed).
+  bool WriteWatchRearm(u32 page);
+  // Per page: the generation current when the page was last written while armed.
+  const std::atomic<u32>* WriteWatchGenerations() const { return m_ww_write_gen.get(); }
+  // From the fault handlers, on any thread: true if this was a write to an armed page.
+  bool HandleWriteWatchFault(uintptr_t address);
+
   void Clear();
 
   // Routines to access physically addressed memory, designed for use by
@@ -187,6 +204,24 @@ private:
   // setting up the full memory map in process memory isn't possible.
   u8* m_physical_page_mappings_base = nullptr;
   u8* m_logical_page_mappings_base = nullptr;
+
+  // Write watch (EnableWriteWatch): every host view of MEM1, as the host address of physical 0 and
+  // the physical range it covers, and per page the armed flag and the last write's generation.
+  struct WriteWatchView
+  {
+    u8* base;
+    u32 begin;
+    u32 end;
+  };
+  static constexpr size_t kMaxWriteWatchViews = 8;
+  std::array<WriteWatchView, kMaxWriteWatchViews> m_ww_views{};
+  std::atomic<size_t> m_ww_view_count{0};
+  std::unique_ptr<std::atomic<u32>[]> m_ww_write_gen;
+  std::unique_ptr<std::atomic<u8>[]> m_ww_armed;
+  std::atomic<u32> m_ww_gen{1};
+  bool m_ww_enabled = false;
+  void WriteWatchProtect(u32 page, bool writeable);
+  void WriteWatchUpdateViews();
 
   // The actual memory used for backing the memory map.
   u8* m_ram = nullptr;
