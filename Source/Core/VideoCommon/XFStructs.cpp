@@ -444,6 +444,14 @@ void ResolveLoad(LoadRec rec, bool* flushed)
         prev = &s_prev_data[it->second[use]];
     }
   }
+  // 2D (orthographic) draws are HUD and menu quads, which share vertex arrays
+  // and appear and disappear between frames: pairing paired each with a
+  // neighbour's matrix, and the in-between frames drew HP boxes and icons torn
+  // and doubled while they slid in. They gain nothing from blending; draw them
+  // at their real position. The pairing above still counts the use, so the 3D
+  // loads keyed after them keep their order.
+  if (prev && rec.base != kNoDraw && xfmem.projection.type == ProjectionType::Orthographic)
+    prev = nullptr;
 
   // Camera cuts: a paired load whose values jump far between frames is a new
   // view, not motion - blending it would show a bogus halfway frame, so it is
