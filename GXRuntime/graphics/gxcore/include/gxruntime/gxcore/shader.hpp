@@ -143,10 +143,36 @@ struct TevStageKey {
   std::uint8_t tevorders_texmap = 0;
   std::uint8_t tevorders_colorchan = 0; // RasColorChan
   std::uint8_t tevorders_enable = 0;    // reads texture when set
-  std::uint8_t pad0 = 0;
-  std::uint8_t pad1 = 0;
+  // Indirect op (IND_CMD / TevStageIndirect, BP 0x10+n), raw subfields. All
+  // zero is Dolphin's passthrough (the regular texcoord, no offset); the first
+  // two bytes take the place of the former pad0/pad1.
+  std::uint8_t ind_bt = 0;        // indirect stage ID (bits 0-1)
+  std::uint8_t ind_fmt = 0;       // IndTexFormat (bits 2-3)
+  std::uint8_t ind_bias = 0;      // IndTexBias (bits 4-6)
+  std::uint8_t ind_bs = 0;        // IndTexBumpAlpha (bits 7-8)
+  std::uint8_t ind_mtx_index = 0; // IndMtxIndex (bits 9-10), 0 off, 1-3 matrix
+  std::uint8_t ind_mtx_id = 0;    // IndMtxId (bits 11-12): indirect / S / T
+  std::uint8_t ind_sw = 0;        // IndTexWrap S (bits 13-15)
+  std::uint8_t ind_tw = 0;        // IndTexWrap T (bits 16-18)
+  std::uint8_t ind_lb_utclod = 0; // bit 19 (LOD source; not emulated)
+  std::uint8_t ind_fb_addprev = 0; // bit 20: add the previous stage's tevcoord
 };
 static_assert(std::has_unique_object_representations_v<TevStageKey>);
+
+// Dolphin TevStageIndirect::IsActive: the stage reads its indirect texture.
+inline bool tev_ind_active(const TevStageKey& s) {
+  return s.ind_bs != 0u || s.ind_mtx_index != 0u;
+}
+
+// One indirect texture stage's lookup (RAS1_IREF, BP 0x27): texcoord bc{i} and
+// texmap bi{i}. Filled only for stages a TEV stage actually uses (Dolphin
+// pixel_shader_uid_data::SetTevindrefValues), so unused stages stay zero.
+struct IndStageKey {
+  std::uint8_t texcoord = 0;
+  std::uint8_t texmap = 0;
+};
+static_assert(std::has_unique_object_representations_v<IndStageKey>);
+inline constexpr std::uint32_t kMaxIndStages = 4;
 
 struct TexGenKey {
   std::uint8_t enabled = 0;
@@ -256,10 +282,12 @@ struct ShaderKey {
   std::uint8_t has_vertex_normal = 0;
   std::uint8_t has_vertex_binormal = 0;
   std::uint8_t has_vertex_tangent = 0;
-  // Re-pad the scalar block to a multiple of 4, keeping ShaderKey a
-  // unique-object-representation (memcmp identity) type.
-  std::uint8_t pad2 = 0;
-  std::uint8_t pad3 = 0;
+  // Indirect texturing (Dolphin PixelShaderGen genMode_numindstages /
+  // nIndirectStagesUsed). These two bytes replace the former pad2/pad3, so the
+  // scalar block stays a multiple of 4 (unique-object-representation).
+  std::uint8_t num_ind_stages = 0;      // genMode bits 16-18
+  std::uint8_t ind_stage_used_mask = 0; // bit i: an active TEV stage reads ind stage i
+  IndStageKey ind_stages[kMaxIndStages]{};
   LightChanKey litchan[4]{}; // color0, color1, alpha0, alpha1
   TexGenKey tex_gens[kMaxTexGens]{};
   TevStageKey tev_stages[kMaxTevStages]{};
@@ -309,6 +337,11 @@ struct VertexShaderConstants {
   float texmatrices[24][4]{};       // per texgen: 3 rows resolved via matidx
   float transformmatrices[64][4]{}; // raw XF matrix memory rows
   float posttexmatrices[24][4]{};   // per texgen: 3 post-transform rows
+  // XF normal-matrix memory (0x400-0x45F) as 32 rows, Dolphin's
+  // I_NORMALMATRICES: a draw with a per-vertex matrix index (skinned
+  // models) takes each vertex's normal rows from (posidx & 31), the rows of
+  // the position matrix it was skinned with.
+  float normalmatrices[32][4]{};
   // Lighting (S15): the 8 XF lights and the four material/ambient registers
   // (Dolphin I_MATERIALS: [0]=ambient0, [1]=ambient1, [2]=material0,
   // [3]=material1, integer RGBA 0..255). Only read on the lit path.
@@ -329,7 +362,7 @@ struct VertexShaderConstants {
   std::uint32_t fetch_arrays[16][4]{};
 };
 static_assert(sizeof(VertexShaderConstants) ==
-              (6 + 4 + 24 + 64 + 24) * 16 + 8 * (5 * 16) + 4 * 16 + 3 * 16 + 16 + 16 * 16);
+              (6 + 4 + 24 + 64 + 24 + 32) * 16 + 8 * (5 * 16) + 4 * 16 + 3 * 16 + 16 + 16 * 16);
 
 // Pixel-shader uniforms (Dolphin PixelShaderConstants subset): the four TEV
 // color registers (I_COLORS: [0] prev seed, [1..3] c0/c1/c2), the four konst
@@ -349,8 +382,21 @@ struct PixelShaderConstants {
   std::int32_t fogi[4]{};       // .y = b_magnitude, .w = b_shift
   float fogf[4]{};              // .x=A .y=C .z=center .w=width
   float fogrange[3][4]{};       // Dolphin I_FOGRANGE K table (indices 0..9)
+  // Indirect texturing (Dolphin I_TEXDIMS / I_INDTEXSCALE / I_INDTEXMTX,
+  // PixelShaderManager SetTexDims / SetTexCoordChanged / SetIndTexScaleChanged
+  // / SetIndMatrixChanged). Appended so the WGSL declares them only on the
+  // indirect path (a shorter struct over the same buffer stays valid).
+  // texdims[t].xy = texmap t's guest width/height; .zw = texcoord t's SU scale
+  // (BP 0x30+2t / 0x31+2t scale_minus_1 + 1).
+  std::int32_t texdims[8][4]{};
+  // [i/2]: .xy = ind stage 2(i/2) ss/ts shift, .zw = stage 2(i/2)+1 (TEXSCALE).
+  std::int32_t indtexscale[2][4]{};
+  // Per matrix m: [2m] = {ma, mc, me, 17 - scale}, [2m+1] = {mb, md, mf,
+  // 17 - scale}; s11 entries.
+  std::int32_t indtexmtx[6][4]{};
 };
-static_assert(sizeof(PixelShaderConstants) == (4 + 4 + 1 + 1 + 1 + 1 + 3) * 16);
+static_assert(sizeof(PixelShaderConstants) ==
+              (4 + 4 + 1 + 1 + 1 + 1 + 3 + 8 + 2 + 6) * 16);
 
 // --- Fixed decoded-vertex layout (slice) ------------------------------------
 //
@@ -389,8 +435,26 @@ inline std::uint32_t texmap_popcount(std::uint32_t v) {
   return n;
 }
 
-// Bit t set => an enabled TEV stage samples texmap t. Non-TEV textured draws use
-// texmap 0. A result with <=1 bit is the single-texmap fast path.
+// True when the TEV fragment runs Dolphin's fixed-point texcoord path (every
+// stage computes tevcoord through its indirect op): some stage's IND_CMD is
+// non-zero. All-zero IND_CMD is a passthrough, so such keys keep the plain
+// normalized-UV sampling and byte-identical WGSL.
+inline bool tev_indirect_path(const ShaderKey& key) {
+  if (key.tev_valid == 0u)
+    return false;
+  for (std::uint32_t n = 0; n < key.num_tev_stages; ++n) {
+    const TevStageKey& s = key.tev_stages[n];
+    if ((s.ind_bt | s.ind_fmt | s.ind_bias | s.ind_bs | s.ind_mtx_index |
+         s.ind_mtx_id | s.ind_sw | s.ind_tw | s.ind_lb_utclod |
+         s.ind_fb_addprev) != 0u)
+      return true;
+  }
+  return false;
+}
+
+// Bit t set => an enabled TEV stage samples texmap t, or a used indirect stage
+// looks up texmap t. Non-TEV textured draws use texmap 0. A result with <=1 bit
+// is the single-texmap fast path.
 inline std::uint32_t used_texmap_mask(const ShaderKey& key) {
   if (key.textured == 0u)
     return 0u;
@@ -402,6 +466,9 @@ inline std::uint32_t used_texmap_mask(const ShaderKey& key) {
     if (s.tevorders_enable != 0u)
       mask |= (1u << (s.tevorders_texmap & 7u));
   }
+  for (std::uint32_t i = 0; i < key.num_ind_stages && i < kMaxIndStages; ++i)
+    if ((key.ind_stage_used_mask & (1u << i)) != 0u)
+      mask |= (1u << (key.ind_stages[i].texmap & 7u));
   return mask != 0u ? mask : 1u;
 }
 

@@ -265,11 +265,129 @@ void emit_tev_fragment(std::string& out, const ShaderKey& key) {
             "    let col0i = vec4i(round(in.color0 * 255.0));\n"
             "    let col1i = vec4i(round(in.color1 * 255.0));\n");
 
+  // Indirect texturing (Dolphin PixelShaderGen): on this path every stage's
+  // texcoord is the s17.7 fixed-point tevcoord its indirect op produces, and
+  // samples divide it back by the texmap's guest size (sampleTexture,
+  // non-manual sampling; LOD bias is not applied, as on the plain path).
+  const bool ind = tev_indirect_path(key);
+  const bool can_sample = key.num_tex_gens > 0 && key.textured != 0;
+  if (ind) {
+    emit(out, "    var alphabump = 0;\n"
+              "    var tevcoord = vec2i(0, 0);\n"
+              "    var wrappedcoord = vec2i(0, 0);\n");
+    // fixpoint_uv{i} = (uv / q) * I_TEXDIMS[i].zw * 128 (q == 0 keeps uv).
+    if (key.num_tex_gens == 0)
+      emit(out, "    let fixpoint_uv0 = vec2i(0, 0);\n");
+    for (std::uint32_t i = 0; i < key.num_tex_gens; ++i)
+      emitf(out,
+            "    let fixpoint_uv%u = vec2i(select(in.uv%u.xy / in.uv%u.z, "
+            "in.uv%u.xy, in.uv%u.z == 0.0) * vec2f(psc.texdims[%u].zw * 128));\n",
+            i, i, i, i, i, i);
+    // Indirect lookups: iindtex{i} = sample(texmap, fixpoint_uv >> texscale).abg.
+    for (std::uint32_t i = 0; i < key.num_ind_stages && i < kMaxIndStages; ++i) {
+      if ((key.ind_stage_used_mask & (1u << i)) == 0u)
+        continue;
+      std::uint32_t tc = key.ind_stages[i].texcoord;
+      // Quirk (Dolphin): a texcoord past numtexgens reads texcoord 0.
+      if (tc >= key.num_tex_gens)
+        tc = 0;
+      const std::uint32_t tmap = key.ind_stages[i].texmap & 7u;
+      const std::uint32_t tunit = multi_texmap ? tmap : 0u;
+      if (can_sample)
+        emitf(out,
+              "    let iindtex%u = vec4i(round(textureSample(tex%u, samp%u, "
+              "vec2f(fixpoint_uv%u >> vec2u(psc.indtexscale[%u].%s)) / "
+              "vec2f(psc.texdims[%u].xy * 128)) * 255.0)).abg;\n",
+              i, tunit, tunit, tc, i / 2u, (i & 1u) ? "zw" : "xy", tmap);
+      else
+        emitf(out, "    let iindtex%u = vec3i(0, 0, 0);\n", i);
+    }
+  }
+
   for (std::uint32_t n = 0; n < key.num_tev_stages; ++n) {
     const TevStageKey& s = key.tev_stages[n];
     emitf(out, "    // TEV stage %u\n", n);
 
+    std::uint32_t texcoord = s.tevorders_texcoord;
+    if (texcoord >= key.num_tex_gens)
+      texcoord = 0;
+
+    // Indirect op (Dolphin WriteStage). A stage reading an indirect stage past
+    // numindstages skips the offset; wrap and add-prev still apply.
+    if (ind) {
+      emit(out, "    // indirect op\n");
+      const bool has_ind_stage = s.ind_bt < key.num_ind_stages;
+      if (has_ind_stage && s.ind_bs != 0u) {
+        // Bump alpha: the low bits of the selected component, 5 significant.
+        static const char kAlphaSel[4] = {'x', 'x', 'y', 'z'};
+        static const unsigned kAlphaShift[4] = {0u, 5u, 4u, 3u};
+        emitf(out, "    alphabump = (iindtex%u.%c << %uu) & 248;\n", s.ind_bt,
+              kAlphaSel[s.ind_bs & 3u], kAlphaShift[s.ind_fmt & 3u]);
+      }
+      if (has_ind_stage && s.ind_mtx_index != 0u) {
+        // Format shift, then bias (-128 for ITF_8, else +1) on the selected
+        // components.
+        static const unsigned kFmtShift[4] = {0u, 3u, 4u, 5u};
+        const int add = s.ind_fmt == 0u ? -128 : 1;
+        emitf(out,
+              "    let iindtevcrd%u = (iindtex%u >> vec3u(%uu)) + vec3i(%d, %d, %d);\n",
+              n, s.ind_bt, kFmtShift[s.ind_fmt & 3u], (s.ind_bias & 1u) ? add : 0,
+              (s.ind_bias & 2u) ? add : 0, (s.ind_bias & 4u) ? add : 0);
+        // Matrix (each has two rows; .w is 17 - scale): static, or the
+        // dynamic S/T forms that scale the regular coord by one offset.
+        const std::uint32_t mtx = 2u * (s.ind_mtx_index - 1u);
+        bool shift = true;
+        if (s.ind_mtx_id == 0u)
+          emitf(out,
+                "    var indtevtrans%u = vec2i(dot(psc.indtexmtx[%u].xyz, iindtevcrd%u), "
+                "dot(psc.indtexmtx[%u].xyz, iindtevcrd%u)) >> vec2u(3u);\n",
+                n, mtx, n, mtx + 1u, n);
+        else if (s.ind_mtx_id == 1u)
+          emitf(out,
+                "    var indtevtrans%u = (fixpoint_uv%u * iindtevcrd%u.xx) >> vec2u(8u);\n",
+                n, texcoord, n);
+        else if (s.ind_mtx_id == 2u)
+          emitf(out,
+                "    var indtevtrans%u = (fixpoint_uv%u * iindtevcrd%u.yy) >> vec2u(8u);\n",
+                n, texcoord, n);
+        else {
+          emitf(out, "    var indtevtrans%u = vec2i(0, 0);\n", n);
+          shift = false;
+        }
+        if (shift)
+          emitf(out,
+                "    { let w = psc.indtexmtx[%u].w; indtevtrans%u = select("
+                "indtevtrans%u << vec2u(u32(-w)), indtevtrans%u >> vec2u(u32(w)), "
+                "w >= 0); }\n",
+                mtx, n, n, n);
+      } else {
+        emitf(out, "    let indtevtrans%u = vec2i(0, 0);\n", n);
+      }
+      // Wrap the regular coord: off, 256..16 texels (s17.7), or 0.
+      auto wrapped = [&](std::uint8_t wrap, char comp) -> std::string {
+        char b[96];
+        if (wrap == 0u)
+          std::snprintf(b, sizeof b, "fixpoint_uv%u.%c", texcoord, comp);
+        else if (wrap >= 6u) // 7 (invalid) behaves as ITW_0
+          std::snprintf(b, sizeof b, "0");
+        else
+          std::snprintf(b, sizeof b, "(fixpoint_uv%u.%c & ((%u << 7) - 1))", texcoord,
+                        comp, 256u >> (wrap - 1u));
+        return b;
+      };
+      emitf(out, "    wrappedcoord = vec2i(%s, %s);\n", wrapped(s.ind_sw, 'x').c_str(),
+            wrapped(s.ind_tw, 'y').c_str());
+      if (s.ind_fb_addprev != 0u)
+        emitf(out, "    tevcoord = tevcoord + wrappedcoord + indtevtrans%u;\n", n);
+      else
+        emitf(out, "    tevcoord = wrappedcoord + indtevtrans%u;\n", n);
+      // Emulate s24 overflows.
+      emit(out, "    tevcoord = (tevcoord << vec2u(8u)) >> vec2u(8u);\n");
+    }
+
     // Rasterized color, if referenced (RASC=10/RASA=11 color; RASA=5 alpha).
+    // Channels 5/6 are the indirect bump alpha (Dolphin tev_ras_table), which
+    // is zero off the indirect path.
     const bool uses_ras =
         cc_uses(s, 10) || cc_uses(s, 11) || ac_uses(s, 5);
     if (uses_ras) {
@@ -277,6 +395,10 @@ void emit_tev_fragment(std::string& out, const ShaderKey& key) {
                             ? "col0i"
                             : s.tevorders_colorchan == 1 ? "col1i"
                                                          : "vec4i(0,0,0,0)";
+      if (ind && s.tevorders_colorchan == 5)
+        src = "vec4i(alphabump)";
+      else if (ind && s.tevorders_colorchan == 6)
+        src = "vec4i(alphabump | (alphabump >> 5u))";
       emitf(out, "    rastemp = %s.%c%c%c%c;\n", src,
             kRgbaSwizzle[s.ras_swap[0]], kRgbaSwizzle[s.ras_swap[1]],
             kRgbaSwizzle[s.ras_swap[2]], kRgbaSwizzle[s.ras_swap[3]]);
@@ -284,11 +406,16 @@ void emit_tev_fragment(std::string& out, const ShaderKey& key) {
 
     // Texture sample for this stage. texunit is 0 on the single-texmap fast path
     // (byte-identical output) or the stage's texmap when >1 texmap is combined.
-    std::uint32_t texcoord = s.tevorders_texcoord;
-    if (texcoord >= key.num_tex_gens)
-      texcoord = 0;
     const std::uint32_t texunit = multi_texmap ? (s.tevorders_texmap & 7u) : 0u;
-    if (s.tevorders_enable != 0 && key.num_tex_gens > 0 && key.textured != 0) {
+    if (ind && s.tevorders_enable != 0 && can_sample) {
+      emitf(out,
+            "    rawtextemp = vec4i(round(textureSample(tex%u, samp%u, vec2f(tevcoord) / "
+            "vec2f(psc.texdims[%u].xy * 128)) * 255.0));\n",
+            texunit, texunit, s.tevorders_texmap & 7u);
+      emitf(out, "    textemp = rawtextemp.%c%c%c%c;\n",
+            kRgbaSwizzle[s.tex_swap[0]], kRgbaSwizzle[s.tex_swap[1]],
+            kRgbaSwizzle[s.tex_swap[2]], kRgbaSwizzle[s.tex_swap[3]]);
+    } else if (s.tevorders_enable != 0 && key.num_tex_gens > 0 && key.textured != 0) {
       // Dolphin PixelShaderGen divides every texcoord by its q (unless 0),
       // not only STQ texgens: a dual-transform post matrix can leave an ST
       // texgen's q != 1, and the hardware divides it all the same.
@@ -768,6 +895,8 @@ std::string generate_wgsl(const ShaderKey& key) {
   // + materials); the plain path declares only the leading fields (a smaller
   // WGSL struct over the same buffer is valid), keeping every existing golden
   // byte-identical.
+  if (needs_uniform_full || uses_cached || fetch)
+    emit(out, "    normalmatrices: array<vec4f, 32>,\n");
   if (needs_uniform_full || fetch)
     emit(out, "    lights: array<Light, 8>,\n"
               "    materials: array<vec4i, 4>,\n");
@@ -793,8 +922,15 @@ std::string generate_wgsl(const ShaderKey& key) {
               "    fogcolor: vec4i,\n"
               "    fogi: vec4i,\n"
               "    fogf: vec4f,\n"
-              "    fogrange: array<vec4f, 3>,\n"
-              "};\n"
+              "    fogrange: array<vec4f, 3>,\n");
+    // Indirect constants (I_TEXDIMS/I_INDTEXSCALE/I_INDTEXMTX) sit at the end
+    // of the C struct; declared only on the indirect path so every other TEV
+    // shader stays byte-identical.
+    if (tev_indirect_path(key))
+      emit(out, "    texdims: array<vec4i, 8>,\n"
+                "    indtexscale: array<vec4i, 2>,\n"
+                "    indtexmtx: array<vec4i, 6>,\n");
+    emit(out, "};\n"
               "@group(2) @binding(0) var<uniform> psc: PixelShaderConstants;\n");
   }
   if (key.textured != 0) {
@@ -884,6 +1020,20 @@ std::string generate_wgsl(const ShaderKey& key) {
               "    let p1 = vsc.posnormalmatrix[1];\n"
               "    let p2 = vsc.posnormalmatrix[2];\n");
   }
+  // Normal-matrix rows for normals, tangents and binormals (Dolphin
+  // VertexShaderGen dolphin_normal_matrix): per vertex from (posidx & 31) when
+  // the format carries a matrix index, else the current matrix's.
+  if (needs_uniform_full || uses_cached) {
+    if (key.has_pos_mtx_idx != 0)
+      emit(out, "    let nidx = posidx & 31;\n"
+                "    let n0 = vsc.normalmatrices[nidx].xyz;\n"
+                "    let n1 = vsc.normalmatrices[(nidx + 1) & 31].xyz;\n"
+                "    let n2 = vsc.normalmatrices[(nidx + 2) & 31].xyz;\n");
+    else
+      emit(out, "    let n0 = vsc.posnormalmatrix[3].xyz;\n"
+                "    let n1 = vsc.posnormalmatrix[4].xyz;\n"
+                "    let n2 = vsc.posnormalmatrix[5].xyz;\n");
+  }
   emit(out, "    let pos4 = vec4f(in.rawpos, 1.0);\n"
             "    let viewpos = vec4f(dot(p0, pos4), dot(p1, pos4), "
             "dot(p2, pos4), 1.0);\n"
@@ -914,9 +1064,9 @@ std::string generate_wgsl(const ShaderKey& key) {
     // there are none, leaving the material term intact.
     if (lit)
       emitf(out, "    let _normal = normalize(vec3f("
-                 "dot(vsc.posnormalmatrix[3].xyz, %s), "
-                 "dot(vsc.posnormalmatrix[4].xyz, %s), "
-                 "dot(vsc.posnormalmatrix[5].xyz, %s)));\n",
+                 "dot(n0, %s), "
+                 "dot(n1, %s), "
+                 "dot(n2, %s)));\n",
             normal_in, normal_in, normal_in);
     else
       emit(out, "    let _normal = vec3f(0.0, 0.0, 1.0);\n");
@@ -1025,14 +1175,14 @@ std::string generate_wgsl(const ShaderKey& key) {
       // the view-space tangent/binormal to the emboss-source texgen's coords.
       // Tangent/binormal go to view space via the normal matrix (rows 3-5).
       emitf(out, "        let tn%u = vec3f("
-                 "dot(vsc.posnormalmatrix[3].xyz, %s), "
-                 "dot(vsc.posnormalmatrix[4].xyz, %s), "
-                 "dot(vsc.posnormalmatrix[5].xyz, %s));\n",
+                 "dot(n0, %s), "
+                 "dot(n1, %s), "
+                 "dot(n2, %s));\n",
             i, tangent_in, tangent_in, tangent_in);
       emitf(out, "        let bn%u = vec3f("
-                 "dot(vsc.posnormalmatrix[3].xyz, %s), "
-                 "dot(vsc.posnormalmatrix[4].xyz, %s), "
-                 "dot(vsc.posnormalmatrix[5].xyz, %s));\n",
+                 "dot(n0, %s), "
+                 "dot(n1, %s), "
+                 "dot(n2, %s));\n",
             i, binormal_in, binormal_in, binormal_in);
       emitf(out, "        let ld%u = normalize(vsc.lights[%uu].pos.xyz - "
                  "viewpos.xyz);\n",

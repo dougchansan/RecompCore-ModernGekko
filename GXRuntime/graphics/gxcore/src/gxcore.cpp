@@ -555,8 +555,8 @@ void GxCoreState::build_draw_plan_into(const ar::ConsumedDraw& draw,
     ++counters.cull_all_draws;
     return skip("genMode culls all");
   }
-  if (bits(gen_mode, 3, 16) != 0u)
-    ++counters.indirect_ignored;
+  // Indirect stages are consumed by the TEV path (below); indirect_ignored
+  // counts the residue (no combiner captured, or no texture to look up).
   // Alpha test is consumed by the TEV path (below); only count it as ignored
   // when no combiner was captured and we fall back to the passthrough fragment.
   if (!bp_valid_[0xC0] && bp_valid_[0xF3]) {
@@ -787,6 +787,36 @@ void GxCoreState::build_draw_plan_into(const ar::ConsumedDraw& draw,
           static_cast<std::uint8_t>(odd ? bits(ksel, 5, 19) : bits(ksel, 5, 9));
       swap_table(bits(ac, 2, 0), ts.ras_swap); // rswap
       swap_table(bits(ac, 2, 2), ts.tex_swap); // tswap
+      // Indirect op (IND_CMD, BP 0x10+n; Dolphin BPMemory.h TevStageIndirect).
+      const std::uint32_t ind = bp_valid_[0x10u + n] ? bp_regs_[0x10u + n] : 0u;
+      ts.ind_bt = static_cast<std::uint8_t>(bits(ind, 2, 0));
+      ts.ind_fmt = static_cast<std::uint8_t>(bits(ind, 2, 2));
+      ts.ind_bias = static_cast<std::uint8_t>(bits(ind, 3, 4));
+      ts.ind_bs = static_cast<std::uint8_t>(bits(ind, 2, 7));
+      ts.ind_mtx_index = static_cast<std::uint8_t>(bits(ind, 2, 9));
+      ts.ind_mtx_id = static_cast<std::uint8_t>(bits(ind, 2, 11));
+      ts.ind_sw = static_cast<std::uint8_t>(bits(ind, 3, 13));
+      ts.ind_tw = static_cast<std::uint8_t>(bits(ind, 3, 16));
+      ts.ind_lb_utclod = static_cast<std::uint8_t>(bits(ind, 1, 19));
+      ts.ind_fb_addprev = static_cast<std::uint8_t>(bits(ind, 1, 20));
+    }
+    // Indirect stages (Dolphin GetPixelShaderUid): genMode.numindstages, the
+    // stages an active TEV stage reads (nIndirectStagesUsed), and their
+    // RAS1_IREF texcoord/texmap (BP 0x27), recorded only for used stages.
+    std::uint32_t num_ind = bits(gen_mode, 3, 16);
+    if (num_ind > kMaxIndStages)
+      num_ind = kMaxIndStages;
+    key.num_ind_stages = static_cast<std::uint8_t>(num_ind);
+    for (std::uint32_t n = 0; n < stages; ++n)
+      if (tev_ind_active(key.tev_stages[n]))
+        key.ind_stage_used_mask |=
+            static_cast<std::uint8_t>(1u << key.tev_stages[n].ind_bt);
+    const std::uint32_t iref = bp_valid_[0x27] ? bp_regs_[0x27] : 0u;
+    for (std::uint32_t i = 0; i < num_ind; ++i) {
+      if ((key.ind_stage_used_mask & (1u << i)) == 0u)
+        continue;
+      key.ind_stages[i].texmap = static_cast<std::uint8_t>(bits(iref, 3, 6 * i));
+      key.ind_stages[i].texcoord = static_cast<std::uint8_t>(bits(iref, 3, 6 * i + 3));
     }
     if (bp_valid_[0xF3]) { // AlphaTest (BP 0xF3)
       const std::uint32_t at = bp_regs_[0xF3];
@@ -795,6 +825,12 @@ void GxCoreState::build_draw_plan_into(const ar::ConsumedDraw& draw,
       key.alpha_logic = static_cast<std::uint8_t>(bits(at, 2, 22));
     }
   }
+  // Indirect stages without the TEV path to apply them (passthrough fragment),
+  // or whose lookups have no bound texture, render without the offset.
+  if (bits(gen_mode, 3, 16) != 0u &&
+      (key.tev_valid == 0u ||
+       (key.ind_stage_used_mask != 0u && key.textured == 0u)))
+    ++counters.indirect_ignored;
 
   PipelineKey& pipe = plan.pipeline;
   pipe.cull_mode = static_cast<std::uint8_t>(cull);
@@ -1029,6 +1065,26 @@ void GxCoreState::build_draw_plan_into(const ar::ConsumedDraw& draw,
       }
     }
   }
+  // The whole normal-matrix memory, for per-vertex matrix indices: row r is
+  // row r % 3 of normal matrix r / 3 (as the per-matrix slots store it), with
+  // the same fallback to the position rows for a matrix never captured.
+  if (walk.has_pos_mtx_idx) {
+    for (std::uint32_t r = 0; r < 32u; ++r) {
+      const std::uint32_t m = r / 3u;
+      const std::uint32_t k = r % 3u;
+      const bool valid =
+          m < DOL_GX_RECOMP_NORMAL_MATRIX_COUNT &&
+          draw.normal_matrix_word_mask[m] == ((1u << DOL_GX_RECOMP_NORMAL_MATRIX_WORDS) - 1u);
+      if (valid) {
+        c.normalmatrices[r][0] = draw.normal_matrices[m][3u * k + 0u];
+        c.normalmatrices[r][1] = draw.normal_matrices[m][3u * k + 1u];
+        c.normalmatrices[r][2] = draw.normal_matrices[m][3u * k + 2u];
+        c.normalmatrices[r][3] = 0.f;
+      } else {
+        (void)load_matrix_row(draw, r, c.normalmatrices[r]);
+      }
+    }
+  }
 
   // Lighting uniforms (S15): 8 XF lights + 4 material/ambient registers. Light
   // words (gx_recomp.h): [3]=RGBA8 color, [4..6]=cosatt, [7..9]=distatt,
@@ -1216,6 +1272,81 @@ void GxCoreState::build_draw_plan_into(const ar::ConsumedDraw& draw,
         static_cast<std::int32_t>(bits(bp_regs_[0xF3], 8, 0));
     plan.pixel_constants.alpha_ref[1] =
         static_cast<std::int32_t>(bits(bp_regs_[0xF3], 8, 8));
+  }
+
+  // Indirect texturing uniforms (Dolphin PixelShaderManager). Only the
+  // indirect-path WGSL reads them, so other draws leave them zero.
+  if (tev_indirect_path(key)) {
+    PixelShaderConstants& ps = plan.pixel_constants;
+    // I_TEXDIMS.xy (SetTexDims): each sampled texmap's guest size, the
+    // texture bound at that slot (the flat texture on the single-texmap path).
+    const std::uint32_t used = used_texmap_mask(key);
+    for (std::uint32_t t = 0; t < 8u; ++t) {
+      if ((used & (1u << t)) == 0u)
+        continue;
+      std::uint32_t w = plan.tex_width, h = plan.tex_height;
+      if (plan.texmap_mask != 0u) {
+        w = plan.textures[t].width;
+        h = plan.textures[t].height;
+      }
+      ps.texdims[t][0] = static_cast<std::int32_t>(w);
+      ps.texdims[t][1] = static_cast<std::int32_t>(h);
+    }
+    // I_TEXDIMS.zw (SetTexCoordChanged): texcoord i's SU scale, BP 0x30+2i (s)
+    // / 0x31+2i (t) scale_minus_1 + 1. The SDK writes these from the texmap
+    // each texcoord feeds (__GXSetSUTexSize); when the stream never did, fall
+    // back to that texmap's size the same way (TEV orders, then IREF).
+    for (std::uint32_t i = 0; i < key.num_tex_gens; ++i) {
+      const std::uint32_t rs = 0x30u + 2u * i, rt = 0x31u + 2u * i;
+      std::int32_t fs = 1, ft = 1;
+      bool found = false;
+      for (std::uint32_t n = 0; n < key.num_tev_stages && !found; ++n) {
+        const TevStageKey& s = key.tev_stages[n];
+        if (s.tevorders_enable != 0u && s.tevorders_texcoord == i) {
+          fs = ps.texdims[s.tevorders_texmap & 7u][0];
+          ft = ps.texdims[s.tevorders_texmap & 7u][1];
+          found = true;
+        }
+      }
+      for (std::uint32_t k = 0; k < key.num_ind_stages && !found; ++k) {
+        if ((key.ind_stage_used_mask & (1u << k)) != 0u &&
+            key.ind_stages[k].texcoord == i) {
+          fs = ps.texdims[key.ind_stages[k].texmap & 7u][0];
+          ft = ps.texdims[key.ind_stages[k].texmap & 7u][1];
+          found = true;
+        }
+      }
+      ps.texdims[i][2] = bp_valid_[rs] ? static_cast<std::int32_t>(bits(bp_regs_[rs], 16, 0)) + 1
+                                       : (fs > 0 ? fs : 1);
+      ps.texdims[i][3] = bp_valid_[rt] ? static_cast<std::int32_t>(bits(bp_regs_[rt], 16, 0)) + 1
+                                       : (ft > 0 ? ft : 1);
+    }
+    // I_INDTEXSCALE (SetIndTexScaleChanged): RAS1_SS0/SS1 (BP 0x25/0x26).
+    for (std::uint32_t hi = 0; hi < 2u; ++hi) {
+      const std::uint32_t ss = bp_valid_[0x25u + hi] ? bp_regs_[0x25u + hi] : 0u;
+      for (std::uint32_t k = 0; k < 4u; ++k)
+        ps.indtexscale[hi][k] = static_cast<std::int32_t>(bits(ss, 4, 4 * k));
+    }
+    // I_INDTEXMTX (SetIndMatrixChanged): IND_MTXA/B/C at BP 0x06+3m, s11
+    // entries; scale = s0 | s1 << 2 | s2 << 4 (MTXC keeps only bit 22).
+    auto s11 = [](std::uint32_t v) { return static_cast<std::int32_t>(v << 21) >> 21; };
+    for (std::uint32_t m = 0; m < 3u; ++m) {
+      const std::uint32_t a = bp_valid_[0x06u + 3u * m] ? bp_regs_[0x06u + 3u * m] : 0u;
+      const std::uint32_t b = bp_valid_[0x07u + 3u * m] ? bp_regs_[0x07u + 3u * m] : 0u;
+      const std::uint32_t cc = bp_valid_[0x08u + 3u * m] ? bp_regs_[0x08u + 3u * m] : 0u;
+      const std::int32_t scale =
+          static_cast<std::int32_t>(bits(a, 2, 22) | (bits(b, 2, 22) << 2) | (bits(cc, 1, 22) << 4));
+      std::int32_t* r0 = ps.indtexmtx[2u * m];
+      std::int32_t* r1 = ps.indtexmtx[2u * m + 1u];
+      r0[0] = s11(bits(a, 11, 0));  // ma
+      r0[1] = s11(bits(b, 11, 0));  // mc
+      r0[2] = s11(bits(cc, 11, 0)); // me
+      r0[3] = 17 - scale;
+      r1[0] = s11(bits(a, 11, 11));  // mb
+      r1[1] = s11(bits(b, 11, 11));  // md
+      r1[2] = s11(bits(cc, 11, 11)); // mf
+      r1[3] = 17 - scale;
+    }
   }
 
   // Fog (S16, Dolphin PixelShaderManager fog constants). The fog uniform lives

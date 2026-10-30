@@ -34,8 +34,11 @@ struct DrawData {
 // now emits per-texmap samplers + a wider texture bind group under an unchanged
 // key, so a persisted v4 pipeline for such a draw is stale). v6: eight texgens
 // (the key's texgen array and so its layout grew). v7: GPU vertex fetch
-// (ShaderKey::fetch, VertexShaderConstants grew).
-constexpr uint32_t GXCorePipelineConfigVersion = 7;
+// (ShaderKey::fetch, VertexShaderConstants grew). v8: indirect texturing
+// (TevStageKey IND_CMD fields + ShaderKey indirect stages; PixelShaderConstants
+// grew texdims/indtexscale/indtexmtx; indirect texmaps join the texture group).
+// v9: per-vertex normal matrices (VertexShaderConstants grew normalmatrices).
+constexpr uint32_t GXCorePipelineConfigVersion = 9;
 
 struct PipelineConfig {
   uint32_t version = GXCorePipelineConfigVersion;
