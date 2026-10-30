@@ -47,6 +47,8 @@ add_library(videocommon
   BPMemory.cpp
   BPMemory.h
   BPStructs.cpp
+  ColosseumNativeText.cpp
+  ColosseumNativeText.h
   BPStructs.h
   CommandProcessor.cpp
   CommandProcessor.h

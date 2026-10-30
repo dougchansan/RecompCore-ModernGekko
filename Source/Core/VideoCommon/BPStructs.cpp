@@ -26,6 +26,7 @@
 #include "VideoCommon/AuroraMirror.h"
 #include "VideoCommon/BPMemory.h"
 #include "VideoCommon/BoundingBox.h"
+#include "VideoCommon/ColosseumNativeText.h"
 #include "VideoCommon/Fifo.h"
 #include "VideoCommon/FramebufferManager.h"
 #include "VideoCommon/GeometryShaderManager.h"
@@ -840,6 +841,11 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
 // Call browser: OpcodeDecoding.cpp RunCallback::OnBP()
 void LoadBPReg(u8 reg, u32 value, int cycles_into_future)
 {
+  // Glyph reports from the Colosseum recomp module, not GX state; they leave
+  // bpmem and a pending BP mask alone.
+  if (ColosseumNativeText::OnBPWrite(reg, value))
+    return;
+
   auto& system = Core::System::GetInstance();
 
   int oldval = ((u32*)&bpmem)[reg];

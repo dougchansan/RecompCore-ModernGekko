@@ -354,6 +354,11 @@ private:
 
   TCacheEntry* LoadImpl(u32 stage, bool force_reload);
 
+  // Colosseum native text (ColosseumNativeText.h): the output-resolution mirror
+  // of the game's glyph scratch texture, and the host-font glyphs written into it.
+  RcTcacheEntry GetColosseumTextMirror(const TextureInfo& texture_info);
+  void FlushColosseumText();
+
   bool CreateUtilityTextures();
 
   void SetBackupConfig(const VideoConfig& config);
@@ -426,6 +431,10 @@ private:
   // m_bound_textures are actually active in the current draw
   // It's valid for textures to be in here after they've been invalidated
   std::array<RcTcacheEntry, 8> m_bound_textures{};
+
+  RcTcacheEntry m_colosseum_text_mirror;
+  u32 m_colosseum_text_scale = 0;
+  std::unordered_map<u64, std::unique_ptr<AbstractTexture>> m_colosseum_text_glyphs;
 
   TexPool m_texture_pool;
   u64 m_last_entry_id = 0;

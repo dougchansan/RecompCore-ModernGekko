@@ -859,3 +859,66 @@ int dolrecomp_native_gx_set_current_mtx(CPUState *ctx) {
   ctx->pc = ctx->lr;
   return dolrecomp_handled(which);
 }
+
+// ---------------------------------------------------------------------------
+// Colosseum native-text glyph markers.
+//
+// The game draws text by copying each glyph bitmap from its font into a 512x512
+// I4 scratch texture (a ring of glyph slots, fn_800FD69C) and drawing a quad
+// from that slot. A host that redraws text with a real font at output
+// resolution needs to know which character went into which slot, so these two
+// observers send it through the FIFO as writes to BP registers 0x6A-0x6D, which
+// no GX function uses: in FIFO order with the draws that sample the slot. Both
+// always return 0, so the game code runs unchanged; a host that does not know
+// the registers ignores them.
+
+// u16* _msgGetCodeInfo(MSG_TASK_WORK*, u16 code, tagFONT_INFO**)   0x800FDF1C
+// Every glyph blit follows the lookup of its own code.
+static uint32_t dolrecomp_msg_glyph_code;
+
+int dolrecomp_native_msg_get_code_info(CPUState *ctx) {
+  dolrecomp_msg_glyph_code = (uint32_t)ctx->gpr[4] & 0xFFFFu;
+  return 0;
+}
+
+// void fn_800FD69C(MSG_TASK_WORK* work, u8* bitmap, s16 w, s16 h, s16 y_off)
+// The slot is the manager's pen (mgr+0x18/0x1A) after the wrap the function
+// applies before copying; the font is work+0x20.
+int dolrecomp_native_msg_glyph_blit(CPUState *ctx) {
+  if (!dolrecomp_subst_enabled())
+    return 0;
+  const uint8_t *mgrp = dolrecomp_guest_bytes(ctx, 0x80478B08u, 4u);
+  const uint8_t *mgr = mgrp ? dolrecomp_guest_bytes(ctx, read_be32(mgrp), 0x20u) : 0;
+  const uint8_t *work = dolrecomp_guest_bytes(ctx, (uint32_t)ctx->gpr[3], 0x24u);
+  if (!mgr || !work)
+    return 0;
+  const int32_t w = (int16_t)ctx->gpr[5];
+  const int32_t h = (int16_t)ctx->gpr[6];
+  int32_t x = (int16_t)read_be16(mgr + 0x18);
+  int32_t y = (int16_t)read_be16(mgr + 0x1A);
+  if (x + w + 2 >= 0x200) {
+    y += mgr[0x1C] + 2;
+    x = 2;
+    if (y + work[0x23] + 2 >= 0x200)
+      y = 1;
+  }
+  if (w <= 0 || w > 63 || h <= 0 || h > 63 || x < 0 || y < 0)
+    return 0;
+  const uint32_t font = read_be16(work + 0x20) & 7u;
+  const uint32_t bitmap = (uint32_t)ctx->gpr[4] & 0x1FFFFFFFu;
+  const uint32_t atlas = read_be32(mgr + 0x14) & 0x1FFFFFFFu;
+  const uint32_t regs[5] = {
+      (0x6Au << 24) | ((uint32_t)x & 0x1FFu) | (((uint32_t)y & 0x1FFu) << 9) | (font << 18),
+      (0x6Bu << 24) | (uint32_t)w | ((uint32_t)h << 6) | (((uint32_t)ctx->gpr[7] & 0xFFu) << 12),
+      (0x6Cu << 24) | (atlas >> 5),
+      (0x6Du << 24) | dolrecomp_msg_glyph_code | ((bitmap & 0xFFu) << 16),
+      (0x6Eu << 24) | (bitmap >> 8),
+  };
+  uint8_t s[25];
+  for (int i = 0; i < 5; i++) {
+    s[5 * i] = 0x61;
+    write_be32(s + 5 * i + 1, regs[i]);
+  }
+  (void)dolrecomp_gx_emit(ctx, s, sizeof(s));
+  return 0;
+}

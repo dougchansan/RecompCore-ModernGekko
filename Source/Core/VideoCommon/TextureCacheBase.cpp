@@ -46,6 +46,7 @@
 #include "VideoCommon/Assets/CustomTextureData.h"
 #include "VideoCommon/Assets/TextureAssetUtils.h"
 #include "VideoCommon/BPMemory.h"
+#include "VideoCommon/ColosseumNativeText.h"
 #include "VideoCommon/ColosseumTextUpscale.h"
 #include "VideoCommon/FramebufferManager.h"
 #include "VideoCommon/GraphicsModSystem/Runtime/FBInfo.h"
@@ -171,6 +172,8 @@ void TextureCacheBase::Invalidate()
 
   for (auto& bind : m_bound_textures)
     bind.reset();
+  m_colosseum_text_mirror.reset();
+  m_colosseum_text_glyphs.clear();
   m_textures_by_hash.clear();
   m_textures_by_address.clear();
 
@@ -1292,6 +1295,11 @@ TCacheEntry* TextureCacheBase::Load(u32 stage)
 
 TCacheEntry* TextureCacheBase::LoadImpl(u32 stage, bool force_reload)
 {
+  // Glyphs reported before this draw land in the text mirror before anything
+  // samples it, including a stage that reuses the mirror without a lookup.
+  if (m_colosseum_text_mirror && ColosseumNativeText::HasPending())
+    FlushColosseumText();
+
   // if this stage was not invalidated by changes to texture registers, keep the current texture
   if (!force_reload && TMEM::IsValid(stage) && m_bound_textures[stage])
   {
@@ -1353,6 +1361,9 @@ RcTcacheEntry TextureCacheBase::GetTexture(const int textureCacheSafetyColorSamp
 {
   if (!texture_info.IsDataValid())
     return {};
+
+  if (RcTcacheEntry text = GetColosseumTextMirror(texture_info))
+    return text;
 
   // Hash assigned to texcache entry (also used to generate filenames used for texture dumping and
   // custom texture lookup)
@@ -1656,6 +1667,94 @@ RcTcacheEntry TextureCacheBase::GetTexture(const int textureCacheSafetyColorSamp
 // Note: the following function assumes all CustomTextureData has a single slice.  This is verified
 // with the 'GameTexture::Validate' function after the data is loaded. Only a single slice is
 // expected because each texture is loaded into a texture array
+RcTcacheEntry TextureCacheBase::GetColosseumTextMirror(const TextureInfo& texture_info)
+{
+  if (texture_info.IsFromTmem() || texture_info.GetTextureFormat() != TextureFormat::I4 ||
+      texture_info.GetRawWidth() != 512 || texture_info.GetRawHeight() != 512)
+  {
+    return {};
+  }
+  if (!ColosseumNativeText::Active() ||
+      (texture_info.GetRawAddress() & 0x1FFFFFFF) != ColosseumNativeText::AtlasAddress())
+  {
+    if (!ColosseumNativeText::Active())
+    {
+      m_colosseum_text_mirror.reset();
+      m_colosseum_text_glyphs.clear();
+    }
+    return {};
+  }
+  FlushColosseumText();
+  return m_colosseum_text_mirror;
+}
+
+void TextureCacheBase::FlushColosseumText()
+{
+  const u32 scale = std::clamp<u32>(g_framebuffer_manager->GetEFBScale(), 1,
+                                    std::max<u32>(g_backend_info.MaxTextureSize / 512, 1));
+  if (!m_colosseum_text_mirror || m_colosseum_text_scale != scale)
+  {
+    m_colosseum_text_mirror.reset();
+    m_colosseum_text_glyphs.clear();
+    const TextureConfig config(512 * scale, 512 * scale, 1, 1, 1, AbstractTextureFormat::RGBA8,
+                               AbstractTextureFlag_RenderTarget,
+                               AbstractTextureType::Texture_2DArray);
+    std::optional<TexPoolEntry> mirror = AllocateTexture(config);
+    if (!mirror)
+      return;
+    // Start empty: the game copies every glyph again each time it draws it.
+    const TextureConfig blank_config(4, 4, 1, 1, 1, AbstractTextureFormat::RGBA8, 0,
+                                     AbstractTextureType::Texture_2DArray);
+    std::unique_ptr<AbstractTexture> blank = g_gfx->CreateTexture(blank_config);
+    if (!blank)
+      return;
+    const std::array<u8, 4 * 4 * 4> zeros{};
+    blank->Load(0, 4, 4, 4, zeros.data(), zeros.size());
+    g_gfx->ScaleTexture(mirror->framebuffer.get(), config.GetRect(), blank.get(),
+                        blank_config.GetRect());
+    m_colosseum_text_mirror =
+        std::make_shared<TCacheEntry>(std::move(mirror->texture), std::move(mirror->framebuffer));
+    m_colosseum_text_mirror->SetGeneralParameters(ColosseumNativeText::AtlasAddress(),
+                                                  512 * 512 / 2,
+                                                  TextureAndTLUTFormat(TextureFormat::I4), false);
+    m_colosseum_text_mirror->SetDimensions(512, 512, 1);
+    m_colosseum_text_mirror->is_custom_tex = true;
+    // Never trust a hash of the scratch memory: LoadImpl comes back here instead.
+    m_colosseum_text_mirror->invalidated = true;
+    m_colosseum_text_scale = scale;
+  }
+
+  std::vector<u8> rgba;
+  for (const ColosseumNativeText::Glyph& glyph : ColosseumNativeText::TakePending())
+  {
+    std::unique_ptr<AbstractTexture>& texture =
+        m_colosseum_text_glyphs[ColosseumNativeText::GlyphKey(glyph)];
+    if (!texture)
+    {
+      u32 width = 0, height = 0;
+      ColosseumNativeText::Rasterize(glyph, scale, &rgba, &width, &height);
+      texture = g_gfx->CreateTexture(TextureConfig(width, height, 1, 1, 1,
+                                                   AbstractTextureFormat::RGBA8, 0,
+                                                   AbstractTextureType::Texture_2DArray));
+      if (!texture)
+        continue;
+      texture->Load(0, width, height, width, rgba.data(), rgba.size());
+    }
+    const ColosseumNativeText::Rect r = ColosseumNativeText::ClearedRect(glyph);
+    const int x0 = std::max(r.x0, 0), y0 = std::max(r.y0, 0);
+    const int x1 = std::min(r.x1, 512), y1 = std::min(r.y1, 512);
+    if (x0 >= x1 || y0 >= y1)
+      continue;
+    const int s = static_cast<int>(scale);
+    const MathUtil::Rectangle<int> dst(x0 * s, y0 * s, x1 * s, y1 * s);
+    const MathUtil::Rectangle<int> src((x0 - r.x0) * s, (y0 - r.y0) * s, (x1 - r.x0) * s,
+                                       (y1 - r.y0) * s);
+    g_gfx->ScaleTexture(m_colosseum_text_mirror->framebuffer.get(), dst, texture.get(), src);
+  }
+  if (m_colosseum_text_glyphs.size() > 4096)
+    m_colosseum_text_glyphs.clear();
+}
+
 RcTcacheEntry TextureCacheBase::CreateTextureEntry(
     const TextureCreationInfo& creation_info, const TextureInfo& texture_info,
     const int safety_color_sample_size, VideoCommon::CustomTextureData* custom_texture_data,
