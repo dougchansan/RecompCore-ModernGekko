@@ -290,6 +290,11 @@ uint32_t g_fetchArraysFrame = UINT32_MAX;
 // (a re-copy to the same address updates in place, matching the live path).
 absl::flat_hash_map<uint32_t, TextureHandle> g_efbCopyTextures;
 
+// Host-drawn stand-ins for guest textures, by physical address
+// (write_host_texture): Colosseum's glyph texture, its glyphs drawn from a
+// host font at output resolution.
+absl::flat_hash_map<uint32_t, TextureHandle> g_hostTextures;
+
 } // namespace
 
 wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
@@ -547,7 +552,33 @@ void reset_texture_cache() {
   g_textureHashMemo.clear();
   g_textureHashMemoFrame = UINT32_MAX;
   g_efbCopyTextures.clear();
+  g_hostTextures.clear();
   g_textureCacheStats = {};
+}
+
+void write_host_texture(uint32_t address, uint32_t width, uint32_t height, uint32_t x, uint32_t y,
+                        uint32_t w, uint32_t h, const uint8_t* rgba) {
+  TextureHandle& texture = g_hostTextures[address & 0x01FFFFFFu];
+  if (!texture || texture->size.width != width || texture->size.height != height) {
+    // Starts empty: the game copies each glyph again every time it draws it.
+    const std::vector<uint8_t> zeros(static_cast<size_t>(width) * height * 4u);
+    texture = new_static_texture_2d(width, height, 1, GX_TF_RGBA8_PC,
+                                    ArrayRef<uint8_t>{zeros.data(), zeros.size()}, false,
+                                    "GXCore Host Texture");
+  }
+  if (!texture || w == 0 || h == 0 || x + w > width || y + h > height)
+    return;
+  queue_texture_upload_data(rgba, w * 4u, h,
+                            wgpu::TexelCopyTextureInfo{.texture = texture->texture, .origin = {x, y, 0}},
+                            wgpu::Extent3D{w, h, 1});
+}
+
+void drop_host_texture(uint32_t address) { g_hostTextures.erase(address & 0x01FFFFFFu); }
+
+uint32_t host_texture_scale() {
+  // Output pixels per game pixel, rounded up: the game draws for 480 lines.
+  const uint32_t height = get_render_target_size().y;
+  return std::clamp<uint32_t>((height + 479u) / 480u, 1u, 8u);
 }
 
 const TextureCacheStats& texture_cache_stats() { return g_textureCacheStats; }
@@ -670,6 +701,10 @@ bool bind_plan_textures(const gxc::DrawPlan& plan, BindGroupRef* out) {
     if (efbIt != g_efbCopyTextures.end() && efbIt->second) {
       ++g_textureCacheStats.hits;
       return efbIt->second;
+    }
+    if (!g_hostTextures.empty()) {
+      if (auto host = g_hostTextures.find(address & 0x01FFFFFFu); host != g_hostTextures.end())
+        return host->second;
     }
     if (data == nullptr)
       return TextureHandle{};

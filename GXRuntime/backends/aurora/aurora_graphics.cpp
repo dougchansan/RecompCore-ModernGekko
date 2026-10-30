@@ -27,6 +27,10 @@ namespace aurora::gfx::gxcore {
 bool submit_draw_plan(const gxruntime::gxcore::DrawPlan& plan);
 void copy_efb_to_texture(const gxruntime::gxcore::EfbCopyCommand& cmd);
 void reset_texture_cache();
+void write_host_texture(uint32_t address, uint32_t width, uint32_t height, uint32_t x, uint32_t y,
+                        uint32_t w, uint32_t h, const uint8_t* rgba);
+void drop_host_texture(uint32_t address);
+uint32_t host_texture_scale();
 uint32_t interp_layers();
 void interp_set_active(uint32_t layers);
 bool interp_active();
@@ -116,6 +120,32 @@ void core_plan_observer(const gxruntime::gxcore::DrawPlan& plan, void*) {
 
 void core_copy_observer(const gxruntime::gxcore::EfbCopyCommand& cmd, void*) {
     aurora::gfx::gxcore::copy_efb_to_texture(cmd);
+}
+
+AuroraTextRasterizer g_text_rasterizer = nullptr;
+u32 g_text_words[5]{};
+u32 g_text_atlas = 0;
+
+// Colosseum glyph reports (aurora_backend.h): each one rewrites its slot of a
+// host texture standing in for the game's 512x512 glyph texture, at output
+// resolution, so the text the game draws from that slot comes from the font.
+void core_marker_observer(std::uint32_t reg, std::uint32_t value, void*) {
+    g_text_words[reg - 0x6Au] = value & 0xFFFFFFu;
+    if (reg != 0x6Eu || g_text_rasterizer == nullptr)
+        return;
+    const u32 scale = aurora::gfx::gxcore::host_texture_scale();
+    AuroraTextGlyph glyph{};
+    if (!g_text_rasterizer(g_text_words, scale, &glyph)) {
+        if (g_text_atlas != 0u)
+            aurora::gfx::gxcore::drop_host_texture(g_text_atlas);
+        g_text_atlas = 0;
+        return;
+    }
+    if (g_text_atlas != 0u && g_text_atlas != glyph.atlas)
+        aurora::gfx::gxcore::drop_host_texture(g_text_atlas);
+    g_text_atlas = glyph.atlas;
+    aurora::gfx::gxcore::write_host_texture(glyph.atlas, 512u * scale, 512u * scale, glyph.x, glyph.y,
+                                            glyph.width, glyph.height, glyph.rgba);
 }
 #endif
 
@@ -1203,6 +1233,14 @@ void aurora_backend_set_array_guest(u32 attr, u32 guest_address,
         gx_aurora::shadow_frontend_set_array(attr, guest_address, stride);
 #endif
     GXSetArray(static_cast<GXAttr>(attr), data, size, stride, false);
+}
+
+void aurora_backend_set_text_rasterizer(AuroraTextRasterizer rasterizer) {
+#if GXRUNTIME_HAS_AURORA_RECOMP
+    gx_aurora::g_text_rasterizer = rasterizer;
+#else
+    (void)rasterizer;
+#endif
 }
 
 void aurora_backend_load_texture(u8 slot, const void* data, u32 width, u32 height,

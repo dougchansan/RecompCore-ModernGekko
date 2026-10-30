@@ -115,6 +115,10 @@ public:
   // flushed (its geometry is in the pass) — so a GPU observer can resolve the
   // EFB into a texture at the copy's stream position.
   using CopyObserver = void (*)(const EfbCopyCommand& cmd, void* user);
+  // Fires for BP writes to 0x6A-0x6E, registers GX leaves unused, at their
+  // stream position: the Colosseum recomp reports each text glyph it copies
+  // into the game's glyph texture there (GXRuntime native_sdk.c).
+  using MarkerObserver = void (*)(std::uint32_t reg, std::uint32_t value, void* user);
 
   GxCoreSink();
 
@@ -128,6 +132,10 @@ public:
   void set_copy_observer(CopyObserver observer, void* user) {
     copy_observer_ = observer;
     copy_observer_user_ = user;
+  }
+  void set_marker_observer(MarkerObserver observer, void* user) {
+    marker_observer_ = observer;
+    marker_observer_user_ = user;
   }
 
   bool submit_packet(
@@ -162,6 +170,8 @@ private:
   void* plan_observer_user_ = nullptr;
   CopyObserver copy_observer_ = nullptr;
   void* copy_observer_user_ = nullptr;
+  MarkerObserver marker_observer_ = nullptr;
+  void* marker_observer_user_ = nullptr;
   GapCounters counters_{};
 };
 

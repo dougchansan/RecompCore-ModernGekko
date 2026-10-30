@@ -1487,6 +1487,9 @@ bool GxCoreSink::submit_packet(const ar::RenderPacket& packet) {
     if (packet.state.kind == ar::RenderStateKind::BpReg &&
         packet.state.index == 0x52u && copy_observer_ == nullptr)
       ++counters_.efb_copy_ignored;
+    if (packet.state.kind == ar::RenderStateKind::BpReg && packet.state.index >= 0x6Au &&
+        packet.state.index <= 0x6Eu && marker_observer_ != nullptr)
+      marker_observer_(packet.state.index, packet.state.value, marker_observer_user_);
   }
   // EFB copy: the resolved CopyDestination carries the copy params. Flush the
   // pending draw FIRST (its geometry must be in the pass the copy resolves),

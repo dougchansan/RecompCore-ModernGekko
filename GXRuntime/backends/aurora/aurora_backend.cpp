@@ -307,6 +307,7 @@ bool dol_aurora_initialize(int argc, char** argv,
     if (gx_aurora::g_gx_core_enabled) {
         gx_aurora::g_core_sink.set_plan_observer(gx_aurora::core_plan_observer, nullptr);
         gx_aurora::g_core_sink.set_copy_observer(gx_aurora::core_copy_observer, nullptr);
+        gx_aurora::g_core_sink.set_marker_observer(gx_aurora::core_marker_observer, nullptr);
         gx_aurora::g_core_submitted = 0;
         gx_aurora::g_core_rejected = 0;
         aurora::gfx::gxcore::reset_texture_cache();

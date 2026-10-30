@@ -77,6 +77,17 @@ void interp_finish_frame();
 // Drop the texture cache + reset its stats (start of a replay run).
 void reset_texture_cache();
 
+// A host-drawn texture standing in for the guest texture at `address`: draws
+// binding that address sample it instead of guest memory. Writes the RGBA8
+// region (x, y, w, h) of a width x height texture, (re)created empty when
+// first written or resized; the write lands before the draws that follow it.
+void write_host_texture(uint32_t address, uint32_t width, uint32_t height, uint32_t x, uint32_t y,
+                        uint32_t w, uint32_t h, const uint8_t* rgba);
+void drop_host_texture(uint32_t address);
+// Output pixels per game pixel for a host texture (render target height / 480,
+// rounded up).
+uint32_t host_texture_scale();
+
 // Texture-cache telemetry (S13 A3): proves the no-reconvert property. `uploads`
 // counts actual decode+upload (cache miss); `hits` counts cache reuse (no
 // re-decode) — on a static replay scene `uploads` must go to 0 after warm-up.

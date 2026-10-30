@@ -7,6 +7,8 @@
 
 #include "Common/CommonTypes.h"
 
+struct AuroraTextGlyph;
+
 // Colosseum text drawn with a real font at output resolution.
 //
 // The game copies each glyph from its bitmap font into a 512x512 I4 scratch
@@ -57,4 +59,10 @@ void Rasterize(const Glyph& glyph, u32 scale, std::vector<u8>* rgba, u32* width,
 
 // A key that identifies the rasterized image of a glyph.
 u64 GlyphKey(const Glyph& glyph);
+
+// For the in-process Aurora renderer (AuroraMirror, gxruntime/aurora_backend.h),
+// which sees the BP writes in its own command stream: one glyph's five words to
+// its pixels, clipped to the scratch texture. False while native text is off.
+// Called on Aurora's render thread only.
+bool RasterizeForAurora(const u32 words[5], u32 scale, AuroraTextGlyph* out);
 }  // namespace ColosseumNativeText

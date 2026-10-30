@@ -16,8 +16,10 @@
 #include "Core/System.h"
 #include "VideoCommon/BPMemory.h"
 #include "VideoCommon/CPMemory.h"
+#include "VideoCommon/ColosseumNativeText.h"
 #include "VideoCommon/Present.h"
 #include "VideoCommon/XFMemory.h"
+#include "gxruntime/aurora_backend.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -113,6 +115,14 @@ bool NativeReady()
   {
     ERROR_LOG_FMT(VIDEO, "Aurora native: {} lacks the aurora_native_* entry points", path);
     return false;
+  }
+  // Optional: Colosseum text from a host font, drawn by the renderer from the
+  // glyph reports in its command stream (ColosseumNativeText).
+  using TextRasterizerEntry = void (*)(AuroraTextRasterizer);
+  if (const auto set_text_rasterizer =
+          reinterpret_cast<TextRasterizerEntry>(symbol("aurora_native_set_text_rasterizer")))
+  {
+    set_text_rasterizer(ColosseumNativeText::RasterizeForAurora);
   }
   auto& memory = Core::System::GetInstance().GetMemory();
   if (!native.init(memory.GetRAM(), memory.GetRamSizeReal()))

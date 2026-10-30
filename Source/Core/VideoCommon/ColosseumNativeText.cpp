@@ -6,12 +6,15 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 
 #include "Common/FileUtil.h"
 #include "Common/Logging/Log.h"
 #include "Core/HW/Memmap.h"
 #include "Core/System.h"
+#include "VideoCommon/AuroraMirror.h"
 #include "VideoCommon/ColosseumTextUpscale.h"
 #include "VideoCommon/TextureCacheBase.h"
 
@@ -19,6 +22,8 @@
 #define STBTT_STATIC
 #define STB_TRUETYPE_IMPLEMENTATION
 #include <imstb_truetype.h>
+
+#include "gxruntime/aurora_backend.h"
 
 namespace ColosseumNativeText
 {
@@ -38,7 +43,7 @@ std::vector<Glyph> s_pending;
 
 struct Font
 {
-  bool tried = false;
+  std::once_flag tried;  // the GPU thread and Aurora's render thread both ask
   bool loaded = false;
   std::vector<unsigned char> data;
   stbtt_fontinfo info{};
@@ -60,7 +65,6 @@ std::string DefaultFontPath()
 
 void LoadFont()
 {
-  s_font.tried = true;
   const char* off = std::getenv("MODERNGEKKO_NATIVE_TEXT");
   if (off && std::strcmp(off, "0") == 0)
     return;
@@ -215,6 +219,25 @@ void DrawGameGlyph(const Glyph& glyph, u32 scale, std::vector<u8>* rgba, u32 wid
     }
   }
 }
+
+Glyph Decode(const u32 words[5])
+{
+  Glyph glyph;
+  glyph.x = words[0] & 0x1FF;
+  glyph.y = (words[0] >> 9) & 0x1FF;
+  glyph.font = (words[0] >> 18) & 7;
+  glyph.w = words[1] & 0x3F;
+  glyph.h = (words[1] >> 6) & 0x3F;
+  glyph.y_offset = static_cast<s8>((words[1] >> 12) & 0xFF);
+  glyph.code = words[3] & 0xFFFF;
+  glyph.bitmap = ((words[3] >> 16) & 0xFF) | ((words[4] & 0xFFFFFF) << 8);
+  return glyph;
+}
+
+u32 DecodeAtlas(const u32 words[5])
+{
+  return (words[2] & 0xFFFFFF) << 5;
+}
 }  // namespace
 
 bool OnBPWrite(u8 reg, u32 value)
@@ -222,19 +245,12 @@ bool OnBPWrite(u8 reg, u32 value)
   if (reg < 0x6A || reg > 0x6E)
     return false;
   s_words[reg - 0x6A] = value & 0xFFFFFF;
-  if (reg != 0x6E || !Active())
+  // An in-process Aurora renderer draws these from its own command stream.
+  if (reg != 0x6E || AuroraMirror::NativeRendering() || !Active())
     return true;
 
-  Glyph glyph;
-  glyph.x = s_words[0] & 0x1FF;
-  glyph.y = (s_words[0] >> 9) & 0x1FF;
-  glyph.font = (s_words[0] >> 18) & 7;
-  glyph.w = s_words[1] & 0x3F;
-  glyph.h = (s_words[1] >> 6) & 0x3F;
-  glyph.y_offset = static_cast<s8>((s_words[1] >> 12) & 0xFF);
-  s_atlas = (s_words[2] & 0xFFFFFF) << 5;
-  glyph.code = s_words[3] & 0xFFFF;
-  glyph.bitmap = ((s_words[3] >> 16) & 0xFF) | ((s_words[4] & 0xFFFFFF) << 8);
+  const Glyph glyph = Decode(s_words);
+  s_atlas = DecodeAtlas(s_words);
   if (s_pending.size() >= MAX_PENDING)
     s_pending.erase(s_pending.begin(), s_pending.begin() + MAX_PENDING / 2);
   s_pending.push_back(glyph);
@@ -248,8 +264,7 @@ bool Active()
     s_pending.clear();
     return false;
   }
-  if (!s_font.tried)
-    LoadFont();
+  std::call_once(s_font.tried, LoadFont);
   return s_font.loaded;
 }
 
@@ -297,5 +312,63 @@ void Rasterize(const Glyph& glyph, u32 scale, std::vector<u8>* rgba, u32* width,
   const int bh = glyph.h * scale;
   if (IsGameSymbol(glyph) || !DrawFontGlyph(glyph, scale, rgba, *width, bx0, by0, bw, bh))
     DrawGameGlyph(glyph, scale, rgba, *width, bx0, by0, bw, bh);
+}
+
+bool RasterizeForAurora(const u32 words[5], u32 scale, AuroraTextGlyph* out)
+{
+  // Not Active(): that drops the GPU thread's pending glyphs.
+  if (!IsColosseumTextUpscaleEnabled())
+    return false;
+  std::call_once(s_font.tried, LoadFont);
+  if (!s_font.loaded)
+    return false;
+  const Glyph glyph = Decode(words);
+  const Rect r = ClearedRect(glyph);
+  const int x0 = std::max(r.x0, 0), y0 = std::max(r.y0, 0);
+  const int x1 = std::min(r.x1, 512), y1 = std::min(r.y1, 512);
+  if (x0 >= x1 || y0 >= y1)
+    return false;
+
+  // Clipped images by glyph and scale; a few thousand cover any screen.
+  struct Image
+  {
+    std::vector<u8> rgba;
+    u32 x = 0, y = 0, width = 0, height = 0;
+  };
+  static std::unordered_map<u64, Image> cache;
+  static u32 cache_scale = 0;
+  if (cache_scale != scale || cache.size() > 4096)
+  {
+    cache.clear();
+    cache_scale = scale;
+  }
+  // The clip depends on the slot, not just the image.
+  const u64 key = GlyphKey(glyph) ^ (static_cast<u64>(x0 - r.x0) << 6) ^
+                  (static_cast<u64>(y0 - r.y0) << 4) ^ (static_cast<u64>(r.x1 - x1) << 2) ^
+                  static_cast<u64>(r.y1 - y1);
+  Image& image = cache[key];
+  if (image.rgba.empty())
+  {
+    std::vector<u8> full;
+    u32 width = 0, height = 0;
+    Rasterize(glyph, scale, &full, &width, &height);
+    image.width = static_cast<u32>(x1 - x0) * scale;
+    image.height = static_cast<u32>(y1 - y0) * scale;
+    image.rgba.resize(static_cast<size_t>(image.width) * image.height * 4);
+    const size_t row = static_cast<size_t>(image.width) * 4;
+    for (u32 y = 0; y < image.height; ++y)
+    {
+      const size_t sx = static_cast<size_t>(x0 - r.x0) * scale;
+      const size_t sy = static_cast<size_t>(y0 - r.y0) * scale + y;
+      std::memcpy(image.rgba.data() + y * row, full.data() + (sy * width + sx) * 4, row);
+    }
+  }
+  out->atlas = DecodeAtlas(words);
+  out->x = static_cast<u32>(x0) * scale;
+  out->y = static_cast<u32>(y0) * scale;
+  out->width = image.width;
+  out->height = image.height;
+  out->rgba = image.rgba.data();
+  return true;
 }
 }  // namespace ColosseumNativeText

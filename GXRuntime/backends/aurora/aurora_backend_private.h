@@ -90,6 +90,7 @@ extern unsigned long long g_core_rejected;
 
 void core_plan_observer(const gxruntime::gxcore::DrawPlan& plan, void*);
 void core_copy_observer(const gxruntime::gxcore::EfbCopyCommand& cmd, void*);
+void core_marker_observer(std::uint32_t reg, std::uint32_t value, void*);
 
 extern unsigned long long g_shadow_last_draw_total;
 extern unsigned long long g_shadow_last_vertex_total;
