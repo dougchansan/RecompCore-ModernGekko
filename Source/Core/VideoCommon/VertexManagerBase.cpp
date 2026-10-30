@@ -5,6 +5,7 @@
 
 #include "VideoCommon/GXCensus.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <memory>
@@ -605,6 +606,67 @@ void VertexManagerBase::Flush()
     }
   }
   vertex_shader_manager.SetConstants(texture_names, xf_state_manager);
+  // Colosseum's front-end menus lay their 2D out for the widescreen target
+  // themselves (Hor+), but the purple backdrop behind them is a single quad
+  // textured from a 640x480 image, sized for the authored canvas plus overscan.
+  // Past its edges the game draws only a dark ring layer and then nothing, so a
+  // wide window showed the menu in a column. Stretch that one quad horizontally
+  // until it reaches the edges of the frame; the ring layer behind it is then
+  // covered. It is recognized by shape rather than by texture hash so a texture
+  // pack, or a different hashing setup, still matches.
+  bool widen_backdrop = false;
+  if (g_ActiveConfig.fColosseumFrontEndHorPlus > 1.0f && !m_cull_all &&
+      m_index_generator.GetIndexLen() == 6)
+  {
+    for (const u32 i : used_textures)
+    {
+      const auto entry = g_texture_cache->Load(i);
+      widen_backdrop = widen_backdrop ||
+                       (entry && entry->native_width == 640 && entry->native_height == 480);
+    }
+  }
+  if (widen_backdrop)
+  {
+    // The vertex cache holds the last triangle, which for one quad already
+    // contains both of its horizontal edges.
+    float left = 0.0f, right = 0.0f;
+    const PortableVertexDeclaration decl =
+        VertexLoaderManager::GetCurrentVertexFormat()->GetVertexDeclaration();
+    if ((m_cur_buffer_pointer - m_base_buffer_pointer) >= decl.stride * 3)
+    {
+      for (int i = 0; i < 3; ++i)
+      {
+        const u32 mtx = decl.posmtx.enable ?
+                            VertexLoaderManager::position_matrix_index_cache[2 - i] :
+                            static_cast<u32>(g_main_cp_state.matrix_index_a.PosNormalMtxIdx);
+        std::array<float, 4> position = VertexLoaderManager::position_cache[2 - i];
+        if (decl.position.components == 2)
+          position[2] = 0;
+        float clip[4];
+        vertex_shader_manager.TransformToClipSpace(position.data(), clip, mtx);
+        if (clip[3] <= 0.0f)
+          continue;
+        left = std::min(left, clip[0] / clip[3]);
+        right = std::max(right, clip[0] / clip[3]);
+      }
+    }
+    // A centred quad spanning most of the authored canvas but not the frame.
+    const float half_width = std::min(-left, right);
+    widen_backdrop = half_width > 0.25f && half_width < 0.99f &&
+                     std::abs(left + right) < 0.05f * (right - left);
+    if (widen_backdrop)
+    {
+      const float scale = 1.0f / half_width;
+      for (float& value : vertex_shader_manager.constants.projection[0])
+        value *= scale;
+      vertex_shader_manager.dirty = true;
+    }
+  }
+  // The widened row lives only in the uploaded constants; have the next draw
+  // rebuild its projection from XF state.
+  if (widen_backdrop || m_colosseum_backdrop_widened)
+    xf_state_manager.SetProjectionChanged();
+  m_colosseum_backdrop_widened = widen_backdrop;
   if (!bpmem.genMode.zfreeze)
   {
     // Must be done after VertexShaderManager::SetConstants()

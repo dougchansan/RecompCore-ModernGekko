@@ -36,6 +36,14 @@ inline float GetColosseumAuthoredMenuHorizontalScale(float raw_aspect,
   return raw_aspect / COLOSSEUM_AUTHORED_ASPECT;
 }
 
+// Whether the viewport is the game's full 640-pixel canvas, centred, as opposed
+// to a region it renders into and then copies out as a texture.
+inline bool IsColosseumCanvasViewport(float viewport_half_width, float viewport_x_origin)
+{
+  return std::abs(std::abs(viewport_half_width) * 2.0f - 640.0f) < 1.0f &&
+         std::abs(viewport_x_origin - 342.0f - 320.0f) < 1.0f;
+}
+
 inline bool IsColosseumSquareOffscreenViewport(float viewport_half_width,
                                                 float viewport_half_height)
 {

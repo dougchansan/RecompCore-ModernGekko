@@ -215,6 +215,9 @@ protected:
   bool m_depth_state_changed = true;
   bool m_blending_state_changed = true;
   bool m_cull_all = false;
+  // The previous draw was a Colosseum front-end backdrop drawn with a widened
+  // projection (see Flush).
+  bool m_colosseum_backdrop_widened = false;
 
   IndexGenerator m_index_generator;
   CPUCull m_cpu_cull;

@@ -121,6 +121,7 @@ void VideoConfig::Refresh()
       Config::Get(Config::GFX_WIDESCREEN_AUTHORED_MENU);
   bColosseumNamingPresentation =
       Config::Get(Config::GFX_COLOSSEUM_NAMING_PRESENTATION);
+  fColosseumFrontEndHorPlus = Config::Get(Config::GFX_COLOSSEUM_FRONT_END_HOR_PLUS);
   aspect_mode = Config::Get(Config::GFX_ASPECT_RATIO);
   custom_aspect_width = Config::Get(Config::GFX_CUSTOM_ASPECT_RATIO_WIDTH);
   custom_aspect_height = Config::Get(Config::GFX_CUSTOM_ASPECT_RATIO_HEIGHT);
@@ -365,6 +366,7 @@ void CheckForConfigChanges()
       g_ActiveConfig.bWidescreenAuthoredMenu;
   const bool old_colosseum_naming_presentation =
       g_ActiveConfig.bColosseumNamingPresentation;
+  const float old_colosseum_front_end_hor_plus = g_ActiveConfig.fColosseumFrontEndHorPlus;
   const auto old_post_processing_shader = g_ActiveConfig.sPostProcessingShader;
   const auto old_hdr = g_ActiveConfig.bHDR;
 
@@ -424,7 +426,8 @@ void CheckForConfigChanges()
       old_widescreen_hud_safe_area_scale != g_ActiveConfig.fWidescreenHudSafeAreaScale ||
       old_widescreen_authored_menu != g_ActiveConfig.bWidescreenAuthoredMenu ||
       old_colosseum_naming_presentation !=
-          g_ActiveConfig.bColosseumNamingPresentation;
+          g_ActiveConfig.bColosseumNamingPresentation ||
+      old_colosseum_front_end_hor_plus != g_ActiveConfig.fColosseumFrontEndHorPlus;
   if (widescreen_hud_safe_area_changed)
     changed_bits |= CONFIG_CHANGE_BIT_ASPECT_RATIO;
   if (old_post_processing_shader != g_ActiveConfig.sPostProcessingShader)

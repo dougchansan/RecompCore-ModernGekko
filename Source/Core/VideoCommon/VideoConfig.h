@@ -207,6 +207,7 @@ struct VideoConfig final
   float fWidescreenHudSafeAreaScale = 1.0f;
   bool bWidescreenAuthoredMenu = false;
   bool bColosseumNamingPresentation = false;
+  float fColosseumFrontEndHorPlus = 0.0f;
   AspectMode aspect_mode{};
   int custom_aspect_width = 1;
   int custom_aspect_height = 1;

@@ -15,6 +15,7 @@
 
 #include "VideoCommon/AbstractGfx.h"
 #include "VideoCommon/BPMemory.h"
+#include "VideoCommon/ColosseumProjection.h"
 #include "VideoCommon/EFBInterface.h"
 #include "VideoCommon/FramebufferManager.h"
 #include "VideoCommon/VertexManagerBase.h"
@@ -184,6 +185,23 @@ void SetScissorAndViewport(FramebufferManager* frame_buffer_manager, ScissorPos 
   const auto result = BPFunctions::ComputeScissorRects(scissor_top_left, scissor_bottom_right,
                                                        scissor_offset, viewport);
   auto native_rc = result.Best();
+
+  // Colosseum's front-end clips its popup backings (the Battle Now difficulty
+  // list) to a rectangle it computes from the authored 4:3 projection, while the
+  // popup itself is drawn through the Hor+ one. Bring a partial scissor into
+  // the Hor+ layout by narrowing it about the canvas centre by the same factor;
+  // a full-width scissor, and passes rendered into part of the EFB for a copy,
+  // are left alone.
+  const float front_end_hor_plus = g_ActiveConfig.fColosseumFrontEndHorPlus;
+  if (front_end_hor_plus > 1.0f &&
+      VideoCommon::IsColosseumCanvasViewport(viewport.wd, viewport.xOrig) &&
+      (native_rc.rect.left > 0 || native_rc.rect.right < static_cast<int>(EFB_WIDTH)))
+  {
+    constexpr float center = EFB_WIDTH / 2.0f;
+    const auto narrow = [&](int x) { return center + (x - center) / front_end_hor_plus; };
+    native_rc.rect.left = static_cast<int>(std::floor(narrow(native_rc.rect.left)));
+    native_rc.rect.right = static_cast<int>(std::ceil(narrow(native_rc.rect.right)));
+  }
 
   auto target_rc = frame_buffer_manager->ConvertEFBRectangle(native_rc.rect);
   auto converted_rc = g_gfx->ConvertFramebufferRectangle(target_rc, g_gfx->GetCurrentFramebuffer());

@@ -106,10 +106,20 @@ Common::Matrix44 VertexShaderManager::LoadProjectionMatrix(const std::array<floa
             1.0f);
     const float naming_scale = VideoCommon::GetColosseumNamingHorizontalScale(
         g_ActiveConfig.bColosseumNamingPresentation);
+    // The front-end widens every camera by its Hor+ multiplier, including the
+    // ones that render a model into part of the EFB to copy it out as a texture
+    // (Wes on the Story Mode continue prompt). The presenter never stretches
+    // that copy, so the model came out squeezed by the multiplier: undo it for
+    // any viewport that is not the canvas.
+    const float front_end_hor_plus = g_ActiveConfig.fColosseumFrontEndHorPlus;
+    const bool front_end_offscreen_viewport =
+        front_end_hor_plus > 1.0f &&
+        !VideoCommon::IsColosseumCanvasViewport(xfmem.viewport.wd, xfmem.viewport.xOrig);
     const float native_hor_plus_scale =
         g_ActiveConfig.bColosseumNamingPresentation ? naming_scale :
         g_ActiveConfig.bWidescreenAuthoredMenu ? authored_menu_scale :
         square_offscreen_viewport ? offscreen_projection_scale :
+        front_end_offscreen_viewport ? front_end_hor_plus :
         g_ActiveConfig.bWidescreenHudSafeArea && is_cached_widescreen_projection ?
             authored_projection_scale :
             1.0f;
