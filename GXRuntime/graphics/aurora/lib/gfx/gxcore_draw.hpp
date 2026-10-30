@@ -64,6 +64,10 @@ bool submit_draw_plan(const gxruntime::gxcore::DrawPlan& plan);
 // position matrices blended t of the way from the previous game frame (t = 1
 // is the real frame), and interp_finish_frame ends the game frame.
 uint32_t interp_layers();
+// Layers the next game frame renders with (1 = live, not logged), set by the
+// presenter as it adapts to the renderer's cost; whether this frame logs.
+void interp_set_active(uint32_t layers);
+bool interp_active();
 void interp_replay(float t);
 void interp_finish_frame();
 // Drop the texture cache + reset its stats (start of a replay run).

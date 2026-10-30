@@ -13,6 +13,8 @@
 #include <absl/container/flat_hash_set.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <memory>
 #include <cmath>
 #include <cstdlib>
@@ -64,22 +66,38 @@ struct InterpLog {
   std::vector<LogEntry> entries;
   std::vector<LoggedDraw> draws;
   bool paired = false;
-  void clear() {
-    entries.clear();
-    draws.clear();
-    paired = false;
-  }
+  void clear();
 };
+// Logged draws of finished frames, kept for their buffers: a frame logs ~2000
+// draws, and allocating each one's vertex and index storage anew cost more
+// than copying into it.
+std::vector<LoggedDraw> g_interpPool;
+void InterpLog::clear() {
+  entries.clear();
+  for (LoggedDraw& d : draws) {
+    d.rebind.reset();
+    g_interpPool.push_back(std::move(d));
+  }
+  draws.clear();
+  paired = false;
+}
 uint32_t g_interpLayers = [] {
   const char* v = std::getenv("AURORA_FRAME_INTERP");
   const long n = v != nullptr ? std::strtol(v, nullptr, 10) : 0;
   return static_cast<uint32_t>(n >= 2 && n <= 4 ? n : 0);
 }();
 InterpLog g_interpCur, g_interpPrev;
+// Layers the presenter currently asks for (interp_set_active): 1 renders
+// live, logging nothing.
+uint32_t g_interpActive = g_interpLayers;
 absl::flat_hash_set<uint32_t> g_interpCopyDests;  // EFB copy destinations logged this frame
 bool g_interpReplaying = false;
 
-bool interp_recording() { return g_interpLayers > 1 && !g_interpReplaying; }
+struct InterpTiming { double record = 0, pair = 0, replay = 0; uint64_t frames = 0, draws = 0, copies = 0, rebinds = 0; };
+InterpTiming g_interpTiming;
+const bool g_interpLog = std::getenv("AURORA_INTERP_LOG") != nullptr;
+double interp_now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+bool interp_recording() { return g_interpActive > 1 && !g_interpReplaying; }
 }  // namespace
 
 using webgpu::g_device;
@@ -945,7 +963,14 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
 
   const bool fetch = plan.pipeline.shader.fetch.enabled != 0;
   if (!fetch && interp_recording()) {
-    LoggedDraw& d = g_interpCur.draws.emplace_back();
+    const double rec_start = g_interpLog ? interp_now() : 0;
+    if (g_interpPool.empty()) {
+      g_interpCur.draws.emplace_back();
+    } else {
+      g_interpCur.draws.push_back(std::move(g_interpPool.back()));
+      g_interpPool.pop_back();
+    }
+    LoggedDraw& d = g_interpCur.draws.back();
     d.scissor = scissor;
     d.has_viewport = has_viewport;
     d.viewport = viewport;
@@ -966,8 +991,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
       if (copy_sourced)
         d.rebind = std::make_unique<gxc::DrawPlan>(plan);
     }
-    d.vertices = plan.vertices;
-    d.indices = plan.indices;
+    d.vertices.assign(plan.vertices.begin(), plan.vertices.end());
+    d.indices.assign(plan.indices.begin(), plan.indices.end());
     d.constants = plan.constants;
     d.pixel_constants = plan.pixel_constants;
     d.tev = plan.pipeline.shader.tev_valid != 0;
@@ -975,6 +1000,8 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
     d.key = XXH3_64bits_withSeed(plan.vertices.data(), plan.vertices.size() * sizeof(float),
                                  plan.indices.size() * 2u + d.pos_mtx_idx);
     g_interpCur.entries.push_back(LogEntry{.draw = static_cast<uint32_t>(g_interpCur.draws.size() - 1)});
+    if (g_interpLog)
+      g_interpTiming.record += interp_now() - rec_start;
     return true;
   }
   gx::set_logical_scissor(scissor);
@@ -1178,11 +1205,25 @@ void emit_draw(const LoggedDraw& d, const gxc::VertexShaderConstants& constants)
 
 uint32_t interp_layers() { return g_interpLayers; }
 
+void interp_set_active(uint32_t layers) {
+  g_interpActive = std::min(layers, g_interpLayers);
+  if (g_interpActive <= 1) {
+    // Live from the next frame: nothing to pair the first logged one with.
+    g_interpCur.clear();
+    g_interpPrev.clear();
+  }
+}
+
+bool interp_active() { return g_interpActive > 1; }
+
 void interp_replay(float t) {
   InterpLog& cur = g_interpCur;
   const InterpLog& prev = g_interpPrev;
+  const double t0 = g_interpLog ? interp_now() : 0;
   if (t < 1.f && !cur.paired)
     pair_log(cur, prev);
+  const double t1 = g_interpLog ? interp_now() : 0;
+  g_interpTiming.pair += t1 - t0;
   g_interpReplaying = true;
   gxc::VertexShaderConstants blended;
   for (const LogEntry& e : cur.entries) {
@@ -1210,9 +1251,23 @@ void interp_replay(float t) {
     emit_draw(d, blended);
   }
   g_interpReplaying = false;
+  if (g_interpLog)
+    g_interpTiming.replay += interp_now() - t1;
 }
 
 void interp_finish_frame() {
+  if (g_interpLog) {
+    InterpTiming& m = g_interpTiming;
+    ++m.frames;
+    m.draws += g_interpCur.draws.size();
+    for (const auto& e : g_interpCur.entries) m.copies += e.copy;
+    for (const auto& d : g_interpCur.draws) m.rebinds += d.rebind != nullptr;
+    if (m.frames == 120) {
+      std::fprintf(stderr, "[interp] per frame: record %.2f ms, pair %.2f ms, replay %.2f ms (all layers); draws %.0f, copies %.1f, rebinds %.1f\n",
+                   m.record * 1e3 / 120, m.pair * 1e3 / 120, m.replay * 1e3 / 120, m.draws / 120.0, m.copies / 120.0, m.rebinds / 120.0);
+      m = {};
+    }
+  }
   std::swap(g_interpPrev, g_interpCur);
   g_interpCur.clear();
   g_interpCopyDests.clear();
