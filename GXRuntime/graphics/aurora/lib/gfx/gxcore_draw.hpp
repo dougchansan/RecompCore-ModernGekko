@@ -58,6 +58,14 @@ void copy_efb_to_texture(const gxruntime::gxcore::EfbCopyCommand& cmd);
 // format to RGBA8, S13 A3), viewport state, and a queued draw command on the
 // current pass. False = plan not drawable.
 bool submit_draw_plan(const gxruntime::gxcore::DrawPlan& plan);
+// Frame interpolation (AURORA_FRAME_INTERP=<2-4>): layers per game frame,
+// 0 when off. While on, draws and EFB copies are logged, not encoded;
+// interp_replay(t) encodes the log into the current Aurora frame with
+// position matrices blended t of the way from the previous game frame (t = 1
+// is the real frame), and interp_finish_frame ends the game frame.
+uint32_t interp_layers();
+void interp_replay(float t);
+void interp_finish_frame();
 // Drop the texture cache + reset its stats (start of a replay run).
 void reset_texture_cache();
 

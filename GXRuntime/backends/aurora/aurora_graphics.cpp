@@ -10,7 +10,9 @@
 #include <gx/gx.hpp>
 #include <gx/recomp.hpp>
 #include "gxruntime/gxcore/texture_decode.hpp"
+#include <SDL3/SDL_timer.h>
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -25,6 +27,9 @@ namespace aurora::gfx::gxcore {
 bool submit_draw_plan(const gxruntime::gxcore::DrawPlan& plan);
 void copy_efb_to_texture(const gxruntime::gxcore::EfbCopyCommand& cmd);
 void reset_texture_cache();
+uint32_t interp_layers();
+void interp_replay(float t);
+void interp_finish_frame();
 } // namespace aurora::gfx::gxcore
 #endif
 
@@ -711,6 +716,40 @@ void aurora_backend_present(void) {
                 c.vertex_decode_failures - s_prev.vertex_decode_failures);
             s_prev = c;
         }
+    }
+    // Frame interpolation (AURORA_FRAME_INTERP=<2-4>): the game frame's draws
+    // were logged, not encoded. Encode them once per in-between frame, blended
+    // from the previous game frame, presenting each a fraction of the game
+    // frame interval apart, then once more as the real frame below. The real
+    // frame is shown that much later than it was produced (one game frame of
+    // latency at most), as with Dolphin's interpolation.
+    if (gx_aurora::g_frame_open && aurora::gfx::gxcore::interp_layers() > 1) {
+        using Clock = std::chrono::steady_clock;
+        const uint32_t layers = aurora::gfx::gxcore::interp_layers();
+        static Clock::time_point s_last_present;
+        static double s_interval = 1.0 / 60.0;
+        const Clock::time_point start = Clock::now();
+        if (s_last_present != Clock::time_point{}) {
+            const double dt = std::chrono::duration<double>(start - s_last_present).count();
+            if (dt > 1.0 / 150.0 && dt < 1.0 / 15.0)
+                s_interval = s_interval * 0.9 + dt * 0.1;
+        }
+        s_last_present = start;
+        for (uint32_t layer = 1; layer < layers && gx_aurora::g_frame_open; ++layer) {
+            aurora::gfx::gxcore::interp_replay(static_cast<float>(layer) / static_cast<float>(layers));
+            aurora_end_frame();
+            gx_aurora::g_frame_open = aurora_begin_frame();
+            const Clock::time_point due =
+                start + std::chrono::duration_cast<Clock::duration>(
+                            std::chrono::duration<double>(s_interval * layer / layers));
+            const Clock::time_point now = Clock::now();
+            if (due > now)
+                SDL_DelayPrecise(static_cast<Uint64>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(due - now).count()));
+        }
+        if (gx_aurora::g_frame_open)
+            aurora::gfx::gxcore::interp_replay(1.f);
+        aurora::gfx::gxcore::interp_finish_frame();
     }
 #endif
     if (gx_aurora::g_frame_open) {
