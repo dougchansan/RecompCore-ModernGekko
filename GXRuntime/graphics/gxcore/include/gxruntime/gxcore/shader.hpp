@@ -593,6 +593,18 @@ struct EfbCopyCommand {
 
 // --- WGSL generation ----------------------------------------------------------
 
+// Whether a regular texgen takes its input from vertex row `row` (Dolphin
+// VertexShaderGen source rows Normal/BinormalT/BinormalB, e.g. HSD's
+// reflection/highlight maps from GX_TG_NRM). The generator then declares that
+// vertex input, so the pipeline's vertex layout must provide it too.
+inline bool texgen_reads_row(const ShaderKey& key, TexSourceRow row) {
+  for (std::uint32_t i = 0; i < key.num_tex_gens && i < kMaxTexGens; ++i)
+    if (key.tex_gens[i].texgentype == static_cast<std::uint8_t>(TexGenType::Regular) &&
+        key.tex_gens[i].sourcerow == static_cast<std::uint8_t>(row))
+      return true;
+  return false;
+}
+
 // Generate the complete WGSL module (vs_main + fs_main) for a shader key.
 // Deterministic: equal keys yield byte-identical source (the headless golden
 // test pins this). Shape follows Dolphin VertexShaderGen/PixelShaderGen with

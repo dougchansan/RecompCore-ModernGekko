@@ -958,10 +958,13 @@ std::string generate_wgsl(const ShaderKey& key) {
   // Fixed vertex input layout (kVertexStrideBytes); unused inputs are ignored.
   // Under GPU vertex fetch the same struct is filled by fetch_vertex instead
   // (no vertex buffer, so no locations).
-  const bool in_normal = (lit || emit_nbt) && has_normal;
+  const bool in_normal =
+      (lit || emit_nbt || texgen_reads_row(key, TexSourceRow::Normal)) && has_normal;
   const bool in_texmtxidx = key.has_tex_mtx_idx != 0;
-  const bool in_binormal = emit_nbt && has_binormal;
-  const bool in_tangent = emit_nbt && has_tangent;
+  const bool in_binormal =
+      (emit_nbt || texgen_reads_row(key, TexSourceRow::BinormalB)) && has_binormal;
+  const bool in_tangent =
+      (emit_nbt || texgen_reads_row(key, TexSourceRow::BinormalT)) && has_tangent;
   auto loc = [&](unsigned n) -> std::string {
     return fetch ? std::string() : "@location(" + std::to_string(n) + ") ";
   };
@@ -1098,6 +1101,17 @@ std::string generate_wgsl(const ShaderKey& key) {
     const auto row = static_cast<TexSourceRow>(tg.sourcerow);
     if (row == TexSourceRow::Geom) {
       emit(out, "        coord = vec4f(in.rawpos, 1.0);\n");
+    } else if (row == TexSourceRow::Normal) {
+      // Dolphin VertexShaderGen: coord.xyz = rawnormal (w stays 1), only when
+      // the vertex format carries a normal.
+      if (has_normal)
+        emit(out, "        coord = vec4f(in.rawnormal, 1.0);\n");
+    } else if (row == TexSourceRow::BinormalT) {
+      if (has_tangent)
+        emit(out, "        coord = vec4f(in.rawtangent, 1.0);\n");
+    } else if (row == TexSourceRow::BinormalB) {
+      if (has_binormal)
+        emit(out, "        coord = vec4f(in.rawbinormal, 1.0);\n");
     } else if (tg.sourcerow >= static_cast<std::uint8_t>(TexSourceRow::Tex0) &&
                tg.sourcerow <
                    static_cast<std::uint8_t>(TexSourceRow::Tex0) + 4u) {
@@ -1110,8 +1124,7 @@ std::string generate_wgsl(const ShaderKey& key) {
               texnum, texnum);
       }
     }
-    // Other source rows (normal/colors/binormals, tex4-7) are outside the
-    // slice; the plan builder counted them and coord stays the default.
+    // Other source rows (colors, tex4-7) leave coord at the default.
     if (tg.inputform == 0u) // AB11
       emit(out, "        coord.z = 1.0;\n");
     const auto tgtype = static_cast<TexGenType>(tg.texgentype);

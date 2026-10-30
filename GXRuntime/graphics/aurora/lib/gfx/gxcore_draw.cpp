@@ -386,7 +386,8 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
   // vertex FORMAT carries that attribute. A lit/emboss draw whose format omits
   // it reads the cached fallback from the uniform instead (I_CACHED_NORMAL), so
   // the shader does not declare the input and the layout must not provide it.
-  if ((key.shader.lit_valid != 0 || has_emboss) &&
+  if ((key.shader.lit_valid != 0 || has_emboss ||
+       gxc::texgen_reads_row(key.shader, gxc::TexSourceRow::Normal)) &&
       key.shader.has_vertex_normal != 0) {
     attributes.push_back(wgpu::VertexAttribute{
         .format = wgpu::VertexFormat::Float32x3,
@@ -401,14 +402,16 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
         .shaderLocation = 9,
     });
   }
-  if (has_emboss && key.shader.has_vertex_binormal != 0) {
+  if ((has_emboss || gxc::texgen_reads_row(key.shader, gxc::TexSourceRow::BinormalB)) &&
+      key.shader.has_vertex_binormal != 0) {
     attributes.push_back(wgpu::VertexAttribute{
         .format = wgpu::VertexFormat::Float32x3,
         .offset = gxc::kVertexBinormalOffset,
         .shaderLocation = 10,
     });
   }
-  if (has_emboss && key.shader.has_vertex_tangent != 0) {
+  if ((has_emboss || gxc::texgen_reads_row(key.shader, gxc::TexSourceRow::BinormalT)) &&
+      key.shader.has_vertex_tangent != 0) {
     attributes.push_back(wgpu::VertexAttribute{
         .format = wgpu::VertexFormat::Float32x3,
         .offset = gxc::kVertexTangentOffset,

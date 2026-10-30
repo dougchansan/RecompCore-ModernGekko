@@ -38,7 +38,8 @@ struct DrawData {
 // (TevStageKey IND_CMD fields + ShaderKey indirect stages; PixelShaderConstants
 // grew texdims/indtexscale/indtexmtx; indirect texmaps join the texture group).
 // v9: per-vertex normal matrices (VertexShaderConstants grew normalmatrices).
-constexpr uint32_t GXCorePipelineConfigVersion = 9;
+// v10: texgens from normal/binormal/tangent (WGSL and vertex layout change).
+constexpr uint32_t GXCorePipelineConfigVersion = 10;
 
 struct PipelineConfig {
   uint32_t version = GXCorePipelineConfigVersion;
