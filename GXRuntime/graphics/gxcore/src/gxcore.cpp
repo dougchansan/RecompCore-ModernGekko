@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -1111,8 +1112,24 @@ void GxCoreState::build_draw_plan_into(const ar::ConsumedDraw& draw,
         c.lights[i].cosatt[k] = f32_of(w[4 + k]);
         c.lights[i].distatt[k] = f32_of(w[7 + k]);
         c.lights[i].pos[k] = f32_of(w[10 + k]);
-        c.lights[i].dir[k] = f32_of(w[13 + k]);
       }
+      // As Dolphin's VertexShaderManager uploads them: an all-zero distance
+      // attenuation would divide by zero, and the direction (for specular
+      // lights the half-angle vector, which the game leaves unnormalized) is
+      // normalized - the specular term dots it with the normal, so a raw one
+      // scaled every highlight by its length.
+      if (std::fabs(c.lights[i].distatt[0]) < 0.00001f &&
+          std::fabs(c.lights[i].distatt[1]) < 0.00001f &&
+          std::fabs(c.lights[i].distatt[2]) < 0.00001f)
+        c.lights[i].distatt[0] = 0.00001f;
+      const float dx = f32_of(w[13]), dy = f32_of(w[14]), dz = f32_of(w[15]);
+      const double inv = 1.0 / std::sqrt(double(dx) * dx + double(dy) * dy + double(dz) * dz);
+      auto sanitize = [](float f) {
+        return std::isnan(f) ? 0.0f : std::isinf(f) ? (f > 0.0f ? 1.0f : -1.0f) : f;
+      };
+      c.lights[i].dir[0] = sanitize(static_cast<float>(dx * inv));
+      c.lights[i].dir[1] = sanitize(static_cast<float>(dy * inv));
+      c.lights[i].dir[2] = sanitize(static_cast<float>(dz * inv));
     }
   }
   if (channel_lit_path(key, 0u) || channel_lit_path(key, 1u)) {
