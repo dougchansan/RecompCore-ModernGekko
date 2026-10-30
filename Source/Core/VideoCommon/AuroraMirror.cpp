@@ -18,6 +18,7 @@
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/ColosseumNativeText.h"
 #include "VideoCommon/Present.h"
+#include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/XFMemory.h"
 #include "gxruntime/aurora_backend.h"
 
@@ -270,6 +271,7 @@ void NativeFlush()
 namespace
 {
 std::atomic<bool> s_resync{false};
+float s_sent_front_end_hor_plus = -1.0f;  // GPU thread
 
 void Put8(u8 value)
 {
@@ -364,7 +366,21 @@ void ResyncState()
 void Feed(const u8* data, u32 size)
 {
   if (s_resync.exchange(false))
+  {
     EmitState();
+    s_sent_front_end_hor_plus = -1.0f;
+  }
+  // The front-end's Hor+ multiplier, for the menu adjustments Dolphin's own
+  // renderer makes (gxcore_draw.cpp): BP 0x6F, unused by GX, 12-bit fixed point.
+  const float front_end_hor_plus = g_ActiveConfig.fColosseumFrontEndHorPlus;
+  if (front_end_hor_plus != s_sent_front_end_hor_plus)
+  {
+    s_sent_front_end_hor_plus = front_end_hor_plus;
+    const u32 fixed = static_cast<u32>(std::clamp(front_end_hor_plus, 0.0f, 4095.0f) * 4096.0f);
+    const u8 command[5] = {0x61, 0x6F, static_cast<u8>(fixed >> 16), static_cast<u8>(fixed >> 8),
+                           static_cast<u8>(fixed)};
+    s_frame.insert(s_frame.end(), command, command + sizeof(command));
+  }
   // Primitive commands (0x80-0xBF) read guest memory; nothing else does
   // except TLUT loads, which CaptureMemory covers.
   if ((data[0] & 0xC0) == 0x80)

@@ -87,6 +87,10 @@ void drop_host_texture(uint32_t address);
 // Output pixels per game pixel for a host texture (render target height / 480,
 // rounded up).
 uint32_t host_texture_scale();
+// Colosseum's front-end Hor+ multiplier while its menus are presented
+// widescreen, 0 otherwise: widens the menu backdrop, brings popup scissors into
+// the Hor+ layout and undoes the widening of offscreen model cameras.
+void set_front_end_hor_plus(float hor_plus);
 
 // Texture-cache telemetry (S13 A3): proves the no-reconvert property. `uploads`
 // counts actual decode+upload (cache miss); `hits` counts cache reuse (no

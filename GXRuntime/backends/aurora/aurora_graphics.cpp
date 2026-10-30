@@ -31,6 +31,7 @@ void write_host_texture(uint32_t address, uint32_t width, uint32_t height, uint3
                         uint32_t w, uint32_t h, const uint8_t* rgba);
 void drop_host_texture(uint32_t address);
 uint32_t host_texture_scale();
+void set_front_end_hor_plus(float hor_plus);
 uint32_t interp_layers();
 void interp_set_active(uint32_t layers);
 bool interp_active();
@@ -130,6 +131,11 @@ u32 g_text_atlas = 0;
 // host texture standing in for the game's 512x512 glyph texture, at output
 // resolution, so the text the game draws from that slot comes from the font.
 void core_marker_observer(std::uint32_t reg, std::uint32_t value, void*) {
+    if (reg == 0x6Fu) {
+        // The front-end's Hor+ multiplier, 12-bit fixed point; 0 = not in it.
+        aurora::gfx::gxcore::set_front_end_hor_plus(static_cast<float>(value & 0xFFFFFFu) / 4096.0f);
+        return;
+    }
     g_text_words[reg - 0x6Au] = value & 0xFFFFFFu;
     if (reg != 0x6Eu || g_text_rasterizer == nullptr)
         return;

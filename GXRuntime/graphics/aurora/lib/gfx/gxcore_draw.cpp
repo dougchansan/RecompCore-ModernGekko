@@ -295,7 +295,88 @@ absl::flat_hash_map<uint32_t, TextureHandle> g_efbCopyTextures;
 // host font at output resolution.
 absl::flat_hash_map<uint32_t, TextureHandle> g_hostTextures;
 
+// Colosseum's front-end menus, presented widescreen: the game lays their 2D out
+// Hor+ by this multiplier itself (0 when it is not). Three things it does not
+// widen are adjusted here, as Dolphin's renderer does (VertexManagerBase::Flush,
+// BPFunctions SetScissorAndViewport, VertexShaderManager LoadProjectionMatrix),
+// and the arc layer drawn over the backdrop is enlarged to the frame's edges.
+float g_frontEndHorPlus = 0.f;
+// The arc layer: the run of draws right after the backdrop that share one
+// texture. Its widest reach this frame and last (clip x, before enlarging).
+bool g_arcLayerOpen = false;
+uint32_t g_arcLayerTexture = 0;
+float g_arcLayerReach = 0.f;
+float g_arcLayerLastReach = 0.f;
+
+// The game's full 640-pixel canvas, centred, as opposed to a region it renders
+// into and copies out as a texture (raw XF: wd/2 and xorig+342).
+bool is_canvas_viewport(const gxc::DrawPlan& plan) {
+  return plan.viewport_valid && std::abs(std::abs(plan.viewport[0]) * 2.f - 640.f) < 1.f &&
+         std::abs(plan.viewport[3] - 342.f - 320.f) < 1.f;
+}
+
+bool samples_640x480(const gxc::DrawPlan& plan) {
+  if (plan.pipeline.shader.textured == 0)
+    return false;
+  if (plan.texmap_mask == 0u)
+    return plan.has_texture && plan.tex_width == 640u && plan.tex_height == 480u;
+  for (uint32_t t = 0; t < 8u; ++t)
+    if ((plan.texmap_mask & (1u << t)) != 0u && plan.textures[t].valid &&
+        plan.textures[t].width == 640u && plan.textures[t].height == 480u)
+      return true;
+  return false;
+}
+
+// The horizontal extent of a draw's vertices in clip space (NDC x), as the
+// vertex shader places them; false when none is in front of the camera.
+bool clip_x_extent(const gxc::DrawPlan& plan, float* left_out, float* right_out) {
+  const auto& c = plan.constants;
+  const bool idx = plan.pipeline.shader.has_pos_mtx_idx != 0;
+  float left = 0.f, right = 0.f;
+  bool any = false;
+  for (uint32_t v = 0; v < plan.vertex_count; ++v) {
+    const float* in = plan.vertices.data() + static_cast<size_t>(v) * gxc::kVertexFloats;
+    uint32_t row = 0;
+    if (idx)
+      std::memcpy(&row, in + gxc::kVertexPosMtxOffset / 4u, sizeof(row));
+    const float (*m)[4] = idx && row + 2u < 64u ? &c.transformmatrices[row] : &c.posnormalmatrix[0];
+    float view[4] = {0.f, 0.f, 0.f, 1.f};
+    for (int r = 0; r < 3; ++r)
+      view[r] = m[r][0] * in[0] + m[r][1] * in[1] + m[r][2] * in[2] + m[r][3];
+    float clip[4];
+    for (int r = 0; r < 4; ++r)
+      clip[r] = c.projection[r][0] * view[0] + c.projection[r][1] * view[1] +
+                c.projection[r][2] * view[2] + c.projection[r][3] * view[3];
+    if (clip[3] <= 0.f)
+      continue;
+    left = std::min(left, clip[0] / clip[3]);
+    right = std::max(right, clip[0] / clip[3]);
+    any = true;
+  }
+  *left_out = left;
+  *right_out = right;
+  return any;
+}
+
+// The purple backdrop behind the menus is one quad textured from a 640x480
+// image, sized for the authored canvas plus overscan; past it the game draws
+// only a dark ring layer. The horizontal scale that takes the quad to the
+// frame's edges (1 = leave it), recognized by shape, not texture hash.
+float front_end_backdrop_scale(const gxc::DrawPlan& plan) {
+  float left = 0.f, right = 0.f;
+  if (plan.indices.size() != 6u || plan.vertex_count < 3u || plan.vertices.empty() ||
+      !samples_640x480(plan) || !clip_x_extent(plan, &left, &right))
+    return 1.f;
+  // A centred quad spanning most of the authored canvas but not the frame.
+  const float half_width = std::min(-left, right);
+  if (half_width > 0.25f && half_width < 0.99f && std::abs(left + right) < 0.05f * (right - left))
+    return 1.f / half_width;
+  return 1.f;
+}
+
 } // namespace
+
+void set_front_end_hor_plus(float hor_plus) { g_frontEndHorPlus = hor_plus; }
 
 wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
   const gxc::PipelineKey& key = config.key;
@@ -970,6 +1051,58 @@ bool submit_draw_plan(const gxc::DrawPlan& plan) {
     scissorYOff = by->offset;
     scissor = (
         gfx::ClipRect{.x = bx->start, .y = by->start, .width = bx->end - bx->start, .height = by->end - by->start});
+  }
+
+  if (g_frontEndHorPlus > 1.f) {
+    auto& constants = const_cast<gxc::VertexShaderConstants&>(plan.constants);
+    if (is_canvas_viewport(plan)) {
+      // Popup backings (the Battle Now difficulty list) are clipped to a
+      // rectangle computed from the authored 4:3 projection, while the popup is
+      // drawn through the Hor+ one: narrow a partial scissor about the canvas
+      // centre by the same factor.
+      if (scissor.x > 0 || scissor.x + scissor.width < 640) {
+        const auto narrow = [](int32_t x) { return 320.f + (static_cast<float>(x) - 320.f) / g_frontEndHorPlus; };
+        const int32_t x0 = static_cast<int32_t>(std::floor(narrow(scissor.x)));
+        const int32_t x1 = static_cast<int32_t>(std::ceil(narrow(scissor.x + scissor.width)));
+        scissor.x = x0;
+        scissor.width = x1 - x0;
+      }
+      const float widen = front_end_backdrop_scale(plan);
+      if (widen != 1.f) {
+        for (float& value : constants.projection[0])
+          value *= widen;
+        if (g_arcLayerReach > 0.f)
+          g_arcLayerLastReach = g_arcLayerReach;
+        g_arcLayerOpen = true;
+        g_arcLayerTexture = 0;
+        g_arcLayerReach = 0.f;
+      } else if (g_arcLayerOpen && plan.pipeline.shader.textured != 0 && plan.texmap_mask == 0u &&
+                 plan.has_texture && !plan.vertices.empty() &&
+                 (g_arcLayerTexture == 0u || g_arcLayerTexture == plan.tex_address)) {
+        // The translucent arcs over the backdrop are geometry sized for the
+        // authored canvas, so they stop short of a wide frame's edges. Enlarge
+        // them about the centre, both ways so they stay round, until the widest
+        // reaches the edges (by last frame's reach: the layer is static).
+        g_arcLayerTexture = plan.tex_address;
+        float left = 0.f, right = 0.f;
+        if (clip_x_extent(plan, &left, &right))
+          g_arcLayerReach = std::max({g_arcLayerReach, -left, right});
+        if (g_arcLayerLastReach > 0.f && g_arcLayerLastReach < 1.f) {
+          const float enlarge = 1.f / g_arcLayerLastReach;
+          for (int row = 0; row < 2; ++row)
+            for (float& value : constants.projection[row])
+              value *= enlarge;
+        }
+      } else {
+        g_arcLayerOpen = false;
+      }
+    } else if (plan.viewport_valid && constants.projection[3][3] == 0.f) {
+      // The front-end widens every camera, including ones that render a model
+      // into part of the EFB to copy out as a texture (Wes on the Story Mode
+      // continue prompt); nothing stretches that copy back, so undo it there.
+      for (float& value : constants.projection[0])
+        value *= g_frontEndHorPlus;
+    }
   }
 
   if (plan.viewport_valid) {
