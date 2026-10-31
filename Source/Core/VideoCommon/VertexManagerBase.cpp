@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <memory>
 
 #include "Common/ChunkFile.h"
@@ -662,11 +663,73 @@ void VertexManagerBase::Flush()
       vertex_shader_manager.dirty = true;
     }
   }
-  // The widened row lives only in the uploaded constants; have the next draw
+  // The translucent arcs drawn over the backdrop are geometry sized for the
+  // authored canvas, so they stop short of a wide frame's edges. Enlarge them
+  // about the centre, both ways so they stay round, until the widest reaches
+  // the edges (by last frame's reach: the layer is static).
+  bool enlarge_arcs = false;
+  if (widen_backdrop)
+  {
+    if (m_colosseum_arc_reach > 0.0f)
+      m_colosseum_arc_last_reach = m_colosseum_arc_reach;
+    m_colosseum_arc_open = true;
+    m_colosseum_arc_texture = 0;
+    m_colosseum_arc_reach = 0.0f;
+  }
+  else if (!m_cull_all)
+  {
+    u32 texture = 0;
+    if (m_colosseum_arc_open && g_ActiveConfig.fColosseumFrontEndHorPlus > 1.0f &&
+        used_textures.Count() == 1 && used_textures[0])
+    {
+      if (const auto entry = g_texture_cache->Load(0))
+        texture = entry->addr;
+    }
+    const PortableVertexDeclaration decl =
+        VertexLoaderManager::GetCurrentVertexFormat()->GetVertexDeclaration();
+    if (texture != 0 && decl.position.type == ComponentFormat::Float &&
+        (m_colosseum_arc_texture == 0 || m_colosseum_arc_texture == texture))
+    {
+      m_colosseum_arc_texture = texture;
+      // This draw's vertices are the last ones written.
+      const u8* first = m_cur_buffer_pointer -
+                        static_cast<size_t>(m_index_generator.GetNumVerts()) * decl.stride;
+      for (const u8* vertex = std::max<const u8*>(first, m_base_buffer_pointer);
+           vertex + decl.stride <= m_cur_buffer_pointer;
+           vertex += decl.stride)
+      {
+        std::array<float, 4> position{};
+        std::memcpy(position.data(), vertex + decl.position.offset,
+                    sizeof(float) * std::min(decl.position.components, 3));
+        u32 mtx = static_cast<u32>(g_main_cp_state.matrix_index_a.PosNormalMtxIdx);
+        if (decl.posmtx.enable)
+          std::memcpy(&mtx, vertex + decl.posmtx.offset, sizeof(mtx));
+        float clip[4];
+        vertex_shader_manager.TransformToClipSpace(position.data(), clip, mtx);
+        if (clip[3] > 0.0f)
+          m_colosseum_arc_reach = std::max(m_colosseum_arc_reach, std::abs(clip[0] / clip[3]));
+      }
+      enlarge_arcs = m_colosseum_arc_last_reach > 0.0f && m_colosseum_arc_last_reach < 1.0f;
+      if (enlarge_arcs)
+      {
+        const float scale = 1.0f / m_colosseum_arc_last_reach;
+        for (int row = 0; row < 2; ++row)
+          for (float& value : vertex_shader_manager.constants.projection[row])
+            value *= scale;
+        vertex_shader_manager.dirty = true;
+      }
+    }
+    else
+    {
+      m_colosseum_arc_open = false;
+    }
+  }
+  // The adjusted rows live only in the uploaded constants; have the next draw
   // rebuild its projection from XF state.
-  if (widen_backdrop || m_colosseum_backdrop_widened)
+  const bool adjusted = widen_backdrop || enlarge_arcs;
+  if (adjusted || m_colosseum_projection_adjusted)
     xf_state_manager.SetProjectionChanged();
-  m_colosseum_backdrop_widened = widen_backdrop;
+  m_colosseum_projection_adjusted = adjusted;
   if (!bpmem.genMode.zfreeze)
   {
     // Must be done after VertexShaderManager::SetConstants()

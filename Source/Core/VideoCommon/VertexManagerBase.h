@@ -215,9 +215,16 @@ protected:
   bool m_depth_state_changed = true;
   bool m_blending_state_changed = true;
   bool m_cull_all = false;
-  // The previous draw was a Colosseum front-end backdrop drawn with a widened
-  // projection (see Flush).
-  bool m_colosseum_backdrop_widened = false;
+  // The previous draw was a Colosseum front-end backdrop or arc drawn with an
+  // adjusted projection (see Flush).
+  bool m_colosseum_projection_adjusted = false;
+  // The Colosseum front-end arc layer: the run of draws right after the
+  // backdrop that share one texture, and its widest reach (clip x, before
+  // enlarging) this frame and last.
+  bool m_colosseum_arc_open = false;
+  u32 m_colosseum_arc_texture = 0;
+  float m_colosseum_arc_reach = 0.0f;
+  float m_colosseum_arc_last_reach = 0.0f;
 
   IndexGenerator m_index_generator;
   CPUCull m_cpu_cull;
