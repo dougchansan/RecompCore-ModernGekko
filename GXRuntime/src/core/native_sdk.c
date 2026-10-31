@@ -881,9 +881,21 @@ int dolrecomp_native_msg_get_code_info(CPUState *ctx) {
   return 0;
 }
 
+// The host's slot placement (ColosseumNativeText::PlaceSlot), fetched once
+// through external_pointer(0xFFFFE000, 0). NULL = not queried, 1 = unavailable.
+typedef int (*DolrecompGlyphPlace)(uint32_t code, uint32_t font, int32_t h, int32_t *y_off);
+static DolrecompGlyphPlace dolrecomp_msg_glyph_place;
+
 // void fn_800FD69C(MSG_TASK_WORK* work, u8* bitmap, s16 w, s16 h, s16 y_off)
 // The slot is the manager's pen (mgr+0x18/0x1A) after the wrap the function
 // applies before copying; the font is work+0x20.
+//
+// The slot is the game glyph's height (its font's cell) at y_off below the line
+// top, and the game draws exactly that rect, so a host font with taller
+// capitals would lose their tops. When the host draws the text it can move the
+// slot: y_off and the bitmap pointer change together (r7, r4), so the game
+// copies and draws the same rows shifted. The rows it then copies from outside
+// the bitmap are never seen, since the host replaces the whole slot.
 int dolrecomp_native_msg_glyph_blit(CPUState *ctx) {
   if (!dolrecomp_subst_enabled())
     return 0;
@@ -905,6 +917,18 @@ int dolrecomp_native_msg_glyph_blit(CPUState *ctx) {
   if (w <= 0 || w > 63 || h <= 0 || h > 63 || x < 0 || y < 0)
     return 0;
   const uint32_t font = read_be16(work + 0x20) & 7u;
+  if (!dolrecomp_msg_glyph_place) {
+    void *p = ctx->external_pointer ? ctx->external_pointer(ctx, 0xFFFFE000u, 0) : 0;
+    dolrecomp_msg_glyph_place = p ? (DolrecompGlyphPlace)p : (DolrecompGlyphPlace)1;
+  }
+  if (dolrecomp_msg_glyph_place != (DolrecompGlyphPlace)1) {
+    const int32_t y_off = (int16_t)ctx->gpr[7];
+    int32_t placed = y_off;
+    if (dolrecomp_msg_glyph_place(dolrecomp_msg_glyph_code, font, h, &placed)) {
+      ctx->gpr[4] = (uint32_t)ctx->gpr[4] + (uint32_t)((placed - y_off) * ((w + 1) / 2));
+      ctx->gpr[7] = (uint32_t)placed;
+    }
+  }
   const uint32_t bitmap = (uint32_t)ctx->gpr[4] & 0x1FFFFFFFu;
   const uint32_t atlas = read_be32(mgr + 0x14) & 0x1FFFFFFFu;
   const uint32_t regs[5] = {

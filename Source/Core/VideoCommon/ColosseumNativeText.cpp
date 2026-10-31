@@ -314,6 +314,40 @@ void Rasterize(const Glyph& glyph, u32 scale, std::vector<u8>* rgba, u32* width,
     DrawGameGlyph(glyph, scale, rgba, *width, bx0, by0, bw, bh);
 }
 
+int PlaceSlot(u32 code, u32 font, s32 height, s32* y_offset)
+{
+  if (!IsColosseumTextUpscaleEnabled())
+    return 0;
+  std::call_once(s_font.tried, LoadFont);
+  if (!s_font.loaded)
+    return 0;
+  Glyph glyph;
+  glyph.code = static_cast<u16>(code);
+  glyph.font = static_cast<u8>(font);
+  if (IsGameSymbol(glyph))
+    return 0;
+  const int index = stbtt_FindGlyphIndex(&s_font.info, glyph.code);
+  int ix0, iy0, ix1, iy1;
+  if (index == 0 || !stbtt_GetGlyphBox(&s_font.info, index, &ix0, &iy0, &ix1, &iy1))
+    return 0;
+  const int f = std::min<int>(font, 4);
+  const float sy = stbtt_ScaleForMappingEmToPixels(&s_font.info, FONT_EM[f] * s_font.size_scale);
+  // The host ink's rows relative to the line top, as DrawFontGlyph places it.
+  const float top = FONT_BASELINE[f] - iy1 * sy;
+  const float bottom = FONT_BASELINE[f] - iy0 * sy;
+  int offset = *y_offset;
+  if (bottom - top > height)
+    offset = static_cast<int>(std::floor((top + bottom - height) * 0.5f));
+  else if (top < offset)
+    offset = static_cast<int>(std::floor(top));
+  else if (bottom > offset + height)
+    offset = static_cast<int>(std::ceil(bottom)) - height;
+  if (offset == *y_offset || offset < -128 || offset > 127)
+    return 0;
+  *y_offset = offset;
+  return 1;
+}
+
 bool RasterizeForAurora(const u32 words[5], u32 scale, AuroraTextGlyph* out)
 {
   // Not Active(): that drops the GPU thread's pending glyphs.

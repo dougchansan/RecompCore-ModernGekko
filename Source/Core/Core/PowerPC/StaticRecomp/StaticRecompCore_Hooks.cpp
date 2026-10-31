@@ -10,6 +10,7 @@
 #include "Core/PowerPC/StaticRecomp/StaticRecompLockstep.h"
 #include "Core/HW/GPFifo.h"
 #include "Core/HW/SystemTimers.h"
+#include "VideoCommon/ColosseumNativeText.h"
 #include "Common/Logging/Log.h"
 
 #include <cstdio>
@@ -295,6 +296,15 @@ void* StaticRecompCore::HookExternalPointer(CPUState* cpu, u32 ea, u32 size)
       core->m_system.GetMMU().DBATUpdated();
     }
     return memory.GetLogicalBase();
+  }
+  // Native-text slot query (size 0 at 0xFFFFE000): ColosseumNativeText::PlaceSlot,
+  // which the Colosseum glyph hook calls to fit a slot to the host font. Not
+  // under lockstep: it changes what the game writes.
+  if (ea == 0xFFFFE000u && size == 0)
+  {
+    if (core->m_lockstep_verifier->IsEnabled())
+      return nullptr;
+    return reinterpret_cast<void*>(&ColosseumNativeText::PlaceSlot);
   }
   if (ea >= LOCKED_CACHE_BASE && size != 0 &&
       (ea - LOCKED_CACHE_BASE) + size <= memory.GetL1CacheSize())

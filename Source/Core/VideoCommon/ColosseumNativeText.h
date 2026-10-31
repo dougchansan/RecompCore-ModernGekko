@@ -60,6 +60,15 @@ void Rasterize(const Glyph& glyph, u32 scale, std::vector<u8>* rgba, u32* width,
 // A key that identifies the rasterized image of a glyph.
 u64 GlyphKey(const Glyph& glyph);
 
+// The game sizes a glyph's slot to its own font's ink, so the host font's taller
+// capitals and ascenders would be cut off at the slot's top. The glyph hook asks
+// this, on the CPU thread before the game copies the glyph, where to put a slot
+// of `height` rows (its y offset from the line top) so the host glyph fits;
+// nonzero with *y_offset moved, or 0 to leave the slot alone (native text off,
+// or a glyph the host font does not draw). Handed to the module through
+// StaticRecompCore's external-pointer query.
+int PlaceSlot(u32 code, u32 font, s32 height, s32* y_offset);
+
 // For the in-process Aurora renderer (AuroraMirror, gxruntime/aurora_backend.h),
 // which sees the BP writes in its own command stream: one glyph's five words to
 // its pixels, clipped to the scratch texture. False while native text is off.
