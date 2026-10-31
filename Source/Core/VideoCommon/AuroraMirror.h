@@ -42,6 +42,9 @@ inline bool IsIndexedLoad(u8 opcode)
 }
 // The frame's XFB copy has executed.
 void FrameEnd();
+// XFB copies so far: under native rendering the presenter counts a field as a
+// new frame when this has moved since the last one.
+u64 XfbCopies();
 // GXDrawDone, before its finish interrupt is raised: the game will wait for
 // the GPU, so guest RAM now holds what the draws so far read.
 void DrawDone();

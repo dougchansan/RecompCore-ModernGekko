@@ -465,8 +465,16 @@ void Shutdown()
   s_native_failed = true;  // stays stopped for the rest of the process
 }
 
+std::atomic<u64> s_xfb_copies{0};
+
+u64 XfbCopies()
+{
+  return s_xfb_copies.load(std::memory_order_acquire);
+}
+
 void FrameEnd()
 {
+  s_xfb_copies.fetch_add(1, std::memory_order_release);
   if (s_native_requested)
   {
     NativeFlush();

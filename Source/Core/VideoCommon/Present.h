@@ -161,6 +161,7 @@ private:
 
   // Tracking of XFB textures so we don't render duplicate frames.
   u64 m_last_xfb_id = std::numeric_limits<u64>::max();
+  u64 m_native_xfb_copies = 0;  // AuroraMirror::XfbCopies() at the last field
 
   // These will be set on the first call to SetSuggestedWindowSize.
   int m_last_window_request_width = 0;

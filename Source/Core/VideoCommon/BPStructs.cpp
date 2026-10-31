@@ -195,10 +195,13 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
       if (GXCensus::On())
         GXCensus::OnDrawDone();
       INCSTAT(g_stats.this_frame.num_draw_done);
-      g_texture_cache->FlushEFBCopies();
-      g_texture_cache->FlushStaleBinds();
-      g_framebuffer_manager->InvalidatePeekCache(false);
-      g_framebuffer_manager->RefreshPeekCache();
+      if (!AuroraMirror::NativeRendering())
+      {
+        g_texture_cache->FlushEFBCopies();
+        g_texture_cache->FlushStaleBinds();
+        g_framebuffer_manager->InvalidatePeekCache(false);
+        g_framebuffer_manager->RefreshPeekCache();
+      }
       // Before the interrupt: the game resumes once it is raised.
       if (AuroraMirror::On())
         AuroraMirror::DrawDone();
@@ -219,10 +222,13 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
     if (GXCensus::On())
       GXCensus::OnPeToken(false);
     INCSTAT(g_stats.this_frame.num_token);
-    g_texture_cache->FlushEFBCopies();
-    g_texture_cache->FlushStaleBinds();
-    g_framebuffer_manager->InvalidatePeekCache(false);
-    g_framebuffer_manager->RefreshPeekCache();
+    if (!AuroraMirror::NativeRendering())
+    {
+      g_texture_cache->FlushEFBCopies();
+      g_texture_cache->FlushStaleBinds();
+      g_framebuffer_manager->InvalidatePeekCache(false);
+      g_framebuffer_manager->RefreshPeekCache();
+    }
     auto& system = Core::System::GetInstance();
     if (!system.GetFifo().UseDeterministicGPUThread())
     {
@@ -237,10 +243,13 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
     if (GXCensus::On())
       GXCensus::OnPeToken(true);
     INCSTAT(g_stats.this_frame.num_token_int);
-    g_texture_cache->FlushEFBCopies();
-    g_texture_cache->FlushStaleBinds();
-    g_framebuffer_manager->InvalidatePeekCache(false);
-    g_framebuffer_manager->RefreshPeekCache();
+    if (!AuroraMirror::NativeRendering())
+    {
+      g_texture_cache->FlushEFBCopies();
+      g_texture_cache->FlushStaleBinds();
+      g_framebuffer_manager->InvalidatePeekCache(false);
+      g_framebuffer_manager->RefreshPeekCache();
+    }
     auto& system = Core::System::GetInstance();
     if (!system.GetFifo().UseDeterministicGPUThread())
     {
@@ -316,6 +325,10 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
 
     const u32 copy_width = srcRect.GetWidth();
     const u32 copy_height = srcRect.GetHeight();
+    // An in-process Aurora renderer makes its own EFB copies and presents its
+    // own frames; Dolphin's backend, which drew nothing, copies and clears
+    // nothing either.
+    const bool backend_copies = !AuroraMirror::NativeRendering();
 
     if (destStride != 0)
     {
@@ -332,11 +345,12 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
                               PE_copy.intensity_fmt && PE_copy.auto_conv, PE_copy.clear,
                               static_cast<u32>(PE_copy.gamma.Value()));
         }
-        g_texture_cache->CopyRenderTargetToTexture(
-            destAddr, PE_copy.tp_realFormat(), copy_width, copy_height, destStride, is_depth_copy,
-            srcRect, PE_copy.intensity_fmt && PE_copy.auto_conv, PE_copy.half_scale, 1.0f,
-            s_gammaLUT[PE_copy.gamma], bpmem.triggerEFBCopy.clamp_top,
-            bpmem.triggerEFBCopy.clamp_bottom, bpmem.copyfilter.GetCoefficients());
+        if (backend_copies)
+          g_texture_cache->CopyRenderTargetToTexture(
+              destAddr, PE_copy.tp_realFormat(), copy_width, copy_height, destStride, is_depth_copy,
+              srcRect, PE_copy.intensity_fmt && PE_copy.auto_conv, PE_copy.half_scale, 1.0f,
+              s_gammaLUT[PE_copy.gamma], bpmem.triggerEFBCopy.clamp_top,
+              bpmem.triggerEFBCopy.clamp_bottom, bpmem.copyfilter.GetCoefficients());
       }
       else
       {
@@ -368,10 +382,11 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
                               PE_copy.clear, static_cast<u32>(PE_copy.gamma.Value()));
           GXCensus::OnFrame();
         }
-        g_texture_cache->CopyRenderTargetToTexture(
-            destAddr, EFBCopyFormat::XFB, copy_width, height, destStride, is_depth_copy, srcRect,
-            false, false, yScale, s_gammaLUT[PE_copy.gamma], bpmem.triggerEFBCopy.clamp_top,
-            bpmem.triggerEFBCopy.clamp_bottom, bpmem.copyfilter.GetCoefficients());
+        if (backend_copies)
+          g_texture_cache->CopyRenderTargetToTexture(
+              destAddr, EFBCopyFormat::XFB, copy_width, height, destStride, is_depth_copy, srcRect,
+              false, false, yScale, s_gammaLUT[PE_copy.gamma], bpmem.triggerEFBCopy.clamp_top,
+              bpmem.triggerEFBCopy.clamp_bottom, bpmem.copyfilter.GetCoefficients());
 
         auto& system = Core::System::GetInstance();
         XFTrace::Frame();
@@ -394,7 +409,7 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
         //       Might also clean up some issues with games doing XFB copies they don't intend to
         //       display.
 
-        if (g_ActiveConfig.bImmediateXFB)
+        if (backend_copies && g_ActiveConfig.bImmediateXFB)
         {
           // below div two to convert from bytes to pixels - it expects width, not stride
           g_presenter->ImmediateSwap(destAddr, destStride / 2, destStride, height);
@@ -411,7 +426,7 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
     }
 
     // Clear the rectangular region after copying it.
-    if (PE_copy.clear)
+    if (PE_copy.clear && backend_copies)
     {
       const bool color_enable = bpmem.blendmode.color_update != 0;
       const bool alpha_enable = bpmem.blendmode.alpha_update != 0;

@@ -24,6 +24,7 @@
 #include "Present.h"
 #include "VideoCommon/AbstractGfx.h"
 #include "VideoCommon/AsyncRequests.h"
+#include "VideoCommon/AuroraMirror.h"
 #include "VideoCommon/CameraWarp.h"
 #include "VideoCommon/ColosseumProjection.h"
 #include "VideoCommon/Fifo.h"
@@ -188,6 +189,28 @@ bool Presenter::FetchXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_heigh
 void Presenter::ViSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height, u64 ticks,
                        TimePoint presentation_time)
 {
+  // An in-process Aurora renderer presents each XFB copy itself: only count
+  // the field, as a new frame when the game copied one since the last.
+  if (AuroraMirror::NativeRendering())
+  {
+    const u64 copies = AuroraMirror::XfbCopies();
+    const bool duplicate = copies == m_native_xfb_copies;
+    m_native_xfb_copies = copies;
+    PresentInfo info{
+        .frame_count = duplicate ? m_frame_count - 1 : m_frame_count++,
+        .present_count = m_present_count++,
+        .reason = duplicate ? PresentInfo::PresentReason::VideoInterfaceDuplicate :
+                              PresentInfo::PresentReason::VideoInterface,
+        .emulated_timestamp = ticks,
+        .intended_present_time = presentation_time,
+    };
+    auto& events = GetVideoEvents();
+    events.before_present_event.Trigger(info);
+    if (!duplicate || !g_ActiveConfig.bSkipPresentingDuplicateXFBs)
+      events.after_present_event.Trigger(info);
+    return;
+  }
+
   bool is_duplicate = FetchXFB(xfb_addr, fb_width, fb_stride, fb_height, ticks);
 
   PresentInfo present_info{
