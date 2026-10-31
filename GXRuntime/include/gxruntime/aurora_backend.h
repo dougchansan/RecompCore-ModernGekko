@@ -5,6 +5,7 @@
 #include "gxruntime/platform.h"
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -37,6 +38,10 @@ typedef struct AuroraTextGlyph {
 } AuroraTextGlyph;
 typedef bool (*AuroraTextRasterizer)(const u32 words[5], u32 scale, AuroraTextGlyph* out);
 void aurora_backend_set_text_rasterizer(AuroraTextRasterizer rasterizer);
+
+/* Folders of replacement textures in Dolphin's layout (tex1_<w>x<h>_<hash>...
+ * .png/.dds, searched recursively); count 0 turns replacement off. */
+void aurora_backend_set_texture_pack(const char* const* dirs, size_t count);
 
 #ifdef __cplusplus
 }

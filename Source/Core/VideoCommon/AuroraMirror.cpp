@@ -10,13 +10,16 @@
 #include <string>
 #include <vector>
 
+#include "Common/FileUtil.h"
 #include "Common/Logging/Log.h"
 #include "Common/Swap.h"
+#include "Core/Config/ConfigManager.h"
 #include "Core/HW/Memmap.h"
 #include "Core/System.h"
 #include "VideoCommon/BPMemory.h"
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/ColosseumNativeText.h"
+#include "VideoCommon/HiresTextures.h"
 #include "VideoCommon/Present.h"
 #include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/XFMemory.h"
@@ -76,6 +79,8 @@ const bool s_native_requested = [] {
   return dll && *dll;
 }();
 Native s_native{};
+// Optional: replacement-texture folders for the renderer (Dolphin's layout).
+void (*s_set_texture_pack)(const char* const* dirs, size_t count) = nullptr;
 bool s_native_failed = false;
 bool s_draws_since_sync = false;  // GPU thread
 
@@ -143,6 +148,8 @@ bool NativeReady()
         [](u32 page) { return Core::System::GetInstance().GetMemory().WriteWatchRearm(page); }};
     write_watch(&api);
   }
+  s_set_texture_pack = reinterpret_cast<decltype(s_set_texture_pack)>(
+      symbol("aurora_native_set_texture_pack"));
   s_native = native;
   s_native_failed = false;
   NOTICE_LOG_FMT(VIDEO, "Aurora native: rendering with {}", path);
@@ -272,6 +279,28 @@ namespace
 {
 std::atomic<bool> s_resync{false};
 float s_sent_front_end_hor_plus = -1.0f;  // GPU thread
+int s_sent_hires_textures = -1;           // GPU thread
+
+// Dolphin's custom textures (Graphics > Advanced > Load Custom Textures) for the
+// native renderer: the same folders HiresTexture::Update searches.
+void SendTexturePack()
+{
+  const int enabled = g_ActiveConfig.bHiresTextures ? 1 : 0;
+  if (enabled == s_sent_hires_textures || !s_set_texture_pack || !NativeReady())
+    return;
+  s_sent_hires_textures = enabled;
+  std::vector<std::string> dirs;
+  if (enabled)
+  {
+    dirs = GetHiresTextureDirectoriesWithGameId(File::GetUserPath(D_HIRESTEXTURES_IDX),
+                                                SConfig::GetInstance().GetGameID());
+  }
+  std::vector<const char*> paths;
+  for (const std::string& dir : dirs)
+    paths.push_back(dir.c_str());
+  s_set_texture_pack(paths.data(), paths.size());
+  INFO_LOG_FMT(VIDEO, "Aurora native: {} texture-pack folder(s)", paths.size());
+}
 
 void Put8(u8 value)
 {
@@ -370,6 +399,7 @@ void Feed(const u8* data, u32 size)
     EmitState();
     s_sent_front_end_hor_plus = -1.0f;
   }
+  SendTexturePack();
   // The front-end's Hor+ multiplier, for the menu adjustments Dolphin's own
   // renderer makes (gxcore_draw.cpp): BP 0x6F, unused by GX, 12-bit fixed point.
   const float front_end_hor_plus = g_ActiveConfig.fColosseumFrontEndHorPlus;

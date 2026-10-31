@@ -87,6 +87,9 @@ void drop_host_texture(uint32_t address);
 // Output pixels per game pixel for a host texture (render target height / 480,
 // rounded up).
 uint32_t host_texture_scale();
+// Folders of replacement textures in Dolphin's naming (none = off), applied by
+// the render thread before its next draw. Any thread.
+void set_texture_pack(const char* const* dirs, size_t count);
 // Colosseum's front-end Hor+ multiplier while its menus are presented
 // widescreen, 0 otherwise: widens the menu backdrop, brings popup scissors into
 // the Hor+ layout and undoes the widening of offscreen model cameras.

@@ -4,6 +4,9 @@
 #include "../gx/gx.hpp" // UseReversedZ + set_logical_viewport (substrate glue)
 #include "texture.hpp"
 #include "tex_copy_conv.hpp" // EFB-copy format conversion (63/S16)
+#include "texture_replacement.hpp"
+
+#include <aurora/texture.hpp>
 
 #include <gxruntime/gxcore/gxcore.hpp> // EfbCopyCommand
 #include <gxruntime/gxcore/texture_decode.hpp>
@@ -13,6 +16,7 @@
 #include <absl/container/flat_hash_set.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <memory>
@@ -20,6 +24,8 @@
 #include <cstdlib>
 #include <utility>
 #include <cstring>
+#include <filesystem>
+#include <string>
 #include <mutex>
 #include <vector>
 
@@ -294,6 +300,43 @@ absl::flat_hash_map<uint32_t, TextureHandle> g_efbCopyTextures;
 // (write_host_texture): Colosseum's glyph texture, its glyphs drawn from a
 // host font at output resolution.
 absl::flat_hash_map<uint32_t, TextureHandle> g_hostTextures;
+
+// A texture pack in Dolphin's layout (tex1_<w>x<h>_<hash>..._<fmt>.png/.dds),
+// looked up when a guest texture is first decoded. set_texture_pack only queues
+// the folders: the registry resets Aurora's static texture cache, which is the
+// render thread's, so the render thread loads them before its next draw.
+std::mutex g_texturePackMutex;
+std::vector<std::string> g_texturePackPending;
+std::atomic<bool> g_texturePackChanged{false};
+std::vector<aurora::texture::ReplacementGroup> g_texturePackGroups;
+bool g_texturePackActive = false;
+// Replacement textures in the decode cache: shared with the registry's own
+// cache, so never rewritten in place when their guest address gets new content.
+absl::flat_hash_set<const TextureRef*> g_replacementTextures;
+
+void apply_texture_pack() {
+  if (!g_texturePackChanged.exchange(false))
+    return;
+  std::vector<std::string> dirs;
+  {
+    std::lock_guard lock(g_texturePackMutex);
+    dirs = g_texturePackPending;
+  }
+  for (const auto& group : g_texturePackGroups)
+    aurora::texture::unregister_replacements(group);
+  g_texturePackGroups.clear();
+  g_texturePackActive = false;
+  for (const auto& dir : dirs) {
+    auto group = aurora::texture::load_replacement_directory(std::filesystem::path{dir});
+    g_texturePackActive = g_texturePackActive || !group.registrations.empty();
+    g_texturePackGroups.push_back(std::move(group));
+  }
+  // Textures decoded before the change keep their old images otherwise.
+  g_textureCache.clear();
+  g_textureAddrKey.clear();
+  g_textureHashMemo.clear();
+  g_replacementTextures.clear();
+}
 
 // Colosseum's front-end menus, presented widescreen: the game lays their 2D out
 // Hor+ by this multiplier itself (0 when it is not). Three things it does not
@@ -634,7 +677,14 @@ void reset_texture_cache() {
   g_textureHashMemoFrame = UINT32_MAX;
   g_efbCopyTextures.clear();
   g_hostTextures.clear();
+  g_replacementTextures.clear();
   g_textureCacheStats = {};
+}
+
+void set_texture_pack(const char* const* dirs, size_t count) {
+  std::lock_guard lock(g_texturePackMutex);
+  g_texturePackPending.assign(dirs, dirs + count);
+  g_texturePackChanged = true;
 }
 
 void write_host_texture(uint32_t address, uint32_t width, uint32_t height, uint32_t x, uint32_t y,
@@ -770,6 +820,7 @@ void copy_efb_to_texture(const gxc::EfbCopyCommand& cmd) {
 // The texture bind group for a plan's texmaps (0 when untextured); false when a
 // referenced texmap does not resolve and the draw is not drawable.
 bool bind_plan_textures(const gxc::DrawPlan& plan, BindGroupRef* out) {
+  apply_texture_pack();
   // Resolve one texmap's texture to a GPU handle: EFB-copy shadow first, else the
   // guest-identity + content-hash decode cache. Shared by the single-texmap fast
   // path and the multi-texmap path (63/Mfin, e.g. THP YUV Y/U/V on texmap 0/1/2).
@@ -830,6 +881,20 @@ bool bind_plan_textures(const gxc::DrawPlan& plan, BindGroupRef* out) {
         if (addrIt->second.last_used_frame != frame)
           reusable = std::move(old->second);
         g_textureCache.erase(old);
+      }
+    }
+    if (reusable && g_replacementTextures.contains(reusable.get()))
+      reusable.reset();
+    if (g_texturePackActive) {
+      const bool ci = gxc::is_ci_format(format) && has_tlut;
+      if (auto replacement = texture_replacement::find_replacement(
+              format, width, height, bytes, size, ci ? static_cast<const uint8_t*>(tlut_data) : nullptr,
+              ci ? tlut_available : 0u);
+          replacement && *replacement) {
+        g_replacementTextures.insert(replacement->get());
+        g_textureCache.emplace(key, *replacement);
+        g_textureAddrKey[address] = AddrEntry{key, frame};
+        return *replacement;
       }
     }
     // gxcore owns the decode for every format: produce tightly-packed RGBA8 and

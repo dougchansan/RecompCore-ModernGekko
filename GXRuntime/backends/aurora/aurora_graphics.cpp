@@ -32,6 +32,7 @@ void write_host_texture(uint32_t address, uint32_t width, uint32_t height, uint3
 void drop_host_texture(uint32_t address);
 uint32_t host_texture_scale();
 void set_front_end_hor_plus(float hor_plus);
+void set_texture_pack(const char* const* dirs, size_t count);
 uint32_t interp_layers();
 void interp_set_active(uint32_t layers);
 bool interp_active();
@@ -1246,6 +1247,15 @@ void aurora_backend_set_text_rasterizer(AuroraTextRasterizer rasterizer) {
     gx_aurora::g_text_rasterizer = rasterizer;
 #else
     (void)rasterizer;
+#endif
+}
+
+void aurora_backend_set_texture_pack(const char* const* dirs, size_t count) {
+#if GXRUNTIME_HAS_AURORA_RECOMP
+    aurora::gfx::gxcore::set_texture_pack(dirs, count);
+#else
+    (void)dirs;
+    (void)count;
 #endif
 }
 

@@ -267,16 +267,17 @@ uint32_t texture_base_level_size(const GXTexObj_& obj) noexcept {
   }
 }
 
-std::optional<uint64_t> compute_referenced_tlut_hash(const GXTexObj_& obj, std::span<const uint8_t> tlutData) noexcept {
-  const uint32_t textureSize = texture_base_level_size(obj);
-  const auto* textureData = static_cast<const uint8_t*>(obj.data);
-  if (!is_palette_format(obj.format()) || !obj.has_data() || textureSize == 0 || tlutData.empty()) {
+// Dolphin's TLUT hash: only the palette entries the texels use.
+std::optional<uint64_t> compute_referenced_tlut_hash(uint32_t format, const uint8_t* textureData,
+                                                     uint32_t textureSize,
+                                                     std::span<const uint8_t> tlutData) noexcept {
+  if (!is_palette_format(format) || textureData == nullptr || textureSize == 0 || tlutData.empty()) {
     return std::nullopt;
   }
 
   uint32_t minIndex = 0xffff;
   uint32_t maxIndex = 0;
-  switch (obj.format()) {
+  switch (format) {
   case GX_TF_C4:
     for (uint32_t i = 0; i < textureSize; ++i) {
       const uint32_t lowNibble = textureData[i] & 0xf;
@@ -311,6 +312,14 @@ std::optional<uint64_t> compute_referenced_tlut_hash(const GXTexObj_& obj, std::
     return std::nullopt;
   }
   return XXH64(tlutData.data() + tlutOffset, tlutSize, 0);
+}
+
+std::optional<uint64_t> compute_referenced_tlut_hash(const GXTexObj_& obj, std::span<const uint8_t> tlutData) noexcept {
+  if (!obj.has_data()) {
+    return std::nullopt;
+  }
+  return compute_referenced_tlut_hash(obj.format(), static_cast<const uint8_t*>(obj.data),
+                                      texture_base_level_size(obj), tlutData);
 }
 
 std::optional<uint64_t> compute_referenced_tlut_hash(const GXTexObj_& obj) noexcept {
@@ -1244,6 +1253,40 @@ std::optional<TextureHandle> find_replacement(const GXTexObj_& obj, const GXTlut
 
   const auto sourceKey = build_source_key(obj, tlut);
   return find_source_replacement_locked(obj, sourceKey);
+}
+
+std::optional<TextureHandle> find_replacement(uint32_t format, uint32_t width, uint32_t height,
+                                              const uint8_t* data, uint32_t available, const uint8_t* tlut,
+                                              uint32_t tlutAvailable) noexcept {
+  ZoneScoped;
+
+  std::lock_guard lk(s_registryMutex);
+  if (s_sourceEntryCount == 0 || data == nullptr) {
+    return std::nullopt;
+  }
+  const uint32_t textureSize = GXGetTexBufferSize(width, height, format, false, 0);
+  if (textureSize == 0 || textureSize > available) {
+    return std::nullopt;
+  }
+  texture::TextureSourceKey key{
+      .textureHash = XXH64(data, textureSize, 0),
+      .width = width,
+      .height = height,
+      .format = format,
+      .hasTlut = is_palette_format(format),
+  };
+  if (key.hasTlut && tlut != nullptr) {
+    // The whole palette a format can address, as Dolphin reads it from TMEM.
+    const uint32_t paletteSize = format == GX_TF_C4 ? 32u : format == GX_TF_C8 ? 512u : 32768u;
+    key.tlutHash =
+        compute_referenced_tlut_hash(format, data, textureSize, {tlut, std::min(tlutAvailable, paletteSize)})
+            .value_or(0);
+  }
+  const auto replacementKey = find_source_replacement_key_locked(key);
+  if (!replacementKey.has_value()) {
+    return std::nullopt;
+  }
+  return find_replacement_for_key_locked(*replacementKey);
 }
 
 std::string build_texture_replacement_name(const GXTexObj_& obj) noexcept {
