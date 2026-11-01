@@ -1129,9 +1129,27 @@ void VertexManagerBase::OnEFBCopyToRAM()
 
 void VertexManagerBase::OnEndFrame()
 {
+  const u32 frame_draws = m_draw_counter;
   m_draw_counter = 0;
   m_last_efb_copy_draw_counter = 0;
   m_scheduled_command_buffer_kicks.clear();
+
+  // Frame interpolation presents the new frame's in-between layer at a fixed
+  // slot right after the frame completes: left in one command buffer, its
+  // rendering only started then and ran 3-6 ms past that present (battle, 120
+  // FPS), pushing it a refresh late. Kick every interval draws (by last frame's
+  // count), with or without CPU accesses, so the GPU renders alongside the FIFO.
+  const int interp_interval = g_ActiveConfig.iCommandBufferExecuteInterval;
+  const bool interp_kicks =
+      g_ActiveConfig.stereo_mode == StereoMode::FrameInterp && interp_interval > 0;
+  if (interp_kicks)
+  {
+    for (u32 draw = static_cast<u32>(interp_interval); draw < frame_draws;
+         draw += static_cast<u32>(interp_interval))
+    {
+      m_scheduled_command_buffer_kicks.push_back(draw);
+    }
+  }
 
   // If we have no CPU access at all, leave everything in the one command buffer for maximum
   // parallelism between CPU/GPU, at the cost of slightly higher latency.
@@ -1173,6 +1191,13 @@ void VertexManagerBase::OnEndFrame()
   }
 
   m_cpu_accesses_this_frame.clear();
+  if (interp_kicks)
+  {
+    // OnDraw binary-searches the kicks.
+    std::ranges::sort(m_scheduled_command_buffer_kicks);
+    const auto [first, last] = std::ranges::unique(m_scheduled_command_buffer_kicks);
+    m_scheduled_command_buffer_kicks.erase(first, last);
+  }
 
   // We invalidate the pipeline object at the start of the frame.
   // This is for the rare case where only a single pipeline configuration is used,

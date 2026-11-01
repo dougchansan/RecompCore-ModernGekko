@@ -188,6 +188,13 @@ private:
   TimePoint m_interp_grid{};
   // Wall-clock slot of the next game frame's first present.
   TimePoint m_interp_frame_end{};
+  // The last present slot locked to the display's refresh (LockToRefresh), or
+  // none while the present rate is not a whole number of refreshes.
+  TimePoint m_refresh_slot{};
+  // Its refresh lattice: a vblank (plus the present offset) and the period.
+  TimePoint m_refresh_origin{};
+  DT m_refresh_period{};
+  TimePoint LockToRefresh(TimePoint slot, DT step);
   // The on-screen UI has been rendered (Finalize) for the current ImGui frame;
   // in-between presents redraw it instead of rebuilding it.
   bool m_exclusive_fullscreen_applied = false;

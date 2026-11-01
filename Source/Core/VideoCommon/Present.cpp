@@ -9,6 +9,11 @@
 #include <cstdlib>
 #include <string>
 
+#ifdef _WIN32
+#include <Windows.h>
+#include <dwmapi.h>
+#endif
+
 #include "Common/ChunkFile.h"
 #include "Common/Timer.h"
 #include "Core/Config/GraphicsSettings.h"
@@ -296,6 +301,14 @@ void Presenter::ViSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height,
         m_interp_pending_xfb_id = m_last_xfb_id;
         m_interp_pending_info = present_info;
         m_interp_next_layer = 1;
+        // Locked to the refresh: start the new frame's rendering now instead of
+        // with its first present. Submitted with that present, it made the
+        // in-between frame finish 5-6 ms after presenting and show a refresh
+        // later than the real one (on screen 12.6 then 4.0 ms apart instead of
+        // 8.3, at 120 FPS on 240 Hz). Waiting for it to finish evened field
+        // further but slowed battles to ~53 FPS, so only submit.
+        if (m_refresh_slot != TimePoint{})
+          g_gfx->Flush();
         ServiceInterpPresents();
       }
       else if (order == "ba")
@@ -497,6 +510,87 @@ bool Presenter::InterpLayerAllowed()
   return true;
 }
 
+namespace
+{
+// The display's last vblank and refresh period, from DWM's composition timing
+// (Windows; dwmapi is loaded on first use). False when unavailable.
+bool QueryRefresh(TimePoint* vblank, DT* period)
+{
+#ifdef _WIN32
+  using Fn = HRESULT(WINAPI*)(HWND, DWM_TIMING_INFO*);
+  static const Fn get_timing = [] {
+    const HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
+    return dwm ? reinterpret_cast<Fn>(GetProcAddress(dwm, "DwmGetCompositionTimingInfo")) :
+                 nullptr;
+  }();
+  static const double qpc_frequency = [] {
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    return static_cast<double>(f.QuadPart);
+  }();
+  if (!get_timing)
+    return false;
+  DWM_TIMING_INFO info{};
+  info.cbSize = sizeof(info);
+  if (FAILED(get_timing(nullptr, &info)) || info.qpcRefreshPeriod == 0)
+    return false;
+  LARGE_INTEGER qpc_now;
+  QueryPerformanceCounter(&qpc_now);
+  const TimePoint now = Clock::now();
+  const auto qpc_to_dt = [](double ticks) {
+    return std::chrono::duration_cast<DT>(std::chrono::duration<double>(ticks / qpc_frequency));
+  };
+  *vblank = now - qpc_to_dt(static_cast<double>(qpc_now.QuadPart) -
+                            static_cast<double>(info.qpcVBlank));
+  *period = qpc_to_dt(static_cast<double>(info.qpcRefreshPeriod));
+  return true;
+#else
+  return false;
+#endif
+}
+}  // namespace
+
+TimePoint Presenter::LockToRefresh(TimePoint slot, DT step)
+{
+  // A wall-clock grid drifts against the display's refresh (the game's 59.94
+  // Hz against e.g. 240 Hz) and jitters by a fraction of a millisecond, so
+  // presents near a refresh boundary were shown for one refresh, then three
+  // (120 FPS on 240 Hz: ~75% of frames held the two they should). When the
+  // present rate is a whole number of refreshes, put each present just after a
+  // vblank, exactly that many refreshes after the last, and only slip a whole
+  // refresh once the grid has drifted most of one away.
+  TimePoint vblank;
+  DT period;
+  if (!QueryRefresh(&vblank, &period))
+    return slot;
+  const double refreshes = DT_ms(step).count() / DT_ms(period).count();
+  const double n = std::round(refreshes);
+  if (n < 1 || std::abs(refreshes - n) > 0.05 * n)
+  {
+    m_refresh_slot = {};
+    return slot;
+  }
+  // Just after a vblank: the present then has nearly a whole refresh to finish
+  // rendering before the compositor's next pass.
+  const TimePoint origin = vblank + std::chrono::microseconds(300);
+  m_refresh_origin = origin;
+  m_refresh_period = period;
+  const auto snap = [&](TimePoint t) {
+    const double k = std::round(DT_ms(t - origin).count() / DT_ms(period).count());
+    return origin + std::chrono::duration_cast<DT>(period * k);
+  };
+  TimePoint locked = snap(slot);
+  if (m_refresh_slot != TimePoint{})
+  {
+    const TimePoint next =
+        snap(m_refresh_slot + std::chrono::duration_cast<DT>(period * n));
+    if (std::chrono::abs(slot - next) < std::chrono::duration_cast<DT>(period * 0.75))
+      locked = next;
+  }
+  m_refresh_slot = locked;
+  return locked;
+}
+
 void Presenter::WaitForInterpSlot()
 {
   // Emulated time runs ahead in bursts and the frame limiter catches up later,
@@ -524,6 +618,7 @@ void Presenter::WaitForInterpSlot()
     // Late by more than a step, or far off: restart the grid here.
     m_interp_grid = now;
     m_interp_frame_end = now + remaining * step;
+    m_refresh_slot = {};
     ++g_interp_pace_stats.resyncs;
   }
   else if (m_interp_grid > now)
@@ -538,6 +633,19 @@ void Presenter::WaitForInterpSlot()
     ++g_interp_pace_stats.late_layer[layer];
     g_interp_pace_stats.late_max_ms =
         std::max(g_interp_pace_stats.late_max_ms, DT_ms(now - m_interp_grid).count());
+    if (m_refresh_slot != TimePoint{})
+    {
+      // Locked to the refresh, but the frame arrived after its slot (a frame's
+      // first present waits for the game): shown now, it would land at any
+      // point of a refresh. Take the refresh after next instead, which leaves
+      // the following frames some slack, and keep the lattice from there.
+      const double k = std::ceil(DT_ms(now + m_refresh_period / 2 - m_refresh_origin).count() /
+                                 DT_ms(m_refresh_period).count());
+      m_interp_grid =
+          m_refresh_origin + std::chrono::duration_cast<DT>(m_refresh_period * k);
+      m_refresh_slot = m_interp_grid;
+      timer.SleepUntil(m_interp_grid);
+    }
   }
   // A frame's first present fixes where the next frame starts (its slot plus n
   // steps), keeping the 60 Hz cadence. When a present runs late (usually that
@@ -546,7 +654,9 @@ void Presenter::WaitForInterpSlot()
   if (layer == 1)
     m_interp_frame_end = m_interp_grid + remaining * step;
   const TimePoint shown = std::max(now, m_interp_grid);
-  m_interp_grid = shown + std::max<DT>((m_interp_frame_end - shown) / remaining, step / 2);
+  // Locked here, not when sleeping: the waker (ArmInterpWaker) aims at this.
+  m_interp_grid = LockToRefresh(
+      shown + std::max<DT>((m_interp_frame_end - shown) / remaining, step / 2), step);
 }
 
 void Presenter::PresentInterpReal()
