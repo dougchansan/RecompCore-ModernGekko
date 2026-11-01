@@ -130,6 +130,7 @@ private:
   int m_config_sync_gpu_max_distance = 0;
   int m_config_sync_gpu_min_distance = 0;
   float m_config_sync_gpu_overclock = 0.0f;
+  bool m_config_speed_limited = true;  // MAIN_EMULATION_SPEED > 0
 
   Core::System& m_system;
 };

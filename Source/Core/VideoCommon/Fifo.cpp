@@ -23,6 +23,7 @@
 #include "Core/System.h"
 
 #include "VideoCommon/AsyncRequests.h"
+#include "VideoCommon/AuroraMirror.h"
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/CommandProcessor.h"
 #include "VideoCommon/DataReader.h"
@@ -50,6 +51,7 @@ void FifoManager::RefreshConfig()
   m_config_sync_gpu_max_distance = Config::Get(Config::MAIN_SYNC_GPU_MAX_DISTANCE);
   m_config_sync_gpu_min_distance = Config::Get(Config::MAIN_SYNC_GPU_MIN_DISTANCE);
   m_config_sync_gpu_overclock = Config::Get(Config::MAIN_SYNC_GPU_OVERCLOCK);
+  m_config_speed_limited = Config::Get(Config::MAIN_EMULATION_SPEED) > 0.0f;
 }
 
 void FifoManager::DoState(PointerWrap& p)
@@ -396,6 +398,14 @@ void FifoManager::RunGpuLoop()
           // Make sure VertexManager finishes drawing any primitives it has stored in it's buffer.
           g_vertex_manager->Flush();
           g_framebuffer_manager->RefreshPeekCache();
+
+          // Under an in-process Aurora renderer this thread only decodes: at a
+          // speed limit, sleep once the FIFO is drained instead of spinning
+          // (battle at real speed: Video thread 24% -> 12% of a core, the
+          // process 73% -> 62%). Uncapped, the CPU thread's wakeups of a
+          // sleeping loop cost ~6% FPS, so keep spinning there.
+          if (m_config_speed_limited && AuroraMirror::NativeRendering())
+            m_gpu_mainloop.AllowSleep();
         }
       },
       100);
