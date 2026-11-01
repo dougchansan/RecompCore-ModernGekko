@@ -458,12 +458,7 @@ void ResolveLoad(LoadRec rec, bool* flushed)
         std::vector<bool>& taken = s_key_taken[key];
         if (taken.size() != candidates.size())
           taken.assign(candidates.size(), false);
-        double best = 0;
-        size_t best_index = candidates.size();
-        for (size_t c = 0; c < candidates.size(); ++c)
-        {
-          if (taken[c])
-            continue;
+        const auto distance2 = [&](size_t c) {
           const u32* p = &s_prev_data[candidates[c]];
           // The whole matrix: a HUD box, its bar and its text share a
           // position and differ in scale.
@@ -473,12 +468,8 @@ void ResolveLoad(LoadRec rec, bool* flushed)
             const double delta = double(AsFloat(now_words[w])) - AsFloat(p[w]);
             d += delta * delta;
           }
-          if (best_index == candidates.size() || d < best)
-          {
-            best = d;
-            best_index = c;
-          }
-        }
+          return d;
+        };
         // When a sprite appears or goes (a highlight frame, a new digit) the
         // nearest unused load can still be a different sprite. Blend only a
         // close match - motion between frames is small next to the matrix
@@ -486,8 +477,36 @@ void ResolveLoad(LoadRec rec, bool* flushed)
         double norm = 0;
         for (int w = 0; w < 12; ++w)
           norm += double(AsFloat(now_words[w])) * AsFloat(now_words[w]);
-        if (best_index != candidates.size() &&
-            std::sqrt(best) <= 0.05 * std::sqrt(norm) + 0.5)
+        const double close = 0.05 * std::sqrt(norm) + 0.5;
+        // The load at the same place in the previous frame's order first: a
+        // skinned model (every Pokemon) loads one bone after another into the
+        // same slot, and neighbouring bones' matrices are nearly equal, so the
+        // nearest one was often the next bone's - the in-between frames bent a
+        // fin or an ear and Pokemon edges flickered at 120 / 240 FPS. Only
+        // when that load is not a close match (the order shifted) search.
+        size_t best_index = candidates.size();
+        if (use < candidates.size() && !taken[use] && std::sqrt(distance2(use)) <= close)
+        {
+          best_index = use;
+        }
+        else
+        {
+          double best = 0;
+          for (size_t c = 0; c < candidates.size(); ++c)
+          {
+            if (taken[c])
+              continue;
+            const double d = distance2(c);
+            if (best_index == candidates.size() || d < best)
+            {
+              best = d;
+              best_index = c;
+            }
+          }
+          if (best_index != candidates.size() && std::sqrt(best) > close)
+            best_index = candidates.size();
+        }
+        if (best_index != candidates.size())
         {
           taken[best_index] = true;
           prev = &s_prev_data[candidates[best_index]];
