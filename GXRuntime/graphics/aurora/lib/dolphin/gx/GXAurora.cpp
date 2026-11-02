@@ -38,6 +38,8 @@ void AuroraSetViewportPolicy(AuroraViewportPolicy policy) {
   aurora::window::set_frame_buffer_aspect_fit(policy == AURORA_VIEWPORT_FIT);
 }
 
+void AuroraSetFrameBufferAspect(float aspect) { aurora::window::set_frame_buffer_fit_aspect(aspect); }
+
 void AuroraGetRenderSize(u32* width, u32* height) {
   const auto windowSize = aurora::window::get_window_size();
   if (width != nullptr) {

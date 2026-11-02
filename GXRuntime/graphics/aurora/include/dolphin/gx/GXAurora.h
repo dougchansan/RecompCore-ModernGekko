@@ -126,6 +126,13 @@ typedef enum _AuroraViewportPolicy {
 void AuroraSetViewportPolicy(AuroraViewportPolicy policy);
 
 /**
+ * Under AURORA_VIEWPORT_STRETCH, fits the content framebuffer to this aspect ratio (width / height) inside the
+ * native surface instead of filling it, so a wide frame is letterboxed or pillarboxed rather than stretched to the
+ * window's shape. 0 (the default) fills the surface.
+ */
+void AuroraSetFrameBufferAspect(float aspect);
+
+/**
  * Retrieves the current content framebuffer size.
  */
 void AuroraGetRenderSize(u32* width, u32* height);

@@ -42,6 +42,9 @@ SDL_Window* g_window;
 SDL_Renderer* g_renderer;
 float g_frameBufferScale = 0.f;
 bool g_frameBufferAspectFit = false;
+// set_frame_buffer_fit_aspect: the aspect the content framebuffer is fitted to when it is not fitted to the
+// configured (logical) one; 0 fills the surface.
+float g_frameBufferFitAspect = 0.f;
 AuroraWindowSize g_windowSize;
 std::vector<AuroraEvent> g_events;
 std::atomic_bool g_backgrounded = false;
@@ -408,6 +411,10 @@ AuroraWindowSize get_window_size() {
       fb_w = fitW;
       fb_h = fitH;
     }
+  } else if (g_frameBufferFitAspect > 0.f) {
+    const auto [fitW, fitH] = fit_frame_buffer_to_aspect(fb_w, fb_h, g_frameBufferFitAspect);
+    fb_w = fitW;
+    fb_h = fitH;
   }
 
   const float scale = SDL_GetWindowDisplayScale(g_window);
@@ -519,6 +526,17 @@ void set_frame_buffer_aspect_fit(bool fit) {
   }
 
   g_frameBufferAspectFit = fit;
+  request_frame_buffer_resize();
+}
+
+void set_frame_buffer_fit_aspect(float aspect) {
+  if (!(aspect > 0.f)) {
+    aspect = 0.f;
+  }
+  if (g_frameBufferFitAspect == aspect) {
+    return;
+  }
+  g_frameBufferFitAspect = aspect;
   request_frame_buffer_resize();
 }
 
