@@ -847,8 +847,20 @@ bool bind_plan_textures(const gxc::DrawPlan& plan, BindGroupRef* out) {
       g_textureHashMemo.clear();
       g_textureHashMemoFrame = frame;
     }
-    TextureKey key{address,     tsize,        format,      width,
-                   height,      tlut_address, tlut_format, tlut_entries,
+    // The palette is part of a CI texture's identity only. A direct-color
+    // texture keyed with whatever TLUT the state last loaded got a new key
+    // each time draws alternated with CI ones, and the per-address eviction
+    // below then decoded and created a new GPU texture for nearly every draw
+    // (~230 a frame in Surf, ~100 ms of texture creation a frame).
+    const bool palettized = gxc::is_ci_format(format);
+    TextureKey key{address,
+                   tsize,
+                   format,
+                   width,
+                   height,
+                   palettized ? tlut_address : 0u,
+                   palettized ? tlut_format : 0u,
+                   palettized ? tlut_entries : 0u,
                    0};
     // Hash the actual source texels (+ TLUT for CI) so a content change under an
     // unchanged guest identity is a distinct cache entry — see TextureKey.
