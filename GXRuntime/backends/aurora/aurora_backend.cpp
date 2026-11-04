@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include "gxruntime/utf8_file.h"
 #include "aurora_backend_private.h"
 #include <aurora/aurora.h>
 #include <aurora/event.h>
@@ -209,6 +210,14 @@ bool dol_aurora_initialize(int argc, char** argv,
         backend_config->app_name != nullptr ? backend_config->app_name
                                             : defaults.app_name;
     config.desiredBackend = BACKEND_AUTO;
+    // Explicit paths allow cold-cache runtime verification without changing a
+    // player's existing preferences or shader caches.
+    static std::string user_path;
+    static std::string cache_path;
+    user_path = dol_utf8::environment("DOL_AURORA_USER_PATH");
+    cache_path = dol_utf8::environment("DOL_AURORA_CACHE_PATH");
+    config.userPath = user_path.empty() ? nullptr : user_path.c_str();
+    config.cachePath = cache_path.empty() ? nullptr : cache_path.c_str();
     config.vsync = backend_config->vsync;
     config.windowWidth = backend_config->window_width != 0
                              ? backend_config->window_width

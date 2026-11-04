@@ -256,7 +256,7 @@ if (AURORA_ENABLE_GX)
 
   if (AURORA_CACHE_USE_ZSTD)
     aurora_find_package_global(zstd CONFIG QUIET)
-    if (NOT TARGET zstd::libzstd)
+    if (NOT TARGET zstd::libzstd AND NOT CMAKE_DISABLE_FIND_PACKAGE_zstd)
       find_package(PkgConfig QUIET)
       if(PkgConfig_FOUND)
         pkg_check_modules(ZSTD libzstd IMPORTED_TARGET GLOBAL)

@@ -314,6 +314,7 @@ static GXRUNTIME_ALWAYS_INLINE void clear_matching_reservation(CPUState* cpu, u3
    query when lockstep is on. */
 #if (defined(__clang__) || defined(__GNUC__)) && defined(__x86_64__) && !defined(DOLRECOMP_NO_FASTMEM)
 #define DOLRECOMP_FASTMEM 1
+#define DOLRECOMP_FASTMEM_ALIAS_SAFE 1
 extern u8* g_dolrecomp_fm_base;
 extern u64 g_dolrecomp_fm_min;
 extern int g_dolrecomp_fm_queried;
@@ -324,28 +325,28 @@ void dolrecomp_fastmem_query(CPUState* cpu);
 #define DOLRECOMP_FM_PTR(addr) (g_dolrecomp_fm_base + (u32)(addr))
 
 static GXRUNTIME_ALWAYS_INLINE u64 dolrecomp_fm_ld64(const u8* p) {
-    u64 v; __asm__("movq %1, %0" : "=r"(v) : "m"(*(const u64*)p)); return v;
+    u64 v; __asm__ volatile("movq %1, %0" : "=r"(v) : "m"(*(const u64*)p)); return v;
 }
 static GXRUNTIME_ALWAYS_INLINE u32 dolrecomp_fm_ld32(const u8* p) {
-    u32 v; __asm__("movl %1, %0" : "=r"(v) : "m"(*(const u32*)p)); return v;
+    u32 v; __asm__ volatile("movl %1, %0" : "=r"(v) : "m"(*(const u32*)p)); return v;
 }
 static GXRUNTIME_ALWAYS_INLINE u32 dolrecomp_fm_ld16(const u8* p) {
-    u32 v; __asm__("movzwl %1, %0" : "=r"(v) : "m"(*(const u16*)p)); return v;
+    u32 v; __asm__ volatile("movzwl %1, %0" : "=r"(v) : "m"(*(const u16*)p)); return v;
 }
 static GXRUNTIME_ALWAYS_INLINE u32 dolrecomp_fm_ld8(const u8* p) {
-    u32 v; __asm__("movzbl %1, %0" : "=r"(v) : "m"(*(const u8*)p)); return v;
+    u32 v; __asm__ volatile("movzbl %1, %0" : "=r"(v) : "m"(*(const u8*)p)); return v;
 }
 static GXRUNTIME_ALWAYS_INLINE void dolrecomp_fm_st64(u8* p, u64 v) {
-    __asm__("movq %1, %0" : "=m"(*(u64*)p) : "r"(v));
+    __asm__ volatile("movq %1, %0" : "=m"(*(u64*)p) : "r"(v) : "memory");
 }
 static GXRUNTIME_ALWAYS_INLINE void dolrecomp_fm_st32(u8* p, u32 v) {
-    __asm__("movl %1, %0" : "=m"(*(u32*)p) : "r"(v));
+    __asm__ volatile("movl %1, %0" : "=m"(*(u32*)p) : "r"(v) : "memory");
 }
 static GXRUNTIME_ALWAYS_INLINE void dolrecomp_fm_st16(u8* p, u16 v) {
-    __asm__("movw %1, %0" : "=m"(*(u16*)p) : "r"(v));
+    __asm__ volatile("movw %1, %0" : "=m"(*(u16*)p) : "r"(v) : "memory");
 }
 static GXRUNTIME_ALWAYS_INLINE void dolrecomp_fm_st8(u8* p, u8 v) {
-    __asm__("movb %1, %0" : "=m"(*(u8*)p) : "q"(v));
+    __asm__ volatile("movb %1, %0" : "=m"(*(u8*)p) : "q"(v) : "memory");
 }
 #define DOLRECOMP_FM_MAYBE_QUERY(cpu) \
     do { if (__builtin_expect(!g_dolrecomp_fm_queried, 0)) dolrecomp_fastmem_query(cpu); } while (0)

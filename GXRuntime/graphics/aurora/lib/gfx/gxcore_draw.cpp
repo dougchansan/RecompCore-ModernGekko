@@ -327,7 +327,7 @@ void apply_texture_pack() {
   g_texturePackGroups.clear();
   g_texturePackActive = false;
   for (const auto& dir : dirs) {
-    auto group = aurora::texture::load_replacement_directory(std::filesystem::path{dir});
+    auto group = aurora::texture::load_replacement_directory(std::filesystem::path{reinterpret_cast<const char8_t*>(dir.c_str())});
     g_texturePackActive = g_texturePackActive || !group.registrations.empty();
     g_texturePackGroups.push_back(std::move(group));
   }
@@ -1452,6 +1452,16 @@ void emit_draw(const LoggedDraw& d, const gxc::VertexShaderConstants& constants)
 }  // namespace
 
 uint32_t interp_layers() { return g_interpLayers; }
+
+void interp_configure(uint32_t layers) {
+  layers = std::clamp(layers, 1u, 4u);
+  if (layers == g_interpLayers) return;
+  g_interpCur.clear();
+  g_interpPrev.clear();
+  g_interpCopyDests.clear();
+  g_interpLayers = g_interpActive = layers;
+}
+
 
 void interp_set_active(uint32_t layers) {
   g_interpActive = std::min(layers, g_interpLayers);

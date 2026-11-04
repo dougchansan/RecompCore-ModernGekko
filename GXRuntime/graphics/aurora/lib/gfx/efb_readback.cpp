@@ -72,6 +72,8 @@ void after_submit() noexcept {
   if (!g_requested.load(std::memory_order_acquire)) {
     return;
   }
+  wgpu::Buffer pendingBuffer;
+  uint64_t pendingByteSize = 0;
   {
     std::lock_guard lock{g_mutex};
     if (g_inFlight) {
@@ -142,13 +144,18 @@ void after_submit() noexcept {
     };
     const auto buffer = encoder.Finish(&CommandBufferDescriptor);
     webgpu::g_queue.Submit(1, &buffer);
-    g_buffer.MapAsync(wgpu::MapMode::Read, 0, byteSize,
-                      wgpu::CallbackMode::AllowSpontaneous,
-                      [](wgpu::MapAsyncStatus status, wgpu::StringView message) {
-                        complete_map(status, message);
-                      });
+    pendingBuffer = g_buffer;
+    pendingByteSize = byteSize;
+    g_requested.store(false, std::memory_order_release);
   }
-  g_requested.store(false, std::memory_order_release);
+  // AllowSpontaneous can invoke complete_map inline during registration.
+  // Release its mutex first, and retain the buffer locally because the
+  // callback may clear g_buffer before MapAsync returns.
+  pendingBuffer.MapAsync(wgpu::MapMode::Read, 0, pendingByteSize,
+                         wgpu::CallbackMode::AllowSpontaneous,
+                         [](wgpu::MapAsyncStatus status, wgpu::StringView message) {
+                           complete_map(status, message);
+                         });
 }
 
 bool take(const std::uint8_t** rgba, std::uint32_t* width,

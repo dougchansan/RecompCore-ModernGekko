@@ -117,6 +117,11 @@ target_include_directories(${MODULE_NAME} PRIVATE
   "${CMAKE_CURRENT_BINARY_DIR}")
 target_include_directories(${MODULE_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 
+option(RECOMPCORE_MODULE_NO_FASTMEM "Use checked inline memory access without a fault-backed view" OFF)
+if(RECOMPCORE_MODULE_NO_FASTMEM)
+  target_compile_definitions(${MODULE_NAME} PRIVATE DOLRECOMP_NO_FASTMEM=1)
+endif()
+
 if(NOT WIN32)
   target_link_libraries(${MODULE_NAME} PRIVATE m)
 endif()

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Host-backed GameCube DVD layer. See dvd.h.
 #include "gxruntime/dvd.h"
+#include "gxruntime/utf8_file.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -63,7 +64,7 @@ static bool name_matches(const char* path, const char* string) {
 // Image loading
 // ---------------------------------------------------------------------------
 static bool load_from(const char* path) {
-    FILE* f = fopen(path, "rb");
+    FILE* f = dol_utf8_fopen(path, "rb");
     if (!f)
         return false;
 

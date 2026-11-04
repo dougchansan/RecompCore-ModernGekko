@@ -13,12 +13,20 @@
 #include <SDL3/SDL_timer.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <span>
 #include <utility>
 #include <vector>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <dwmapi.h>
+#endif
 
 #if GXRUNTIME_HAS_AURORA_RECOMP
 // gxcore substrate submission lives in the Aurora fork (lib/gfx/gxcore_draw.cpp),
@@ -34,12 +42,84 @@ uint32_t host_texture_scale();
 void set_front_end_hor_plus(float hor_plus);
 void set_texture_pack(const char* const* dirs, size_t count);
 uint32_t interp_layers();
+void interp_configure(uint32_t layers);
 void interp_set_active(uint32_t layers);
 bool interp_active();
 void interp_replay(float t);
 void interp_finish_frame();
 } // namespace aurora::gfx::gxcore
 #endif
+
+namespace {
+using InterpClock = std::chrono::steady_clock;
+uint64_t g_interp_revision = 0;
+double g_interp_game_frame_seconds = 1001.0 / 60000.0;
+void interp_end_present() {
+    aurora_end_frame();
+    static const bool log = std::getenv("AURORA_PRESENT_INTERVALS") != nullptr;
+    if (!log) return;
+    static InterpClock::time_point previous;
+    static std::vector<double> intervals;
+    const auto now = InterpClock::now();
+    if (previous != InterpClock::time_point{}) {
+        const double ms = std::chrono::duration<double, std::milli>(now - previous).count();
+        if (ms < 100) intervals.push_back(ms);
+    }
+    previous = now;
+    if (intervals.size() == 240) {
+        double total = 0;
+        for (double ms : intervals) total += ms;
+        std::sort(intervals.begin(), intervals.end());
+        std::fprintf(stderr, "[host-present] n=240 mean=%.3f p50=%.3f p95=%.3f min=%.3f max=%.3f ms\n",
+                     total / 240, intervals[120], intervals[228], intervals.front(), intervals.back());
+        intervals.clear();
+    }
+}
+
+// Same compositor vblank lock as ModernGekko's Presenter. Resolve dynamically
+// so unsupported/headless hosts retain the monotonic-clock fallback.
+InterpClock::time_point interp_refresh_slot(InterpClock::time_point slot, InterpClock::duration step) {
+#ifdef _WIN32
+    using Fn = HRESULT(WINAPI*)(HWND, DWM_TIMING_INFO*);
+    static const Fn query = [] {
+        const HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
+        return dwm ? reinterpret_cast<Fn>(GetProcAddress(dwm, "DwmGetCompositionTimingInfo")) : nullptr;
+    }();
+    DWM_TIMING_INFO info{};
+    info.cbSize = sizeof(info);
+    LARGE_INTEGER frequency, counter;
+    if (query && SUCCEEDED(query(nullptr, &info)) && info.qpcRefreshPeriod &&
+        QueryPerformanceFrequency(&frequency) && QueryPerformanceCounter(&counter)) {
+        const auto duration = [&](double ticks) {
+            return std::chrono::duration_cast<InterpClock::duration>(
+                std::chrono::duration<double>(ticks / double(frequency.QuadPart)));
+        };
+        const auto period = duration(double(info.qpcRefreshPeriod));
+        const double refreshes = std::chrono::duration<double>(step).count() /
+                                 std::chrono::duration<double>(period).count();
+        const double n = std::round(refreshes);
+        if (n >= 1 && std::abs(refreshes - n) < 0.05 * n) {
+            const auto origin = InterpClock::now() - duration(double(counter.QuadPart) - double(info.qpcVBlank)) +
+                                std::chrono::microseconds(300);
+            const auto snap = [&](auto time) {
+                const double k = std::round(std::chrono::duration<double>(time - origin).count() /
+                                             std::chrono::duration<double>(period).count());
+                return origin + std::chrono::duration_cast<InterpClock::duration>(period * k);
+            };
+            static InterpClock::time_point previous;
+            auto locked = snap(slot);
+            const auto next = snap(previous + std::chrono::duration_cast<InterpClock::duration>(period * n));
+            if (previous != InterpClock::time_point{} && std::chrono::abs(slot - next) < period * 0.75)
+                locked = next;
+            previous = locked;
+            // Submit early enough for GPU rendering before that vblank.
+            return locked - std::chrono::microseconds(1000);
+        }
+    }
+#endif
+    return slot;
+}
+} // namespace
 
 namespace gx_aurora {
 
@@ -773,14 +853,30 @@ void aurora_backend_present(void) {
     // couple of seconds.
     if (aurora::gfx::gxcore::interp_layers() > 1) {
         using Clock = std::chrono::steady_clock;
-        constexpr double kFrame = 1.0 / 60.0;
+        const double kFrame = g_interp_game_frame_seconds;
         const uint32_t max_layers = aurora::gfx::gxcore::interp_layers();
         static uint32_t s_layers = max_layers;
+        static uint32_t s_requested = max_layers;
+        static uint64_t s_revision = g_interp_revision;
+        const bool mode_changed = s_requested != max_layers || s_revision != g_interp_revision;
+        if (mode_changed) {
+            s_revision = g_interp_revision;
+            s_requested = max_layers;
+            s_layers = max_layers;
+            aurora::gfx::gxcore::interp_set_active(s_layers);
+        }
         static Clock::time_point s_last_present;
         static double s_interval = kFrame;  // game frame interval (EMA)
         static double s_busy = 0;           // replay loop time, sleeps excluded (EMA)
         static int s_slow = 0, s_live_frames = 0;
+        if (mode_changed) {
+            s_interval = kFrame;
+            s_busy = 0;
+            s_slow = s_live_frames = 0;
+            s_last_present = {};
+        }
         const Clock::time_point start = Clock::now();
+        const auto step = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(kFrame / s_layers));
         if (s_last_present != Clock::time_point{}) {
             const double dt = std::chrono::duration<double>(start - s_last_present).count();
             if (dt < 0.25)
@@ -793,20 +889,25 @@ void aurora_backend_present(void) {
             double slept = 0;
             for (uint32_t layer = 1; layer < layers && gx_aurora::g_frame_open; ++layer) {
                 aurora::gfx::gxcore::interp_replay(static_cast<float>(layer) / static_cast<float>(layers));
-                aurora_end_frame();
-                gx_aurora::g_frame_open = aurora_begin_frame();
-                const Clock::time_point due =
-                    start + std::chrono::duration_cast<Clock::duration>(
-                                std::chrono::duration<double>(std::min(s_interval, kFrame) * layer / layers));
+                const Clock::time_point due = interp_refresh_slot(start + step * (layer - 1), step);
                 const Clock::time_point now = Clock::now();
                 if (due > now) {
                     SDL_DelayPrecise(static_cast<Uint64>(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(due - now).count()));
                     slept += std::chrono::duration<double>(Clock::now() - now).count();
                 }
+                interp_end_present();
+                gx_aurora::g_frame_open = aurora_begin_frame();
             }
-            if (gx_aurora::g_frame_open)
+            if (gx_aurora::g_frame_open) {
                 aurora::gfx::gxcore::interp_replay(1.f);
+                const auto due = interp_refresh_slot(start + step * (layers - 1), step);
+                const auto now = Clock::now();
+                if (due > now) {
+                    SDL_DelayPrecise(static_cast<Uint64>(std::chrono::duration_cast<std::chrono::nanoseconds>(due - now).count()));
+                    slept += std::chrono::duration<double>(Clock::now() - now).count();
+                }
+            }
             aurora::gfx::gxcore::interp_finish_frame();
             s_busy = s_busy * 0.8 +
                      (std::chrono::duration<double>(Clock::now() - start).count() - slept) * 0.2;
@@ -832,7 +933,7 @@ void aurora_backend_present(void) {
     }
 #endif
     if (gx_aurora::g_frame_open) {
-        aurora_end_frame();
+        interp_end_present();
         gx_aurora::g_frame_open = false;
     }
     ++gx_aurora::g_present_count;
@@ -1374,3 +1475,19 @@ void aurora_backend_configure_vi(u32 tv_mode, u16 fb_width, u16 efb_height,
 }
 
 } // extern "C"
+
+extern "C" void aurora_backend_set_frame_interpolation(uint32_t layers, uint32_t fields) {
+#if GXRUNTIME_HAS_AURORA_RECOMP
+    static uint32_t previous = 0, previous_fields = 0;
+    fields = std::clamp(fields, 1u, 2u);
+    if (previous != layers || previous_fields != fields) {
+        if (previous_fields != fields)
+            aurora::gfx::gxcore::interp_configure(1);  // cadence transition invalidates pairing
+        previous = layers;
+        previous_fields = fields;
+        g_interp_game_frame_seconds = fields * 1001.0 / 60000.0;
+        ++g_interp_revision;
+    }
+    aurora::gfx::gxcore::interp_configure(layers);
+#endif
+}

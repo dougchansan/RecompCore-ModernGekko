@@ -56,6 +56,17 @@ RECOMP_MODULE_EXPORT const StaticRecompModuleDesc* staticrecomp_get_module(void)
     return &s_desc;
 }
 
+// Optional capability: older ABI-compatible modules remain on checked memory
+// when their generated helpers do not preserve virtual-alias observations.
+RECOMP_MODULE_EXPORT u32 staticrecomp_memory_features_v1(void)
+{
+#ifdef DOLRECOMP_FASTMEM_ALIAS_SAFE
+    return 1u;
+#else
+    return 0u;
+#endif
+}
+
 RECOMP_MODULE_EXPORT int staticrecomp_is_nofallback_chunk_v2(u32 chunk_index)
 {
 #ifdef DOLRECOMP_CALL_GUARD_MANIFEST

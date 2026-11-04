@@ -742,7 +742,7 @@ static bool prepare_pipeline_cache_db() {
     return true;
   }
 
-  const auto path = fs_path_to_string(std::filesystem::path{g_config.cachePath} / "pipeline_cache.db");
+  const auto path = fs_path_to_string(std::filesystem::path{reinterpret_cast<const char8_t*>(g_config.cachePath)} / "pipeline_cache.db");
   auto ret = sqlite3_open(path.c_str(), &g_pipelineCacheDb);
   if (ret != SQLITE_OK) {
     Log.error("Failed to open pipeline cache database: {}", sqlite3_errmsg(g_pipelineCacheDb));
