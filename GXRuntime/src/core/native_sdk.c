@@ -943,6 +943,16 @@ int dolrecomp_native_msg_glyph_blit(CPUState *ctx) {
     s[5 * i] = 0x61;
     write_be32(s + 5 * i + 1, regs[i]);
   }
-  (void)dolrecomp_gx_emit(ctx, s, sizeof(s));
+  uint8_t **gp = g_dolrecomp_gather_pipe ? g_dolrecomp_gather_pipe : dolrecomp_gather_pipe_slow(ctx);
+  if (gp != (uint8_t **)1) {
+    (void)dolrecomp_gx_emit(ctx, s, sizeof(s));
+  } else if (ctx->external_write) {
+    // A host without a fast gather pipe (colosseum-standalone) takes the
+    // stores one at a time, as the game's own GX writes reach it.
+    for (int i = 0; i < 5; i++) {
+      ctx->external_write(ctx, DOLRECOMP_GATHER_PIPE_PAGE, 0x61u, 1);
+      ctx->external_write(ctx, DOLRECOMP_GATHER_PIPE_PAGE, regs[i], 4);
+    }
+  }
   return 0;
 }

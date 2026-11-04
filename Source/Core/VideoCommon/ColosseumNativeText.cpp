@@ -48,8 +48,9 @@ struct Font
   std::vector<unsigned char> data;
   stbtt_fontinfo info{};
   // MODERNGEKKO_NATIVE_TEXT_SIZE / 22. MS PGothic is narrower than the game
-  // font, so 26px fills the game's advance boxes where 22px looks letter-spaced.
-  float size_scale = 26.0f / 22.0f;
+  // font: 22px looks letter-spaced and 26px clips tall lines in the message
+  // boxes, so 24px is the default.
+  float size_scale = 24.0f / 22.0f;
 };
 Font s_font;
 
