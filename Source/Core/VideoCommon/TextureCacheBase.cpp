@@ -492,7 +492,12 @@ void TextureCacheBase::SerializeTexture(AbstractTexture* tex, const TextureConfi
   const bool skip_readback = p.IsMeasureMode();
   p.Do(config);
 
-  if (skip_readback || CheckReadbackTexture(config.width, config.height, config.format))
+  // ModernGekko: the texture's bytes are always reserved, so a texture that can't be read back
+  // (no staging texture: GPU memory ran short, or an unusual size or format) is saved as zeros
+  // and the state stays loadable. It used to raise a panic and write nothing after the config,
+  // which shifted every later field: the automatic recovery saves came out unloadable.
+  const bool readback_ok =
+      skip_readback || CheckReadbackTexture(config.width, config.height, config.format);
   {
     // First, measure the amount of memory needed.
     u32 total_size = 0;
@@ -522,7 +527,13 @@ void TextureCacheBase::SerializeTexture(AbstractTexture* tex, const TextureConfi
       return;
     }
 
-    if (!skip_readback)
+    if (!skip_readback && !readback_ok)
+    {
+      WARN_LOG_FMT(VIDEO, "No staging texture for a {}x{} texture (format {}): saved as zeros",
+                   config.width, config.height, static_cast<int>(config.format));
+      std::memset(texture_data, 0, total_size);
+    }
+    else if (!skip_readback)
     {
       // Save out each layer of the texture to the pointer.
       for (u32 layer = 0; layer < config.layers; layer++)
@@ -542,10 +553,6 @@ void TextureCacheBase::SerializeTexture(AbstractTexture* tex, const TextureConfi
         }
       }
     }
-  }
-  else
-  {
-    PanicAlertFmt("Failed to create staging texture for serialization");
   }
 }
 
